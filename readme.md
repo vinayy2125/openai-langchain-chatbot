@@ -12,7 +12,7 @@ This is a powerful chatbot web app built using **Streamlit**, **OpenAI APIs (Cha
 
 ---
 
-## 🛍️ Workflow Overview
+## Workflow Overview
 
 ```mermaid
 graph TD
