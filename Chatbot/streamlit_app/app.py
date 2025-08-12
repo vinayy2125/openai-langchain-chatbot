@@ -8,7 +8,7 @@ import json
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from streamlit_app.api_calls import start_new_chat, continue_chat
-from streamlit_app.session_store import load_sessions, save_session_metadata, SESSION_FILE
+from streamlit_app.session_store import load_sessions, save_session_metadata, load_chat_history_from_session, append_message_to_chat_history, SESSION_FILE
 from backend.chat_logic import get_answer_from_context  # ✅ Import patched function
 
 # --- Page Config ---
@@ -41,10 +41,7 @@ for session in st.session_state.chat_sessions:
             with st.spinner("Loading session..."):
                 st.session_state.session_id = session["session_id"]
                 try:
-                    st.session_state.chat_history = [
-                        ("user", entry["query"], "") if i % 2 == 0 else ("bot", entry["answer"], "")
-                        for i, entry in enumerate(session["history"])
-                    ]
+                    st.session_state.chat_history = load_chat_history_from_session(session)
                 except KeyError:
                     st.session_state.chat_history = []
                     st.error("⚠️ No history found for this session.")
@@ -78,14 +75,15 @@ with chat_container:
 user_input = st.chat_input("Send a message")
 if user_input:
     now = datetime.now().strftime("%I:%M %p")
-    st.session_state.chat_history.append(("user", user_input, now))
+    # Append user input to chat history
+    append_message_to_chat_history("user", user_input, st.session_state.chat_history)
 
     try:
-        # Call our new context+history-aware function
+        # Prepare plain history for your context function (ignore timestamps)
         plain_history = [(r, m) for r, m, _ in st.session_state.chat_history if r in ("user", "bot")]
         bot_msg, _ = get_answer_from_context(user_input, plain_history)
 
-        st.session_state.chat_history.append(("bot", bot_msg, now))
+        append_message_to_chat_history("bot", bot_msg, st.session_state.chat_history)
 
         # Save session data
         if st.session_state.session_id:
@@ -103,6 +101,6 @@ if user_input:
             st.session_state.chat_sessions = load_sessions()
 
     except Exception as e:
-        st.session_state.chat_history.append(("bot", f"⚠️ Unexpected Error: {str(e)}", now))
+        append_message_to_chat_history("bot", f"⚠️ Unexpected Error: {str(e)}", st.session_state.chat_history)
 
     st.rerun()

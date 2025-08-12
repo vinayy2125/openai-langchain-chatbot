@@ -42,5 +42,28 @@ def save_session_metadata(session_id: str, title: str, query: str, answer: str):
     with open(SESSION_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
+
+def load_chat_history_from_session(session):
+    """
+    Convert session['history'] (list of dicts with 'query' & 'answer') into
+    a flat list of (role, message, timestamp) tuples for Streamlit session_state.
+    """
+    chat_history = []
+    try:
+        for entry in session.get("history", []):
+            chat_history.append(("user", entry["query"], ""))
+            chat_history.append(("bot", entry["answer"], ""))
+    except KeyError:
+        chat_history = []
+    return chat_history
+
+
+def append_message_to_chat_history(role, message, chat_history):
+    """
+    Append a single message tuple (role, message, timestamp) to chat_history list.
+    """
+    timestamp = datetime.now().strftime("%H:%M")
+    chat_history.append((role, message, timestamp))
+
 def get_session_metadata():
     return load_sessions()
