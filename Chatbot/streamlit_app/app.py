@@ -3,13 +3,23 @@ import streamlit as st
 from datetime import datetime
 import sys
 import os
-import json
+import psycopg2
+import uuid  # Import uuid for generating session IDs
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from streamlit_app.api_calls import start_new_chat, continue_chat
-from streamlit_app.session_store import load_sessions, save_session_metadata, load_chat_history_from_session, append_message_to_chat_history, SESSION_FILE
+from streamlit_app.session_store import load_sessions, save_session_metadata, load_chat_history_from_session, append_message_to_chat_history
+from backend.api import save_message_to_db
+
 from backend.chat_logic import get_answer_from_context  # ✅ Import patched function
+
+# Database connection parameters
+DB_NAME = "chatbot_db"  # Replace with your actual database name
+DB_USER = "postgres"  # Replace with your actual database username
+DB_PASSWORD = "postgres"  # Replace with your actual database password
+DB_HOST = "localhost"  # Use localhost for local PostgreSQL server
+DB_PORT = 5432  # Correct port number for PostgreSQL
 
 # --- Page Config ---
 st.set_page_config(page_title="Chatbot", layout="wide", initial_sidebar_state="expanded")
@@ -36,27 +46,32 @@ for session in st.session_state.chat_sessions:
     col1, col2 = st.sidebar.columns([4, 1])
     with col1:
         truncated_title = session['title'][:20] + ("..." if len(session['title']) > 20 else "")
-        formatted_timestamp = datetime.fromisoformat(session['timestamp']).strftime("%b %d, %Y %I:%M %p") if session['timestamp'] != "NA" else "NA"
+        formatted_timestamp = datetime.fromisoformat(session['timestamp']).strftime("%b %d, %Y %I:%M %p")
         if st.button(f"🗂 {truncated_title} ({formatted_timestamp})", key=session["session_id"]):
             with st.spinner("Loading session..."):
                 st.session_state.session_id = session["session_id"]
-                try:
-                    st.session_state.chat_history = load_chat_history_from_session(session)
-                except KeyError:
-                    st.session_state.chat_history = []
-                    st.error("⚠️ No history found for this session.")
+                st.session_state.chat_history = load_chat_history_from_session(session)
                 st.rerun()
     with col2:
         delete_button = st.button("🗑️", key=f"delete_{session['session_id']}")
         if delete_button:
-            st.session_state.chat_sessions = [s for s in st.session_state.chat_sessions if s["session_id"] != session["session_id"]]
-            with open(SESSION_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if session["session_id"] in data:
-                del data[session["session_id"]]
-            with open(SESSION_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            st.rerun()
+            try:
+                conn = psycopg2.connect(
+                    dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT
+                )
+                cursor = conn.cursor()
+                # Delete messages and session from the database
+                cursor.execute("DELETE FROM messages WHERE session_id = %s", (session["session_id"],))
+                cursor.execute("DELETE FROM sessions WHERE session_id = %s", (session["session_id"],))
+                conn.commit()
+                cursor.close()
+                conn.close()
+
+                # Reload sessions after deletion
+                st.session_state.chat_sessions = load_sessions()
+                st.rerun()
+            except Exception as e:
+                st.error(f"⚠️ Failed to delete session: {str(e)}")
 
 # --- Main Chat Display ---
 st.markdown("<h1 style='text-align: center; color: #FF5C8D;'>🤖 Chat Bot</h1>", unsafe_allow_html=True)
@@ -87,13 +102,12 @@ if user_input:
 
         # Save session data
         if st.session_state.session_id:
-            save_session_metadata(
-                st.session_state.session_id,
-                st.session_state.chat_sessions[-1]['title'],
-                user_input, bot_msg
-            )
+            timestamp = datetime.now().isoformat()  # Define timestamp
+            save_message_to_db(st.session_state.session_id, "user", user_input, timestamp)
+            save_message_to_db(st.session_state.session_id, "bot", bot_msg, timestamp)
         else:
-            st.session_state.session_id = datetime.now().strftime("%Y%m%d%H%M%S")
+            st.session_state.session_id = str(uuid.uuid4())  # Generate a valid UUID for the new session
+            timestamp = datetime.now().isoformat()  # Define timestamp for new session
             save_session_metadata(
                 st.session_state.session_id,
                 user_input[:30], user_input, bot_msg

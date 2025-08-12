@@ -7,6 +7,8 @@ from backend.chat_logic import get_answer_from_context
 from backend.history import chat_sessions
 import json
 from datetime import datetime
+import psycopg2
+from database_setup import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 
 app = FastAPI()
 
@@ -18,6 +20,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # --- Pydantic Models ---
 class ChatRequest(BaseModel):
@@ -36,28 +39,68 @@ class HistoryResponse(BaseModel):
     messages: List[dict]
     
     
+# --- Helper Functions ---
+def save_session_to_db(session_id, title, timestamp):
+    conn = psycopg2.connect(
+        dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT
+    )
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO sessions (session_id, title, timestamp)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (session_id) DO UPDATE SET title = EXCLUDED.title, timestamp = EXCLUDED.timestamp
+        """,
+        (session_id, title, timestamp)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def save_message_to_db(session_id, role, message, timestamp):
+    conn = psycopg2.connect(
+        dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT
+    )
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO messages (session_id, role, message, timestamp)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (session_id, role, message, timestamp)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def get_chat_history_from_db(session_id):
+    conn = psycopg2.connect(
+        dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT
+    )
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT role, message, timestamp FROM messages WHERE session_id = %s ORDER BY id
+        """,
+        (session_id,)
+    )
+    history = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return history
+
+
 # --- API Routes ---
 @app.post("/chat/new", response_model=ChatResponse)
 def new_chat(req: ChatRequest):
     session_id = str(uuid4())
+    timestamp = datetime.now().isoformat()  # Ensure timestamp is defined
     answer, matched = get_answer_from_context(req.query, req.source_url)
-    chat_sessions[session_id] = [(req.query, answer)]
 
-    # Save the new session to chat_history.json
-    try:
-        with open("c:\\Users\\ditsd\\Project\\Chatbot\\session_data\\chat_history.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        data = {}
-
-    data[session_id] = {
-        "title": req.query[:30],
-        "timestamp": datetime.now().isoformat(),  # Add timestamp here
-        "history": [{"query": req.query, "answer": answer}]
-    }
-
-    with open("c:\\Users\\ditsd\\Project\\Chatbot\\session_data\\chat_history.json", "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    # Save session and first message to the database
+    save_session_to_db(session_id, req.query[:30], timestamp)
+    save_message_to_db(session_id, "user", req.query, timestamp)
+    save_message_to_db(session_id, "bot", answer, timestamp)
 
     return ChatResponse(
         session_id=session_id,
@@ -68,41 +111,33 @@ def new_chat(req: ChatRequest):
 
 
 @app.post("/chat/continue", response_model=ChatResponse)
-def continue_chat(req:ChatRequest):
+def continue_chat(req: ChatRequest):
     if req.session_id not in chat_sessions:
-        print(f"DEBUG: Available session IDs: {list(chat_sessions.keys())}")  # Log all session IDs
-        print(f"DEBUG: Requested session ID: {req.session_id}")  # Log the requested session ID
         raise HTTPException(status_code=404, detail="Session not found")
+
     answer, matched = get_answer_from_context(req.query)
-    chat_sessions[req.session_id].append((req.query, answer))
+    timestamp = datetime.now().isoformat()  # Ensure timestamp is defined
 
-    # Update the session in chat_history.json
-    try:
-        with open("c:\\Users\\ditsd\\Project\\Chatbot\\session_data\\chat_history.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        data = {}
-
-    if req.session_id in data:
-        data[req.session_id]["history"].append({"query": req.query, "answer": answer})
-
-    with open("c:\\Users\\ditsd\\Project\\Chatbot\\session_data\\chat_history.json", "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    # Save new messages to the database
+    save_message_to_db(req.session_id, "user", req.query, timestamp)
+    save_message_to_db(req.session_id, "bot", answer, timestamp)
 
     return ChatResponse(
         session_id=req.session_id,
         answer=answer,
         matched=matched
     )
-    
-    
+
+
 @app.get("/chat/history/{session_id}", response_model=HistoryResponse)
 def get_history(session_id: str):
-    if session_id not in chat_sessions:
+    history = get_chat_history_from_db(session_id)
+    if not history:
         raise HTTPException(status_code=404, detail="Session not found")
+
     return HistoryResponse(
         session_id=session_id,
-        messages=[{"query": q, "answer": a} for q, a in chat_sessions[session_id]]
+        messages=[{"role": role, "message": message, "timestamp": timestamp} for role, message, timestamp in history]
     )
     
     

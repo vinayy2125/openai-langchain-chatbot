@@ -1,62 +1,95 @@
-import os
-import json
 from datetime import datetime
+import psycopg2
+import uuid
 
-SESSION_FILE = "session_data/chat_history.json"
-
-os.makedirs(os.path.dirname(SESSION_FILE), exist_ok=True)
+DB_NAME = "chatbot_db"
+DB_USER = "postgres"
+DB_PASSWORD = "postgres"
+DB_HOST = "localhost"
+DB_PORT = "5432"
 
 def load_sessions():
-    if os.path.exists(SESSION_FILE):
-        with open(SESSION_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            # Ensure data is a dictionary
-            if not isinstance(data, dict):
-                data = {}
-            return [
-                {
-                    "session_id": key,
-                    "title": value.get("title", key),  # Use title if available, else fallback to session_id
-                    "timestamp": datetime.now().isoformat(),  # Only here!
-                    "history": value.get("history", [])  # Include history in the session metadata
-                } for key, value in data.items()
-            ]
-    return []
+    conn = psycopg2.connect(
+        dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT
+    )
+    cursor = conn.cursor()
+    cursor.execute("SELECT session_id, title, timestamp FROM sessions")
+    sessions = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "session_id": session_id,
+            "title": title,
+            "timestamp": timestamp.isoformat(),
+            "history": get_chat_history(session_id)
+        }
+        for session_id, title, timestamp in sessions
+    ]
 
 def save_session_metadata(session_id: str, title: str, query: str, answer: str):
-    if os.path.exists(SESSION_FILE):
-        with open(SESSION_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            # Ensure data is a dictionary
-            if not isinstance(data, dict):
-                data = {}
-    else:
-        data = {}
+    try:
+        # Validate session_id as a UUID
+        session_id = str(uuid.UUID(session_id))
+    except (ValueError, TypeError):
+        # Generate a new UUID if validation fails
+        session_id = str(uuid.uuid4())
 
-    if session_id not in data:
-        data[session_id] = {"title": title, "history": []}  # Save title and initialize history
+    conn = psycopg2.connect(
+        dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT
+    )
+    cursor = conn.cursor()
 
-    # Append the new query and answer to the session's history
-    data[session_id]["history"].append({"query": query, "answer": answer})
+    # Save session metadata
+    cursor.execute(
+        """
+        INSERT INTO sessions (session_id, title, timestamp)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (session_id) DO UPDATE SET title = EXCLUDED.title, timestamp = EXCLUDED.timestamp
+        """,
+        (session_id, title)
+    )
 
-    with open(SESSION_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    # Save chat history
+    cursor.execute(
+        """
+        INSERT INTO messages (session_id, role, message, timestamp)
+        VALUES (%s, %s, %s, NOW())
+        """,
+        (session_id, "user", query)
+    )
+    cursor.execute(
+        """
+        INSERT INTO messages (session_id, role, message, timestamp)
+        VALUES (%s, %s, %s, NOW())
+        """,
+        (session_id, "bot", answer)
+    )
 
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 def load_chat_history_from_session(session):
     """
     Convert session['history'] (list of dicts with 'query' & 'answer') into
     a flat list of (role, message, timestamp) tuples for Streamlit session_state.
     """
-    chat_history = []
-    try:
-        for entry in session.get("history", []):
-            chat_history.append(("user", entry["query"], ""))
-            chat_history.append(("bot", entry["answer"], ""))
-    except KeyError:
-        chat_history = []
-    return chat_history
+    return get_chat_history(session["session_id"])
 
+def get_chat_history(session_id):
+    conn = psycopg2.connect(
+        dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT
+    )
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT role, message, timestamp FROM messages WHERE session_id = %s ORDER BY id
+        """,
+        (session_id,)
+    )
+    history = cursor.fetchall()
+    conn.close()
+    return [(role, message, timestamp.strftime("%H:%M")) for role, message, timestamp in history]
 
 def append_message_to_chat_history(role, message, chat_history):
     """
@@ -64,6 +97,3 @@ def append_message_to_chat_history(role, message, chat_history):
     """
     timestamp = datetime.now().strftime("%H:%M")
     chat_history.append((role, message, timestamp))
-
-def get_session_metadata():
-    return load_sessions()
