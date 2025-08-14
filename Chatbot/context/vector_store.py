@@ -2,13 +2,16 @@ import importlib.util
 import os
 import requests
 
-# Dynamically load scraper.py
+import sys, os
+sys.path.append(os.path.abspath(".."))
+
+# #Dynamically load scraper.py
 # scraper_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'crawler', 'scraper.py'))
 # spec = importlib.util.spec_from_file_location("scraper", scraper_path)
 # scraper = importlib.util.module_from_spec(spec)
 # spec.loader.exec_module(scraper)
 
-# Get the function
+# #Get the function
 # scrape_website_recursive = scraper.scrape_website_recursive
 
 # chunker_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "chunking", "chunk_generator.py"))
@@ -18,15 +21,15 @@ import requests
 
 # chunk_text = chunker.chunk_text
 
-from crawler.scraper import scrape_website_recursive
-from chunking.chunk_generator import chunk_text
-
 from dotenv import load_dotenv
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import OpenAIEmbeddings
 from langchain.docstore.document import Document
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
+
+from crawler.scraper import scrape_website_recursive
+from chunking.chunk_generator import chunk_text
 
 
 
@@ -44,7 +47,7 @@ URLS = [
 ]
 
 # --- Full Site Crawler ---
-def scrape_website_recursive(start_url: str, max_pages: int = 150, max_depth: int = 3) -> dict:
+def scrape_website_recursive(start_url: str, max_pages: int = 150, max_depth: int = 20) -> dict:
     """
     Crawl a website starting from `start_url` and return a dict of {url: text_content}.
     """
@@ -88,18 +91,18 @@ def scrape_website_recursive(start_url: str, max_pages: int = 150, max_depth: in
 # --- Build and Save FAISS Index ---
 def build_vectorstore(urls):
     documents = []
-    
+
     for url in urls:
         pages = scrape_website_recursive(url, max_pages=50, max_depth=3)
         for page_url, page_text in pages.items():
             if page_text:
                 chunks = chunk_text(page_text)
-                for chunk in chunks:
+                for i, chunk in enumerate(chunks):
                     documents.append(Document(
                         page_content=chunk,
-                        metadata={"source": page_url}  # Store exact page URL
+                        metadata={"source": page_url, "chunk_index": i}  # Add chunk index for better traceability
                     ))
-                
+
     if not documents:
         print("No documents found to index.")
         return

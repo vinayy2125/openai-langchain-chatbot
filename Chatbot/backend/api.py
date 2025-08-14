@@ -3,9 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from uuid import uuid4
-from backend.chat_logic import get_answer_from_context
+from backend.chat_logic import build_chatbot_response
 from backend.history import chat_sessions
-import json
 from datetime import datetime
 import psycopg2
 from database_setup import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
@@ -95,7 +94,7 @@ def get_chat_history_from_db(session_id):
 def new_chat(req: ChatRequest):
     session_id = str(uuid4())
     timestamp = datetime.now().isoformat()  # Ensure timestamp is defined
-    answer, matched = get_answer_from_context(req.query, req.source_url)
+    answer, matched = build_chatbot_response(req.query, [])
 
     # Save session and first message to the database
     save_session_to_db(session_id, req.query[:30], timestamp)
@@ -115,7 +114,7 @@ def continue_chat(req: ChatRequest):
     if req.session_id not in chat_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    answer, matched = get_answer_from_context(req.query)
+    answer, matched = build_chatbot_response(req.query)
     timestamp = datetime.now().isoformat()  # Ensure timestamp is defined
 
     # Save new messages to the database

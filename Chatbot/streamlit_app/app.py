@@ -8,11 +8,10 @@ import uuid  # Import uuid for generating session IDs
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from streamlit_app.api_calls import start_new_chat, continue_chat
 from streamlit_app.session_store import load_sessions, save_session_metadata, load_chat_history_from_session, append_message_to_chat_history
 from backend.api import save_message_to_db
 
-from backend.chat_logic import get_answer_from_context  # ✅ Import patched function
+from backend.chat_logic import build_chatbot_response # ✅ Import patched function
 
 # Database connection parameters
 DB_NAME = "chatbot_db"  # Replace with your actual database name
@@ -67,6 +66,11 @@ for session in st.session_state.chat_sessions:
                 cursor.close()
                 conn.close()
 
+                # Clear active session if it matches the deleted session
+                if st.session_state.session_id == session["session_id"]:
+                    st.session_state.session_id = None
+                    st.session_state.chat_history = []
+
                 # Reload sessions after deletion
                 st.session_state.chat_sessions = load_sessions()
                 st.rerun()
@@ -95,10 +99,11 @@ if user_input:
 
     try:
         # Prepare plain history for your context function (ignore timestamps)
+        # NEW
         plain_history = [(r, m) for r, m, _ in st.session_state.chat_history if r in ("user", "bot")]
-        bot_msg, _ = get_answer_from_context(user_input, plain_history)
+        bot_msg, _ = build_chatbot_response(user_input, plain_history)
+        st.session_state.chat_history.append(("bot", bot_msg, now))
 
-        append_message_to_chat_history("bot", bot_msg, st.session_state.chat_history)
 
         # Save session data
         if st.session_state.session_id:
