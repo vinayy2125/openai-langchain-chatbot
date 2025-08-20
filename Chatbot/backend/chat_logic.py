@@ -15,13 +15,20 @@ def build_chatbot_response(query: str, chat_history: list):
     """
     # Step 1: Retrieve relevant docs
     docs = retriever.get_relevant_documents(query)
+
+    # Debug: Log retrieved documents
+    print(f"[DEBUG] Retrieved documents: {docs}")
+
     context_text = "\n\n".join(doc.page_content for doc in docs)
+
+    # Debug: Log constructed context
+    print(f"[DEBUG] Constructed context: {context_text}")
 
     # Step 2: If no context found, block LLM call
     if not context_text.strip():
         return (
-            "No relevant content found. Please visit the website directly."
-            "[DITS](https://www.ditstek.com).",,
+            "No relevant content found. Please visit the website directly"
+            "[DITS](https://www.ditstek.com).",
             True
         )
 

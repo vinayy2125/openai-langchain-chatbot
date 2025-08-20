@@ -5,21 +5,21 @@ import requests
 import sys, os
 sys.path.append(os.path.abspath(".."))
 
-# #Dynamically load scraper.py
-# scraper_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'crawler', 'scraper.py'))
-# spec = importlib.util.spec_from_file_location("scraper", scraper_path)
-# scraper = importlib.util.module_from_spec(spec)
-# spec.loader.exec_module(scraper)
+#Dynamically load scraper.py
+scraper_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'crawler', 'scraper.py'))
+spec = importlib.util.spec_from_file_location("scraper", scraper_path)
+scraper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(scraper)
 
-# #Get the function
-# scrape_website_recursive = scraper.scrape_website_recursive
+#Get the function
+scrape_website_recursive = scraper.scrape_website_recursive
 
-# chunker_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "chunking", "chunk_generator.py"))
-# spec = importlib.util.spec_from_file_location("chunker", chunker_path)
-# chunker = importlib.util.module_from_spec(spec)
-# spec.loader.exec_module(chunker)
+chunker_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "chunking", "chunk_generator.py"))
+spec = importlib.util.spec_from_file_location("chunker", chunker_path)
+chunker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(chunker)
 
-# chunk_text = chunker.chunk_text
+chunk_text = chunker.chunk_text
 
 from dotenv import load_dotenv
 from langchain_community.vectorstores import FAISS
@@ -47,7 +47,7 @@ URLS = [
 ]
 
 # --- Full Site Crawler ---
-def scrape_website_recursive(start_url: str, max_pages: int = 150, max_depth: int = 20) -> dict:
+def scrape_website_recursive(start_url: str, max_pages: int = 1500, max_depth: int = 500) -> dict:
     """
     Crawl a website starting from `start_url` and return a dict of {url: text_content}.
     """
@@ -55,14 +55,16 @@ def scrape_website_recursive(start_url: str, max_pages: int = 150, max_depth: in
     to_visit = [(start_url, 0)]
     scraped_data = {}
 
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+
     while to_visit and len(visited) < max_pages:
         url, depth = to_visit.pop(0)
 
         if url in visited or depth > max_depth:
             continue
-        
+
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
         except Exception as e:
             print(f"❌ Failed to fetch {url}: {e}")
@@ -71,11 +73,12 @@ def scrape_website_recursive(start_url: str, max_pages: int = 150, max_depth: in
         soup = BeautifulSoup(response.text, 'html.parser')
 
         # Remove non-content elements
-        for tag in soup(["script", "style", "noscript"]):
+        for tag in soup(["script", "style", "noscript", "iframe"]):
             tag.decompose()
 
         text = soup.get_text(separator=' ', strip=True)
-        scraped_data[url] = text
+        if text:
+            scraped_data[url] = text
         visited.add(url)
         print(f"✅ Crawled: {url}")
 
@@ -83,8 +86,17 @@ def scrape_website_recursive(start_url: str, max_pages: int = 150, max_depth: in
         base_domain = urlparse(start_url).netloc
         for link_tag in soup.find_all("a", href=True):
             link = urljoin(url, link_tag["href"])
-            if urlparse(link).netloc == base_domain and link not in visited:
+            if urlparse(link).netloc == base_domain and link not in visited and link not in [l[0] for l in to_visit]:
                 to_visit.append((link, depth + 1))
+
+    # Debug: Log the number of pages scraped
+    print(f"[DEBUG] Total pages scraped: {len(scraped_data)}")
+
+    # Debug: Log the first few URLs and their content
+    for i, (url, content) in enumerate(scraped_data.items()):
+        print(f"[DEBUG] Page {i+1}: {url}\nContent: {content[:200]}...")
+        if i >= 2:  # Limit to first 3 pages for debugging
+            break
 
     return scraped_data
 
