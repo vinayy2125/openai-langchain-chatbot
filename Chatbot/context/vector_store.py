@@ -35,6 +35,10 @@ from chunking.chunk_generator import chunk_text
 
 load_dotenv()
 
+# api_key = os.getenv('OPENAI_API_KEY')
+# if not api_key:
+#     raise ValueError("API_KEY not found in .env file")
+
 
 # Config
 INDEX_DIR = "vectorstore/faiss_index"
@@ -47,7 +51,7 @@ URLS = [
 ]
 
 # --- Full Site Crawler ---
-def scrape_website_recursive(start_url: str, max_pages: int = 1500, max_depth: int = 500) -> dict:
+def scrape_website_recursive(start_url: str, max_pages: int = 1500, max_depth: int = 300) -> dict:
     """
     Crawl a website starting from `start_url` and return a dict of {url: text_content}.
     """
@@ -105,7 +109,7 @@ def build_vectorstore(urls):
     documents = []
 
     for url in urls:
-        pages = scrape_website_recursive(url, max_pages=50, max_depth=3)
+        pages = scrape_website_recursive(url, max_pages=1500, max_depth=300)
         for page_url, page_text in pages.items():
             if page_text:
                 chunks = chunk_text(page_text)

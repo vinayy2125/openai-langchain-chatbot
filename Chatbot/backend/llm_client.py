@@ -109,18 +109,6 @@ def call_llm_with_retrieval_and_search(query: str, history: str, retriever, conf
 
     return final_answer
 
-def test_google_search():
-    """
-    Test the Google search functionality.
-    """
-    query = "Who is Ambani?"
-    print("Testing Google Search...")
-    try:
-        results = perform_google_search(query, num_results=3)
-        print("Search Results:")
-        print(results)
-    except Exception as e:
-        print(f"Error during search: {e}")
 
 # Run the test function
 if __name__ == "__main__":
