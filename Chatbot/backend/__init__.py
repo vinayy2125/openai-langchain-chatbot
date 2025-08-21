@@ -1,1 +1,2 @@
-from backend.chat_logic import build_chatbot_response # ✅ Import patched function
+from dotenv import load_dotenv
+load_dotenv()

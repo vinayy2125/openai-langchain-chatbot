@@ -1,132 +1,119 @@
-import importlib.util
 import os
-import requests
+import asyncio
+import importlib.util
+from typing import Dict, List
 
-import sys, os
-sys.path.append(os.path.abspath(".."))
+from dotenv import load_dotenv
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain.docstore.document import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-#Dynamically load scraper.py
+
+# -------------------------------
+# Dynamic imports for project layout
+# -------------------------------
+# scraper.py (should expose: async def scrape_website_recursive(start_url, ...))
 scraper_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'crawler', 'scraper.py'))
 spec = importlib.util.spec_from_file_location("scraper", scraper_path)
 scraper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scraper)
+scrape_website_recursive = getattr(scraper, "scrape_website_recursive")
 
-#Get the function
-scrape_website_recursive = scraper.scrape_website_recursive
-
-chunker_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "chunking", "chunk_generator.py"))
-spec = importlib.util.spec_from_file_location("chunker", chunker_path)
-chunker = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(chunker)
-
-chunk_text = chunker.chunk_text
-
-from dotenv import load_dotenv
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import OpenAIEmbeddings
-from langchain.docstore.document import Document
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
-
-from crawler.scraper import scrape_website_recursive
-from chunking.chunk_generator import chunk_text
+# chunker (optional if you have a custom one; we’ll use LangChain splitter here)
+# If you prefer your custom chunker, import and use it instead of RecursiveCharacterTextSplitter.
 
 
-
-load_dotenv()
-
-# api_key = os.getenv('OPENAI_API_KEY')
-# if not api_key:
-#     raise ValueError("API_KEY not found in .env file")
-
-
+# -------------------------------
 # Config
-INDEX_DIR = "vectorstore/faiss_index"
+# -------------------------------
+load_dotenv()
+INDEX_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "vectorstore", "faiss_index"))
+os.makedirs(os.path.dirname(INDEX_DIR), exist_ok=True)
 embedding_model = OpenAIEmbeddings()
 
-# Example URLs to crawl
+# default start URLs
 URLS = [
     "https://www.ditstek.com/",
-    # Add more URLs as needed
 ]
 
-# --- Full Site Crawler ---
-def scrape_website_recursive(start_url: str, max_pages: int = 1500, max_depth: int = 300) -> dict:
-    """
-    Crawl a website starting from `start_url` and return a dict of {url: text_content}.
-    """
-    visited = set()
-    to_visit = [(start_url, 0)]
-    scraped_data = {}
 
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+# -------------------------------
+# Helper: load extra URLs from project root
+# -------------------------------
+def load_extra_urls(file_name: str = "urls.txt") -> List[str]:
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    file_path = os.path.join(project_root, file_name)
+    if os.path.exists(file_path):
+        with open(file_path, "r", encoding="utf-8") as f:
+            urls = [line.strip() for line in f if line.strip()]
+        print(f"📄 Loaded {len(urls)} extra URLs from {file_path}")
+        return urls
+    print(f"⚠️ urls.txt not found at {file_path} — continuing without extra URLs")
+    return []
 
-    while to_visit and len(visited) < max_pages:
-        url, depth = to_visit.pop(0)
 
-        if url in visited or depth > max_depth:
-            continue
+# -------------------------------
+# Crawl one start URL (handles async scraper)
+# -------------------------------
+def crawl_start_url(start_url: str, max_pages: int = 300, max_depth: int = 5) -> Dict[str, str]:
+    """Runs async scraper even if we’re in a sync context."""
+    if asyncio.iscoroutinefunction(scrape_website_recursive):
+        return asyncio.run(scrape_website_recursive(start_url, max_pages=max_pages, max_depth=max_depth))
+    # If your scraper is synchronous (older version), call directly:
+    return scrape_website_recursive(start_url, max_pages=max_pages, max_depth=max_depth)
 
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-        except Exception as e:
-            print(f"❌ Failed to fetch {url}: {e}")
-            continue
 
-        soup = BeautifulSoup(response.text, 'html.parser')
+# -------------------------------
+# Build & Save FAISS Index
+# -------------------------------
+def build_vectorstore(auto_urls: List[str]) -> None:
+    # Merge auto-crawl + urls.txt
+    extra_urls = load_extra_urls()
+    all_seeds = list(dict.fromkeys(auto_urls + extra_urls))  # de-dupe, keep order
 
-        # Remove non-content elements
-        for tag in soup(["script", "style", "noscript", "iframe"]):
-            tag.decompose()
+    print("\n🔎 Seeds to crawl (auto + urls.txt):")
+    for u in all_seeds:
+        print(f"   - {u}")
 
-        text = soup.get_text(separator=' ', strip=True)
-        if text:
-            scraped_data[url] = text
-        visited.add(url)
-        print(f"✅ Crawled: {url}")
+    # Crawl
+    pages_collected: Dict[str, str] = {}
+    for seed in all_seeds:
+        print(f"\n🚀 Crawling seed: {seed}")
+        result = crawl_start_url(seed, max_pages=300, max_depth=5)
+        print(f"✅ Collected {len(result)} pages from {seed}")
+        pages_collected.update(result)  # later seeds overwrite duplicates
 
-        # Find internal links
-        base_domain = urlparse(start_url).netloc
-        for link_tag in soup.find_all("a", href=True):
-            link = urljoin(url, link_tag["href"])
-            if urlparse(link).netloc == base_domain and link not in visited and link not in [l[0] for l in to_visit]:
-                to_visit.append((link, depth + 1))
+    print(f"\n🧾 Total unique pages collected: {len(pages_collected)}")
 
-    # Debug: Log the number of pages scraped
-    print(f"[DEBUG] Total pages scraped: {len(scraped_data)}")
-
-    # Debug: Log the first few URLs and their content
-    for i, (url, content) in enumerate(scraped_data.items()):
-        print(f"[DEBUG] Page {i+1}: {url}\nContent: {content[:200]}...")
-        if i >= 2:  # Limit to first 3 pages for debugging
-            break
-
-    return scraped_data
-
-# --- Build and Save FAISS Index ---
-def build_vectorstore(urls):
-    documents = []
-
-    for url in urls:
-        pages = scrape_website_recursive(url, max_pages=1500, max_depth=300)
-        for page_url, page_text in pages.items():
-            if page_text:
-                chunks = chunk_text(page_text)
-                for i, chunk in enumerate(chunks):
-                    documents.append(Document(
-                        page_content=chunk,
-                        metadata={"source": page_url, "chunk_index": i}  # Add chunk index for better traceability
-                    ))
-
-    if not documents:
-        print("No documents found to index.")
+    if not pages_collected:
+        print("⚠️ No pages collected — aborting index build.")
         return
 
-    # Build and save FAISS index
+    # Chunking (use LC’s Recursive splitter for consistent granularity)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    documents: List[Document] = []
+    for page_url, page_text in pages_collected.items():
+        if not page_text:
+            continue
+        chunks = splitter.split_text(page_text)
+        for i, chunk in enumerate(chunks):
+            documents.append(
+                Document(
+                    page_content=chunk,
+                    metadata={"source": page_url, "chunk_index": i}
+                )
+            )
+
+    if not documents:
+        print("⚠️ No chunks produced — aborting index build.")
+        return
+
+    print(f"📦 Prepared {len(documents)} chunks for embedding.")
     vectorstore = FAISS.from_documents(documents, embedding_model)
     vectorstore.save_local(INDEX_DIR)
-    print(f"✅ Vectorstore built with {len(documents)} chunks.")
+    print(f"✅ FAISS index saved to: {INDEX_DIR}")
+
 
 if __name__ == "__main__":
     build_vectorstore(URLS)
