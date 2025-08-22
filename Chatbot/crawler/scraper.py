@@ -3,6 +3,33 @@ import os
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
+from playwright.sync_api import sync_playwright
+
+
+
+def scrape_url(url: str) -> str:
+    """
+    Synchronous single-page scraper using Playwright sync API.
+    Safe to call from Streamlit/normal sync code.
+    """
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle")
+            # Extra wait for lazy/dynamic content; adjust if needed
+            page.wait_for_timeout(5000)
+            html = page.content()
+            browser.close()
+    except Exception as e:
+        print(f"❌ Playwright (sync) failed for {url}: {e}")
+        return ""
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    return soup.get_text(separator=" ", strip=True)
 
 
 # -------------------------------

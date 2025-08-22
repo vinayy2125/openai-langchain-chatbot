@@ -1,7 +1,9 @@
-# streamlit_app/chat_logic.py
 from backend.retriever import retriever
 from backend.llm_client import call_llm_with_context
 from typing import List
+from backend.search_client import search_site
+from crawler.scraper import scrape_url
+
 
 def _dedupe_chunks(docs) -> List[str]:
     seen = set()
@@ -22,7 +24,7 @@ def _maybe_expand_queries(query: str) -> List[str]:
         f"In-depth explanation of {query}",
     ]))
 
-def build_chatbot_response(query: str, chat_history: list):
+def build_chatbot_response(query: str, chat_history: list, site: str="ditstek.com"):
     """
     Retrieves context for the query, calls LLM, and returns chatbot response.
     `chat_history` is a list of tuples: [(role, message), ...]
@@ -46,27 +48,43 @@ def build_chatbot_response(query: str, chat_history: list):
     print("\n[DEBUG] Final context passed to LLM:\n", context_text[:1500],
           "\n[...]" if len(context_text) > 1500 else "")
 
+    # 2) If FAISS gave nothing, fallback to site-specific internet search
     if not context_text.strip():
-        return (
-            "No relevant content found. Please visit the website directly "
-            "[DITS](https://www.ditstek.com).",
-            True
-        )
+        print("[DEBUG] No context from FAISS. Falling back to internet search...")
+        search_results = search_site(query, site)
+        scraped_texts = []
 
-    # 2) Format history
+        for res in search_results:
+            url = res.get("url")
+            title = res.get("title") or url
+            if url:
+                text = scrape_url(url)  # ✅ sync call into Playwright
+                if text:
+                    scraped_texts.append(f"[{title}]({url}): {text}")
+
+        context_text = "\n\n".join(scraped_texts[:MAX_CHUNKS])
+
+        if not context_text.strip():
+            return (
+                "No relevant content found. Please visit the website directly "
+                f"[{site}](https://{site}).",
+                True
+            )
+
+    # 3) Format history
     history_text = "\n".join(
         f"{'User' if role == 'user' else 'Assistant'}: {msg}"
         for role, msg in chat_history
     )
 
-    # 3) Call LLM
+    # 4) Call LLM
     answer = call_llm_with_context(
         context=context_text,
         history=history_text,
         question=query
     )
 
-    # 4) Fallback phrasing: relax strict check
+    # 5) Fallback phrasing: relax strict check
     # Only fallback if the answer is *completely empty*
     if not answer.strip():
         return (
