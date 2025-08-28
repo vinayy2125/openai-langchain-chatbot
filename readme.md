@@ -12,21 +12,9 @@ This is a powerful chatbot web app built using **Streamlit**, **OpenAI APIs (Cha
 
 ---
 
-## 🛍️ Workflow Overview
+## Workflow Overview
 
-```mermaid
-graph TD
-    A[User Input (Streamlit UI)] --> B{Mode Selection}
-    B -- OPENAI Chat --> C[GPT-3.5/4 Chat Model]
-    B -- Agent with Tools --> D[LangChain Agent (DALL·E 3, Web Search, DateTime)]
-    B -- Efficient Mode --> E[GPT Direct Completion]
-    B -- PDF Chat --> F[Upload + Extract + Vector Search + GPT Reasoning]
-    C --> G[Show Response]
-    D --> G
-    E --> G
-    F --> G
-    G --> H[Update Session State & DB]
-```
+<pre><code>```mermaid graph TD A[User Input (Streamlit UI)] --> B{Mode Selection} B -- OPENAI Chat --> C[GPT-3.5/4 Chat Model] B -- Agent with Tools --> D[LangChain Agent (DALL·E 3, Web Search, DateTime)] B -- Efficient Mode --> E[GPT Direct Completion] B -- PDF Chat --> F[Upload + Extract + Vector Search + GPT Reasoning] C --> G[Show Response] D --> G E --> G F --> G G --> H[Update Session State & DB] ``` ======================================================= </code></pre>
 
 ---
 
