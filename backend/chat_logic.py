@@ -40,13 +40,17 @@ def build_chatbot_response(query: str, chat_history: list, site: str="ditstek.co
 
     # Construct richer context (cap to avoid over-long prompts)
     MAX_CHUNKS = 10
-    context_text = "\n\n---\n\n".join(unique_texts[:MAX_CHUNKS])
+    context_text = "\n\n---\n\n".join([
+        f"Source {i+1}:\n{chunk}"
+        for i, chunk in enumerate(
+        unique_texts[:MAX_CHUNKS])
+    ])
 
     # Debug logs
     print(f"[DEBUG] Retrieved {len(pooled_docs)} docs, {len(unique_texts)} unique. "
-          f"Using {min(len(unique_texts), MAX_CHUNKS)} chunks.")
+      f"Using {min(len(unique_texts), MAX_CHUNKS)} chunks.")
     print("\n[DEBUG] Final context passed to LLM:\n", context_text[:1500],
-          "\n[...]" if len(context_text) > 1500 else "")
+      "\n[...]" if len(context_text) > 1500 else "")
 
     # 2) If FAISS gave nothing, fallback to site-specific internet search
     if not context_text.strip():
@@ -77,11 +81,11 @@ def build_chatbot_response(query: str, chat_history: list, site: str="ditstek.co
         for role, msg in chat_history
     )
 
-    # 4) Call LLM
     answer = call_llm_with_context(
-        context=context_text,
-        history=history_text,
-        question=query
+    context=context_text,
+    history=history_text,
+    question=query,
+    detail_level="high"  # Always request detailed responses
     )
 
     # 5) Fallback phrasing: relax strict check
