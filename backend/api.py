@@ -9,6 +9,13 @@ import psycopg2
 
 from database_setup import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 from backend.chat_logic import build_chatbot_response
+from .services.chatbot_optimizer import OptimizedChatbot
+from backend.llm_client import llm  # Make sure llm is initialized before importing chat_logic
+
+# Make sure llm is already initialized
+optimized_chatbot = OptimizedChatbot(llm, model="gpt-3.5-turbo")
+
+print("✅ Optimized chatbot initialized successfully")
 
 
 app = FastAPI()
@@ -172,11 +179,14 @@ def send_message(req: SentMessage):
         answer, matched = result
         meta = {}
 
+    # Clean LLM answer
+    answer = answer.strip()
+
     # Convert answer to HTML using markdown2
-    answer_html = markdown2.markdown(answer, extras=["fenced-code-blocks", "tables"])
+    answer_html = markdown2.markdown(answer, extras=["fenced-code-blocks", "tables"]).strip()
     
     # Save messages
-    save_message(session_id=req.session_id, role="user", message=req.query, timestamp=timestamp)
+    save_message(session_id=req.session_id, role="user", message=req.query.strip(), timestamp=timestamp)
     save_message(session_id=req.session_id, role="bot", message=answer, timestamp=timestamp)
 
     # Source info
@@ -203,9 +213,8 @@ def get_chat_messages(session_id: str):
         raise HTTPException(status_code=404, detail="No messages found for this session")
 
     messages = [
-        {"role": role, 
-        #  "message": msg,
-         "message": markdown2.markdown(msg, extras=["fenced-code-blocks", "tables"]),
+        {"role": role,
+         "message": markdown2.markdown(msg, extras=["fenced-code-blocks", "tables"]).strip(),
          "timestamp": ts.isoformat() if ts else None
          }
         for (role, msg, ts) in rows
