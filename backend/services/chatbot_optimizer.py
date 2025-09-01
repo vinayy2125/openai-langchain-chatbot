@@ -1,20 +1,20 @@
 """
-Chatbot Optimization Service
-
+Chatbot Optimization Service with Streaming Support
 This service provides optimized chatbot response generation with:
 - Context length management
 - Performance optimization
 - Detailed response generation
 - Robust fallback handling
+- Streaming response support
 """
-
 import tiktoken
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Generator, Union
 from concurrent.futures import ThreadPoolExecutor
 import time
 from functools import lru_cache
 from langchain.schema import AIMessage
-
+import queue
+import threading
 
 class ContextOptimizer:
     """
@@ -149,10 +149,9 @@ class ContextOptimizer:
         truncated_tokens = tokens[:max_tokens]
         return self.encoding.decode(truncated_tokens)
 
-
 class OptimizedChatbot:
     """
-    Main chatbot service that provides optimized response generation.
+    Main chatbot service that provides optimized response generation with streaming support.
     """
     
     def __init__(self, llm, model: str = "gpt-3.5-turbo"):
@@ -161,7 +160,7 @@ class OptimizedChatbot:
         self.context_optimizer = ContextOptimizer(model)
         self.response_cache = {}
         
-    def get_detailed_response(self, query: str, chat_history: list, site: str = "ditstek.com") -> Tuple[str, bool]:
+    def get_detailed_response(self, query: str, chat_history: list, site: str = "ditstek.com", stream: bool = False) -> Union[Tuple[str, bool], Generator]:
         """
         Get detailed response with all optimizations.
         
@@ -169,10 +168,19 @@ class OptimizedChatbot:
             query: User's question
             chat_history: Conversation history
             site: Website for fallback search
+            stream: Whether to return a streaming response
             
         Returns:
-            Tuple of (response_text, success_flag)
+            If stream=False: Tuple of (response_text, success_flag)
+            If stream=True: Generator that yields response chunks
         """
+        if stream:
+            return self._get_streaming_response(query, chat_history, site)
+        else:
+            return self._get_complete_response(query, chat_history, site)
+    
+    def _get_complete_response(self, query: str, chat_history: list, site: str = "ditstek.com") -> Tuple[str, bool]:
+        """Get complete response (non-streaming)"""
         start_time = time.time()
         
         try:
@@ -195,10 +203,31 @@ class OptimizedChatbot:
             error_msg = "I apologize, but I'm experiencing technical difficulties. Please try again later."
             return error_msg, False
     
+    def _get_streaming_response(self, query: str, chat_history: list, site: str = "ditstek.com") -> Generator:
+        """Get streaming response"""
+        start_time = time.time()
+        
+        try:
+            # 1. Retrieve and process context
+            context = self._retrieve_context(query, site)
+            
+            # 2. Format history
+            history_text = self._format_history(chat_history)
+            
+            # 3. Generate streaming response
+            yield from self._generate_response_stream(context, history_text, query)
+            
+            processing_time = time.time() - start_time
+            print(f"[DEBUG] Total processing time: {processing_time:.2f}s")
+            
+        except Exception as e:
+            print(f"[ERROR] Streaming chatbot failed: {e}")
+            yield "I apologize, but I'm experiencing technical difficulties. Please try again later."
+    
     def _retrieve_context(self, query: str, site: str) -> str:
         """Retrieve and optimize context"""
         # Import here to avoid circular imports
-        from  backend.chat_logic import _maybe_expand_queries, _dedupe_chunks
+        from backend.chat_logic import _maybe_expand_queries, _dedupe_chunks
         from backend.retriever import retriever  # Adjust import path as needed
         
         # Get variant queries
@@ -236,7 +265,7 @@ class OptimizedChatbot:
         )
     
     def _generate_response(self, context: str, history: str, question: str) -> str:
-        """Generate response with optimized context"""
+        """Generate response with optimized context (non-streaming)"""
         # Get template token count
         template_tokens = self._count_template_tokens()
         
@@ -268,22 +297,89 @@ class OptimizedChatbot:
             print(f"[ERROR] LLM call failed: {e}")
             return self._generate_fallback_response(question, optimized_context)
     
+    def _generate_response_stream(self, context: str, history: str, question: str) -> Generator:
+        """Generate streaming response with optimized context"""
+        # Get template token count
+        template_tokens = self._count_template_tokens()
+        
+        # Optimize context
+        optimized_context, stats = self.context_optimizer.optimize_context(
+            context, question, history, template_tokens
+        )
+        
+        # Create optimized prompt
+        prompt = self._create_optimized_prompt(history, optimized_context, question)
+        
+        # Check cache first
+        cache_key = f"{question[:50]}_{hash(optimized_context[:100])}"
+        if cache_key in self.response_cache:
+            print("[DEBUG] Using cached response for streaming")
+            # For cached responses, yield in chunks to simulate streaming
+            cached_response = self.response_cache[cache_key]
+            words = cached_response.split()
+            chunk_size = 10
+            for i in range(0, len(words), chunk_size):
+                yield ' '.join(words[i:i + chunk_size]) + ' '
+                time.sleep(0.05)  # Small delay for streaming effect
+            return
+        
+        # Generate streaming response
+        try:
+            # Use streaming API if available
+            if hasattr(self.llm, 'stream'):
+                print("[DEBUG] Using streaming API")
+                stream = self.llm.stream(prompt)
+                for chunk in stream:
+                    if hasattr(chunk, 'content'):
+                        content = chunk.content
+                        if content:
+                            yield content
+                            # Cache the response as it comes in
+                            if cache_key not in self.response_cache:
+                                self.response_cache[cache_key] = ""
+                            self.response_cache[cache_key] += content
+                    elif isinstance(chunk, str):
+                        if chunk:
+                            yield chunk
+                            # Cache the response as it comes in
+                            if cache_key not in self.response_cache:
+                                self.response_cache[cache_key] = ""
+                            self.response_cache[cache_key] += chunk
+            else:
+                # Fallback to non-streaming if streaming not available
+                print("[DEBUG] Streaming not available, using fallback")
+                raw_answer = self.llm.invoke(prompt)
+                response = raw_answer.content if isinstance(raw_answer, AIMessage) else str(raw_answer)
+                
+                # Cache the response
+                self.response_cache[cache_key] = response
+                
+                # Yield in chunks to simulate streaming
+                words = response.split()
+                chunk_size = 10
+                for i in range(0, len(words), chunk_size):
+                    yield ' '.join(words[i:i + chunk_size]) + ' '
+                    time.sleep(0.05)  # Small delay for streaming effect
+            
+        except Exception as e:
+            print(f"[ERROR] LLM streaming call failed: {e}")
+            fallback_response = self._generate_fallback_response(question, optimized_context)
+            for word in fallback_response.split():
+                yield word + ' '
+                time.sleep(0.05)
+    
     @lru_cache(maxsize=1)
     def _count_template_tokens(self) -> int:
         """Count template tokens"""
         template = """
 You are a knowledgeable and thorough assistant providing comprehensive information.
 Your goal is to give detailed, well-structured answers that fully address the user's question.
-
 Conversation so far:
 {history}
-
 Relevant context from the knowledge base:
 {context}
-
 User's latest question:
 {question}
-
 Instructions:
 1. Provide a comprehensive answer that thoroughly addresses all aspects of the question
 2. Include specific details, examples, and explanations where appropriate
@@ -294,7 +390,6 @@ Instructions:
 7. If context is limited or partial, still provide the most complete answer possible using your general knowledge
 8. Do NOT be overly brief - aim for thoroughness and completeness
 9. Include relevant background information that helps understand the topic
-
 Format your response with:
 - A clear introductory paragraph
 - Well-organized body sections with appropriate headings
@@ -307,16 +402,12 @@ Format your response with:
         return f"""
 You are a knowledgeable and thorough assistant providing comprehensive information.
 Your goal is to give detailed, well-structured answers that fully address the user's question.
-
 Conversation so far:
 {history}
-
 Relevant context from the knowledge base:
 {context}
-
 User's latest question:
 {question}
-
 Instructions:
 1. Provide a comprehensive answer that thoroughly addresses all aspects of the question
 2. Include specific details, examples, and explanations where appropriate
@@ -327,7 +418,6 @@ Instructions:
 7. If context is limited or partial, still provide the most complete answer possible using your general knowledge
 8. Do NOT be overly brief - aim for thoroughness and completeness
 9. Include relevant background information that helps understand the topic
-
 Format your response with:
 - A clear introductory paragraph
 - Well-organized body sections with appropriate headings
@@ -377,12 +467,9 @@ Format your response with:
         """Generate fallback response"""
         return f"""
 I apologize, but I'm experiencing technical difficulties. Based on the available information, here's what I can tell you about your question "{question}":
-
 **Available Context:**
 {context[:500]}...
-
 **Recommendation:**
 Please try rephrasing your question or contact support for more detailed assistance.
-
 Would you like me to try a different approach to answer your question?
 """
