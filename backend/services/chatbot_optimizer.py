@@ -359,29 +359,29 @@ class OptimizedChatbot:
     def _count_template_tokens(self) -> int:
         """Count template tokens"""
         template = """
-You are a knowledgeable and thorough assistant providing comprehensive information.
-Your goal is to give detailed, well-structured answers that fully address the user's question.
-Conversation so far:
-{history}
-Relevant context from the knowledge base:
-{context}
-User's latest question:
-{question}
-Instructions:
-1. Provide a comprehensive answer that thoroughly addresses all aspects of the question
-2. Include specific details, examples, and explanations where appropriate
-3. Structure your response with clear sections using markdown formatting
-4. Use **bold** for key terms and concepts
-5. When relevant, include bullet points or numbered lists to organize information
-6. If the context contains multiple relevant pieces of information, synthesize them into a cohesive response
-7. If context is limited or partial, still provide the most complete answer possible using your general knowledge
-8. Do NOT be overly brief - aim for thoroughness and completeness
-9. Include relevant background information that helps understand the topic
-Format your response with:
-- A clear introductory paragraph
-- Well-organized body sections with appropriate headings
-- A brief conclusion when appropriate
-"""
+    You are a knowledgeable and thorough assistant providing comprehensive information.
+    Your goal is to give detailed, well-structured answers that fully address the user's question.
+    Conversation so far:
+    {history}
+    Relevant context from the knowledge base:
+    {context}
+    User's latest question:
+    {question}
+    Instructions:
+    1. Provide a comprehensive answer that thoroughly addresses all aspects of the question
+    2. Include specific details, examples, and explanations where appropriate
+    3. Structure your response with clear sections using markdown formatting
+    4. Use **bold** for key terms and concepts
+    5. When relevant, include bullet points or numbered lists to organize information
+    6. If the context contains multiple relevant pieces of information, synthesize them into a cohesive response
+    7. If context is limited or partial, still provide the most complete answer possible using your general knowledge
+    8. Do NOT be overly brief - aim for thoroughness and completeness
+    9. Include relevant background information that helps understand the topic
+    Format your response with:
+    - A clear introductory paragraph
+    - Well-organized body sections with appropriate headings
+    - A brief conclusion when appropriate
+    """
         return self.context_optimizer.count_tokens_cached(template)
     
     def _create_optimized_prompt(self, history: str, context: str, question: str, detailed: bool = False) -> str:
@@ -420,9 +420,11 @@ Format your response with:
     Instructions:
     1. {length_rule}
     2. Use **bold** for key terms and short markdown lists if needed.
-    3. Do not fabricate information outside the knowledge base or site scope.
-    4. If the query is irrelevant (e.g., medical diagnostics, treatments), politely respond that you cannot answer.
-    5. If context is insufficient but query seems relevant, fall back to the site-specific web search content.
+    3. When relevant, include bullet points or numbered lists to organize information
+    4.If the context contains multiple relevant pieces of information, synthesize them into a cohesive response
+    5. Do not fabricate information outside the knowledge base or site scope.
+    6. If the query is irrelevant (e.g., medical diagnostics, treatments), politely respond that you cannot answer.
+    7. If context is insufficient but query seems relevant, fall back to the site-specific web search content.
     """
         return prompt.strip()
 
