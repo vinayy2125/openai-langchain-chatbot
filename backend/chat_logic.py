@@ -1,22 +1,37 @@
 from backend.retriever import retriever
-from typing import List
+from typing import List, Tuple, Any
 from backend.search_client import search_site
 from crawler.scraper import scrape_url
 from backend.services.chatbot_optimizer import OptimizedChatbot
 from backend.llm_client import llm  # Ensure llm is initialized before importing here
 
+def _dedupe_chunks(docs) -> List[Tuple[str, dict]]:
+    """
+    De-duplicate retrieved documents and keep metadata for traceability.
 
+    Args:
+        docs: List of documents, each with `page_content` and `metadata`.
 
-def _dedupe_chunks(docs) -> List[str]:
+    Returns:
+        List of tuples: (text, metadata)
+    """
     seen = set()
     unique = []
+    
     for d in docs:
-        text = d.page_content.strip()
+        # Extract text and metadata
+        text = d.page_content.strip() if hasattr(d, "page_content") else str(d)
+        metadata = getattr(d, "metadata", {}) if hasattr(d, "metadata") else {}
+
+        # Skip empty or duplicate texts
         if not text or text in seen:
             continue
+
         seen.add(text)
-        unique.append(text)
+        unique.append((text, metadata))
+    
     return unique
+
 
 def _maybe_expand_queries(query: str) -> List[str]:
     # Lightweight RAG fusion: expand the query to reduce “same answer” effect
@@ -27,27 +42,30 @@ def _maybe_expand_queries(query: str) -> List[str]:
     ]))
 
 # Initialize the optimized chatbot (do this once at application startup)
-optimized_chatbot = OptimizedChatbot(llm, model="gpt-3.5-turbo")
 
-def build_chatbot_response(query: str, chat_history: list, site: str="ditstek.com"):
+def build_chatbot_response(query: str, chat_history: list, site: str = "ditstek.com", detailed: bool = False):
     """
     Enhanced chatbot response function with all optimizations.
     """
+    optimized_chatbot = OptimizedChatbot(llm, model="gpt-3.5-turbo")
+
     try:
         response, success = optimized_chatbot.get_detailed_response(
             query=query,
             chat_history=chat_history,
-            site=site
+            site=site,
+            detailed=detailed  # ✅ fixed comma + pass flag
         )
-        
+
         if success:
             return response, True
         else:
             return _fallback_to_original(query, chat_history, site)
-            
+
     except Exception as e:
         print(f"[ERROR] Optimized chatbot failed: {e}")
         return _fallback_to_original(query, chat_history, site)
+
 
 # ✅ ADD - Fallback function (simplified version of your original logic)
 def _fallback_to_original(query: str, chat_history: list, site: str):
