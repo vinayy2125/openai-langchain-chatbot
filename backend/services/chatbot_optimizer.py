@@ -100,6 +100,10 @@ class ContextOptimizer:
         
         print(f"[DEBUG] Available tokens for context: {available_for_context}")
         
+        # Ensure context is a string before splitting
+        if isinstance(context, list):
+            context = "\n\n---\n\n".join(context)
+        
         # Split and prioritize chunks
         chunks = context.split("\n\n---\n\n")
         prioritized_chunks = self.prioritize_chunks(chunks, question)
@@ -160,7 +164,7 @@ class OptimizedChatbot:
         self.context_optimizer = ContextOptimizer(model)
         self.response_cache = {}
         
-    def get_detailed_response(self, query: str, chat_history: list, site: str = "ditstek.com", stream: bool = False) -> Union[Tuple[str, bool], Generator]:
+    def get_detailed_response(self, query: str, chat_history: list, site: str = "ditstek.com", stream: bool = False, detailed: bool = False) -> Union[Tuple[str, bool], Generator]:
         """
         Get detailed response with all optimizations.
         
@@ -174,87 +178,59 @@ class OptimizedChatbot:
             If stream=False: Tuple of (response_text, success_flag)
             If stream=True: Generator that yields response chunks
         """
+        # Retrieve context based on the query and site
+        context = self._retrieve_context(query, site)
+        
+        # Format chat history
+        history = self._format_history(chat_history)
+        
         if stream:
-            return self._get_streaming_response(query, chat_history, site)
+            return self._get_streaming_response(query, context, history, detailed)
         else:
-            return self._get_complete_response(query, chat_history, site)
+            return self._get_complete_response(query, context, history, detailed), True
     
-    def _get_complete_response(self, query: str, chat_history: list, site: str = "ditstek.com") -> Tuple[str, bool]:
-        """Get complete response (non-streaming)"""
-        start_time = time.time()
-        
-        try:
-            # 1. Retrieve and process context
-            context = self._retrieve_context(query, site)
-            
-            # 2. Format history
-            history_text = self._format_history(chat_history)
-            
-            # 3. Generate detailed response
-            response = self._generate_response(context, history_text, query)
-            
-            processing_time = time.time() - start_time
-            print(f"[DEBUG] Total processing time: {processing_time:.2f}s")
-            
-            return response, True
-            
-        except Exception as e:
-            print(f"[ERROR] Chatbot failed: {e}")
-            error_msg = "I apologize, but I'm experiencing technical difficulties. Please try again later."
-            return error_msg, False
+    def _get_complete_response(self, query: str, context: str, history: str, detailed: bool = False) -> str:
+        """Get response in non-streaming mode"""
+        return self._generate_response(context, history, query, detailed)
     
-    def _get_streaming_response(self, query: str, chat_history: list, site: str = "ditstek.com") -> Generator:
-        """Get streaming response"""
-        start_time = time.time()
-        
-        try:
-            # 1. Retrieve and process context
-            context = self._retrieve_context(query, site)
-            
-            # 2. Format history
-            history_text = self._format_history(chat_history)
-            
-            # 3. Generate streaming response
-            yield from self._generate_response_stream(context, history_text, query)
-            
-            processing_time = time.time() - start_time
-            print(f"[DEBUG] Total processing time: {processing_time:.2f}s")
-            
-        except Exception as e:
-            print(f"[ERROR] Streaming chatbot failed: {e}")
-            yield "I apologize, but I'm experiencing technical difficulties. Please try again later."
+    def _get_streaming_response(self, query: str, context: str, history: str, detailed: bool = False) -> Generator:
+        """Stream response chunks from the LLM"""
+        return self._generate_response_stream(context, history, query, detailed)
     
     def _retrieve_context(self, query: str, site: str) -> str:
-        """Retrieve and optimize context"""
+        """Retrieve and optimize context with metadata for traceability"""
         # Import here to avoid circular imports
         from backend.chat_logic import _maybe_expand_queries, _dedupe_chunks
         from backend.retriever import retriever  # Adjust import path as needed
-        
+
         # Get variant queries
         variant_queries = _maybe_expand_queries(query)
-        
+
         # Retrieve documents in parallel
         with ThreadPoolExecutor(max_workers=4) as executor:
             all_docs = []
             for q in variant_queries:
+                # `get_relevant_documents` returns a list of document objects
                 docs = list(executor.map(retriever.get_relevant_documents, [q]))[0]
                 all_docs.extend(docs)
-        
-        # De-duplicate
-        unique_texts = _dedupe_chunks(all_docs)
-        
+
+        # De-duplicate and preserve metadata
+        unique_texts = _dedupe_chunks(all_docs)  # now returns List[Tuple[str, dict]]
+
         # Format context with source labels
-        MAX_CHUNKS = 12
-        context_text = "\n\n---\n\n".join([
-            f"Source {i+1}:\n{chunk}" 
-            for i, chunk in enumerate(unique_texts[:MAX_CHUNKS])
-        ])
-        
+        MAX_CHUNKS = 4
+        context_chunks = []
+        for i, (text, meta) in enumerate(unique_texts[:MAX_CHUNKS]):
+            source_info = meta.get("source", meta.get("url", "N/A"))
+            context_chunks.append(f"Source {i+1} ({source_info}):\n{text}")
+
+        context_text = "\n\n---\n\n".join(context_chunks)
+
         # Fallback to web search if no context
         if not context_text.strip():
             print("[DEBUG] No context from FAISS. Falling back to internet search...")
             context_text = self._fallback_web_search(query, site)
-        
+
         return context_text
     
     def _format_history(self, chat_history: list) -> str:
@@ -264,110 +240,121 @@ class OptimizedChatbot:
             for role, msg in chat_history
         )
     
-    def _generate_response(self, context: str, history: str, question: str) -> str:
+    def _generate_response(self, context: Union[str, List[Tuple[str, dict]]], history: str, question: str, detailed: bool = False) -> str:
         """Generate response with optimized context (non-streaming)"""
-        # Get template token count
         template_tokens = self._count_template_tokens()
-        
+
+        # Ensure context is a string
+        if isinstance(context, list):
+            context_chunks = []
+            for i, chunk in enumerate(context):
+                if isinstance(chunk, tuple):
+                    text, meta = chunk
+                    source_info = meta.get("source", meta.get("url", "N/A"))
+                    context_chunks.append(f"Source {i+1} ({source_info}):\n{text}")
+                else:
+                    context_chunks.append(str(chunk))
+            context = "\n\n---\n\n".join(context_chunks)
+
         # Optimize context
         optimized_context, stats = self.context_optimizer.optimize_context(
             context, question, history, template_tokens
         )
-        
-        # Create optimized prompt
-        prompt = self._create_optimized_prompt(history, optimized_context, question)
-        
-        # Check cache first
-        cache_key = f"{question[:50]}_{hash(optimized_context[:100])}"
+        print(f"[DEBUG] Optimization stats: {stats}")
+
+        # Ensure optimized_context is a string (after optimization it might still be a list of tuples)
+        if isinstance(optimized_context, list):
+            context_chunks = []
+            for i, chunk in enumerate(optimized_context):
+                if isinstance(chunk, tuple):
+                    text, meta = chunk
+                    source_info = meta.get("source", meta.get("url", "N/A"))
+                    context_chunks.append(f"Source {i+1} ({source_info}):\n{text}")
+                else:
+                    context_chunks.append(str(chunk))
+            optimized_context = "\n\n---\n\n".join(context_chunks)
+
+        # Log final optimized context
+        print(f"[DEBUG] Final optimized context: {optimized_context[:500]}..." if len(optimized_context) > 500 else f"[DEBUG] Final optimized context: {optimized_context}")
+
+        # Create prompt
+        prompt = self._create_optimized_prompt(history, optimized_context, question, detailed)
+
+        # Cache key
+        cache_key = f"{question[:50]}_{hash(optimized_context[:100])}_{detailed}"
         if cache_key in self.response_cache:
             print("[DEBUG] Using cached response")
             return self.response_cache[cache_key]
-        
-        # Generate response
+
         try:
             raw_answer = self.llm.invoke(prompt)
             response = raw_answer.content if isinstance(raw_answer, AIMessage) else str(raw_answer)
-            
-            # Cache successful responses
             self.response_cache[cache_key] = response
-            
             return response
-            
         except Exception as e:
             print(f"[ERROR] LLM call failed: {e}")
             return self._generate_fallback_response(question, optimized_context)
-    
-    def _generate_response_stream(self, context: str, history: str, question: str) -> Generator:
+
+    def _generate_response_stream(self, context: Union[str, List[Tuple[str, dict]]], history: str, question: str, detailed: bool = False) -> Generator:
         """Generate streaming response with optimized context"""
-        # Get template token count
         template_tokens = self._count_template_tokens()
-        
-        # Optimize context
-        optimized_context, stats = self.context_optimizer.optimize_context(
-            context, question, history, template_tokens
-        )
-        
-        # Create optimized prompt
-        prompt = self._create_optimized_prompt(history, optimized_context, question)
-        
-        # Check cache first
-        cache_key = f"{question[:50]}_{hash(optimized_context[:100])}"
+
+        # Ensure context is string
+        if isinstance(context, list):
+            context_chunks = []
+            for i, chunk in enumerate(context):
+                if isinstance(chunk, tuple):
+                    text, meta = chunk
+                    source_info = meta.get("source", meta.get("url", "N/A"))
+                    context_chunks.append(f"Source {i+1} ({source_info}):\n{text}")
+                else:
+                    context_chunks.append(str(chunk))
+            context = "\n\n---\n\n".join(context_chunks)
+
+        # Log final context
+        print(f"[DEBUG] Final context for streaming: {context[:500]}..." if len(context) > 500 else f"[DEBUG] Final context for streaming: {context}")
+
+        # Create prompt
+        prompt = self._create_optimized_prompt(history, context, question)
+
+        # Cache key
+        cache_key = f"{question[:50]}_{hash(context[:100])}"
         if cache_key in self.response_cache:
             print("[DEBUG] Using cached response for streaming")
             # For cached responses, yield in chunks to simulate streaming
             cached_response = self.response_cache[cache_key]
-            words = cached_response.split()
-            chunk_size = 10
-            for i in range(0, len(words), chunk_size):
-                yield ' '.join(words[i:i + chunk_size]) + ' '
-                time.sleep(0.05)  # Small delay for streaming effect
-            return
-        
-        # Generate streaming response
-        try:
-            # Use streaming API if available
-            if hasattr(self.llm, 'stream'):
-                print("[DEBUG] Using streaming API")
-                stream = self.llm.stream(prompt)
-                for chunk in stream:
-                    if hasattr(chunk, 'content'):
-                        content = chunk.content
-                        if content:
-                            yield content
-                            # Cache the response as it comes in
-                            if cache_key not in self.response_cache:
-                                self.response_cache[cache_key] = ""
-                            self.response_cache[cache_key] += content
-                    elif isinstance(chunk, str):
-                        if chunk:
-                            yield chunk
-                            # Cache the response as it comes in
-                            if cache_key not in self.response_cache:
-                                self.response_cache[cache_key] = ""
-                            self.response_cache[cache_key] += chunk
-            else:
-                # Fallback to non-streaming if streaming not available
-                print("[DEBUG] Streaming not available, using fallback")
-                raw_answer = self.llm.invoke(prompt)
-                response = raw_answer.content if isinstance(raw_answer, AIMessage) else str(raw_answer)
-                
-                # Cache the response
-                self.response_cache[cache_key] = response
-                
-                # Yield in chunks to simulate streaming
-                words = response.split()
+            if isinstance(cached_response, str):
+                words = cached_response.split()
                 chunk_size = 10
                 for i in range(0, len(words), chunk_size):
                     yield ' '.join(words[i:i + chunk_size]) + ' '
                     time.sleep(0.05)  # Small delay for streaming effect
-            
+            return
+
+        # Generate streaming response
+        try:
+            if hasattr(self.llm, 'stream'):
+                stream = self.llm.stream(prompt)
+                for chunk in stream:
+                    content = chunk.content if hasattr(chunk, 'content') else chunk
+                    if content:
+                        yield content
+                        self.response_cache[cache_key] = self.response_cache.get(cache_key, "") + content
+            else:
+                raw_answer = self.llm.invoke(prompt)
+                response = raw_answer.content if isinstance(raw_answer, AIMessage) else str(raw_answer)
+                self.response_cache[cache_key] = response
+                words = response.split()
+                for i in range(0, len(words), 10):
+                    yield ' '.join(words[i:i + 10]) + ' '
+                    time.sleep(0.05)
         except Exception as e:
             print(f"[ERROR] LLM streaming call failed: {e}")
-            fallback_response = self._generate_fallback_response(question, optimized_context)
+            fallback_response = self._generate_fallback_response(question, context)            
             for word in fallback_response.split():
                 yield word + ' '
                 time.sleep(0.05)
-    
+  
     @lru_cache(maxsize=1)
     def _count_template_tokens(self) -> int:
         """Count template tokens"""
@@ -397,32 +384,48 @@ Format your response with:
 """
         return self.context_optimizer.count_tokens_cached(template)
     
-    def _create_optimized_prompt(self, history: str, context: str, question: str) -> str:
-        """Create optimized prompt"""
-        return f"""
-You are a knowledgeable and thorough assistant providing comprehensive information.
-Your goal is to give detailed, well-structured answers that fully address the user's question.
-Conversation so far:
-{history}
-Relevant context from the knowledge base:
-{context}
-User's latest question:
-{question}
-Instructions:
-1. Provide a comprehensive answer that thoroughly addresses all aspects of the question
-2. Include specific details, examples, and explanations where appropriate
-3. Structure your response with clear sections using markdown formatting
-4. Use **bold** for key terms and concepts
-5. When relevant, include bullet points or numbered lists to organize information
-6. If the context contains multiple relevant pieces of information, synthesize them into a cohesive response
-7. If context is limited or partial, still provide the most complete answer possible using your general knowledge
-8. Do NOT be overly brief - aim for thoroughness and completeness
-9. Include relevant background information that helps understand the topic
-Format your response with:
-- A clear introductory paragraph
-- Well-organized body sections with appropriate headings
-- A brief conclusion when appropriate
-"""
+    def _create_optimized_prompt(self, history: str, context: str, question: str, detailed: bool = False) -> str:
+        """
+        Create optimized prompt for the LLM with concise/detailed control.
+        
+        Args:
+            history: Chat history as string
+            context: Optimized context string
+            question: User's latest query
+            detailed: Whether to generate detailed answer (True) or concise (False)
+            
+        Returns:
+            Prompt string
+        """
+
+        # Set length instructions
+        if detailed:
+            length_rule = "Provide a comprehensive, detailed answer using context and examples."
+        else:
+            length_rule = "Provide a concise answer within ~600 characters using only relevant context."
+
+        prompt = f"""
+    You are a helpful assistant restricted to answering only with information from the provided context or the relevant website.
+    If the user's question is outside the website’s domain, politely decline or use fallback web search context.
+
+    Conversation so far:
+    {history}
+
+    Relevant context from the knowledge base:
+    {context}
+
+    User's latest question:
+    {question}
+
+    Instructions:
+    1. {length_rule}
+    2. Use **bold** for key terms and short markdown lists if needed.
+    3. Do not fabricate information outside the knowledge base or site scope.
+    4. If the query is irrelevant (e.g., medical diagnostics, treatments), politely respond that you cannot answer.
+    5. If context is insufficient but query seems relevant, fall back to the site-specific web search content.
+    """
+        return prompt.strip()
+
     
     def _fallback_web_search(self, query: str, site: str) -> str:
         """Fallback to web search"""

@@ -47,6 +47,7 @@ class SentMessage(BaseModel):
     query: str
     session_id: str
     stream: Optional[bool] = False  # Add streaming option
+    detailed: Optional[bool] = False  # 👈 New flag for concise/detailed
 
 class ChatResponse(BaseModel):
     session_id: str
@@ -257,7 +258,7 @@ def send_message(req: SentMessage):
         session_id=req.session_id,
         answer=answer_html,
         source=source_flag,
-        matched=matched
+        matched=matched,
     )
 
 @app.post("/chat/send-stream")

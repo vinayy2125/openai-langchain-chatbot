@@ -15,9 +15,6 @@ env/
 # Jupyter/IPython
 .ipynb_checkpoints/
 
-# Streamlit
-.streamlit/config.toml
-
 # Logs
 *.log
 

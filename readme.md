@@ -1,35 +1,33 @@
-# OpenAI + DALL·E 3 + LangChain PDF Chat Assistant
+# Backend Chatbot Application
 
-## 🧠 Overview
+This is a backend chatbot application built using **OpenAI APIs (Chat + DALL·E 3)** and **LangChain** with support for:
 
-This is a powerful chatbot web app built using **Streamlit**, **OpenAI APIs (Chat + DALL·E 3)**, and **LangChain** with support for:
-
-- Interactive AI chat
-- Image generation from text
-- PDF/document search and analysis
-- Multi-mode agent tool orchestration
+- Interactive AI chat on a particular knowledge base
 - Semantic vector search using **FAISS**
 
 ---
 
 ## Workflow Overview
 
-<pre><code>```mermaid graph TD A[User Input (Streamlit UI)] --> B{Mode Selection} B -- OPENAI Chat --> C[GPT-3.5/4 Chat Model] B -- Agent with Tools --> D[LangChain Agent (DALL·E 3, Web Search, DateTime)] B -- Efficient Mode --> E[GPT Direct Completion] B -- PDF Chat --> F[Upload + Extract + Vector Search + GPT Reasoning] C --> G[Show Response] D --> G E --> G F --> G G --> H[Update Session State & DB] ``` ======================================================= </code></pre>
+The backend processes user queries, retrieves relevant context, and generates responses using OpenAI's GPT models. It supports:
+
+- **OPENAI Chat**: Full conversational assistant
+
+---
+
+## 🚀 Running the Backend
+
+From the project root, run:
+
+```bash
+uvicorn backend.api:app --reload
+```
 
 ---
 
 ## 💡 Features
 
 - 🔮 **OPENAI Chat** — Full conversational assistant
-- 🛠 **Agent with Tools** — Image generation, tools, dynamic routing
-- ⚡ **Efficient Mode** — Lightweight direct GPT chat
-- 📄 **PDF Chat Assistant**:
-  - Upload PDF, DOCX, or TXT files
-  - Extract, chunk, and embed text
-  - Perform keyword and semantic search (FAISS)
-  - Chat with the document like ChatGPT
-  - View document content in expandable preview
-- 📷 **Image Generation** via **DALL·E 3**
 - 🧠 Memory + chat history logging
 - 💃 Persistent DB using SQLAlchemy
 
@@ -51,44 +49,6 @@ pip install -r requirements.txt
 ```env
 OPENAI_API_KEY=your_openai_api_key
 ```
-
----
-
-## 🚀 Running the App
-
-From the project root, run:
-
-```bash
-streamlit run app.py
-```
-
----
-
-## 🗄️ Image Generation
-
-- Use natural prompts like:
-  - "Generate an image of a futuristic city"
-  - "Draw a lion standing on a mountain"
-- Agent identifies intent and routes to **DALL·E 3**
-
----
-
-## 📄 PDF Chat Mode
-
-- Upload documents (PDF, DOCX, TXT)
-- Extracted text is token-limited or chunked
-- Uses **FAISS + OpenAIEmbeddings** for vector search
-- Responds to your questions contextually
-
----
-
-## 🧹 Modules
-
-- `app.py` – Main app logic + routing
-- `modules/pdf_chat_handler.py` – PDF upload + chat logic
-- `modules/tools.py` – Agent tools (image generation, datetime, etc.)
-- `modules/vector_utils.py` – Vector search utilities (FAISS)
-- `modules/db_models.py` – SQLAlchemy models
 
 ---
 
