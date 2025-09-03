@@ -4,11 +4,10 @@ services:
   api:
     build: .
     container_name: chatbot_api
-    command: uv run uvicorn backend.api:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - .:/app
     ports:
-      - "8000:8000"
+      - "8006:8006"
     env_file:
       - .env
     depends_on:
