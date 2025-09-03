@@ -8,11 +8,22 @@ from uuid import uuid4
 from datetime import datetime
 import psycopg2
 import json
-import asyncio
-from database_setup import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
+import os
 from backend.chat_logic import build_chatbot_response
 from .services.chatbot_optimizer import OptimizedChatbot
 from backend.llm_client import llm  # Make sure llm is initialized before importing chat_logic
+
+from dotenv import load_dotenv
+
+# Load .env file
+load_dotenv()
+
+# Read env vars
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
 
 # Make sure llm is already initialized
 optimized_chatbot = OptimizedChatbot(llm, model="gpt-3.5-turbo")

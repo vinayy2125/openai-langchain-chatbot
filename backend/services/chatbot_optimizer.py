@@ -115,6 +115,7 @@ class ContextOptimizer:
         for chunk in prioritized_chunks:
             chunk_tokens = self.count_tokens_cached(chunk)
             chunk_with_separator = chunk + "\n\n---\n\n"
+            optimized_context.append(chunk_with_separator.strip("\n\n---\n\n"))
             separator_tokens = self.count_tokens_cached("\n\n---\n\n")
             
             if current_tokens + chunk_tokens + separator_tokens <= available_for_context:
