@@ -7,6 +7,8 @@ This service provides optimized chatbot response generation with:
 - Robust fallback handling
 - Streaming response support
 """
+import logging
+import sys
 import tiktoken
 from typing import List, Tuple, Dict, Generator, Union
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +17,14 @@ from functools import lru_cache
 from langchain.schema import AIMessage
 import queue
 import threading
+
+# Configure the logger
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger("chatbot")
 
 class ContextOptimizer:
     """
@@ -61,7 +71,7 @@ class ContextOptimizer:
         
         return min(relevance_score, 1.0)
     
-    def prioritize_chunks(self, chunks: List[str], question: str, max_chunks: int = 8) -> List[str]:
+    def prioritize_chunks(self, chunks: List[str], question: str, max_chunks: int = 4) -> List[str]:
         """Prioritize chunks by relevance"""
         if not chunks:
             return []
@@ -80,7 +90,7 @@ class ContextOptimizer:
         # Take top chunks
         prioritized_chunks = [chunk for chunk, score in chunk_scores[:max_chunks]]
         
-        print(f"[DEBUG] Prioritized {len(chunks)} chunks to {len(prioritized_chunks)} most relevant")
+        logger.debug(f"Prioritized {len(chunks)} chunks to {len(prioritized_chunks)} most relevant")
         return prioritized_chunks
     
     def optimize_context(self, context: str, question: str, history: str, template_tokens: int) -> Tuple[str, Dict]:
@@ -98,7 +108,7 @@ class ContextOptimizer:
             history_tokens - response_reservation - safety_buffer
         )
         
-        print(f"[DEBUG] Available tokens for context: {available_for_context}")
+        logger.debug(f"Available tokens for context: {available_for_context}")
         
         # Ensure context is a string before splitting
         if isinstance(context, list):
@@ -141,7 +151,7 @@ class ContextOptimizer:
             "tokens_saved": self.count_tokens_cached(context) - self.count_tokens_cached(final_context)
         }
         
-        print(f"[DEBUG] Context optimization stats: {optimization_stats}")
+        logger.debug(f"Context optimization stats: {optimization_stats}")
         
         return final_context, optimization_stats
     
@@ -159,7 +169,7 @@ class OptimizedChatbot:
     Main chatbot service that provides optimized response generation with streaming support.
     """
     
-    def __init__(self, llm, model: str = "gpt-3.5-turbo"):
+    def __init__(self, llm, model: str = "gpt-4o-mini"):
         self.llm = llm
         self.model = model
         self.context_optimizer = ContextOptimizer(model)
@@ -186,6 +196,9 @@ class OptimizedChatbot:
         history = self._format_history(chat_history)
         
         if stream:
+            logger.debug(">>> Query: %s", query)
+            logger.debug(">>> Context Retrieved: %s", context)
+            logger.debug(">>> Chat History: %s", history)
             return self._get_streaming_response(query, context, history, detailed)
         else:
             return self._get_complete_response(query, context, history, detailed), True
@@ -195,6 +208,7 @@ class OptimizedChatbot:
         return self._generate_response(context, history, query, detailed)
     
     def _get_streaming_response(self, query: str, context: str, history: str, detailed: bool = False) -> Generator:
+        logger.debug("Calling _generate_response_stream")
         """Stream response chunks from the LLM"""
         return self._generate_response_stream(context, history, query, detailed)
     
@@ -219,7 +233,7 @@ class OptimizedChatbot:
         unique_texts = _dedupe_chunks(all_docs)  # now returns List[Tuple[str, dict]]
 
         # Format context with source labels
-        MAX_CHUNKS = 4
+        MAX_CHUNKS = 2
         context_chunks = []
         for i, (text, meta) in enumerate(unique_texts[:MAX_CHUNKS]):
             source_info = meta.get("source", meta.get("url", "N/A"))
@@ -229,7 +243,7 @@ class OptimizedChatbot:
 
         # Fallback to web search if no context
         if not context_text.strip():
-            print("[DEBUG] No context from FAISS. Falling back to internet search...")
+            logger.debug("No context from FAISS. Falling back to internet search...")
             context_text = self._fallback_web_search(query, site)
 
         return context_text
@@ -261,7 +275,7 @@ class OptimizedChatbot:
         optimized_context, stats = self.context_optimizer.optimize_context(
             context, question, history, template_tokens
         )
-        print(f"[DEBUG] Optimization stats: {stats}")
+        logger.debug("Optimization stats: %s", stats)
 
         # Ensure optimized_context is a string (after optimization it might still be a list of tuples)
         if isinstance(optimized_context, list):
@@ -276,7 +290,7 @@ class OptimizedChatbot:
             optimized_context = "\n\n---\n\n".join(context_chunks)
 
         # Log final optimized context
-        print(f"[DEBUG] Final optimized context: {optimized_context[:500]}..." if len(optimized_context) > 500 else f"[DEBUG] Final optimized context: {optimized_context}")
+        logger.debug("Final optimized context: %s", optimized_context[:500] + "...") if len(optimized_context) > 500 else logger.debug("Final optimized context: %s", optimized_context)
 
         # Create prompt
         prompt = self._create_optimized_prompt(history, optimized_context, question, detailed)
@@ -284,7 +298,7 @@ class OptimizedChatbot:
         # Cache key
         cache_key = f"{question[:50]}_{hash(optimized_context[:100])}_{detailed}"
         if cache_key in self.response_cache:
-            print("[DEBUG] Using cached response")
+            logger.debug("Using cached response")
             return self.response_cache[cache_key]
 
         try:
@@ -293,10 +307,11 @@ class OptimizedChatbot:
             self.response_cache[cache_key] = response
             return response
         except Exception as e:
-            print(f"[ERROR] LLM call failed: {e}")
+            logger.error("LLM call failed", exc_info=True)
             return self._generate_fallback_response(question, optimized_context)
 
     def _generate_response_stream(self, context: Union[str, List[Tuple[str, dict]]], history: str, question: str, detailed: bool = False) -> Generator:
+        logger.debug("Entered _generate_response_stream")
         """Generate streaming response with optimized context"""
         template_tokens = self._count_template_tokens()
 
@@ -313,15 +328,18 @@ class OptimizedChatbot:
             context = "\n\n---\n\n".join(context_chunks)
 
         # Log final context
-        print(f"[DEBUG] Final context for streaming: {context[:500]}..." if len(context) > 500 else f"[DEBUG] Final context for streaming: {context}")
+        logger.debug("Final context for streaming: %s", context[:500] + "...") if len(context) > 500 else logger.debug("Final context for streaming: %s", context)
 
         # Create prompt
-        prompt = self._create_optimized_prompt(history, context, question)
+        prompt = self._create_optimized_prompt(history, context, question, detailed)
+        logger.debug("Using llm type: %s Has stream: %s", type(self.llm), hasattr(self.llm, "stream"))
+        logger.debug("Model: %s", getattr(self.llm, "model_name", "unknown"))
+
 
         # Cache key
         cache_key = f"{question[:50]}_{hash(context[:100])}"
         if cache_key in self.response_cache:
-            print("[DEBUG] Using cached response for streaming")
+            logger.debug("Using cached response for streaming")
             # For cached responses, yield in chunks to simulate streaming
             cached_response = self.response_cache[cache_key]
             if isinstance(cached_response, str):
@@ -334,6 +352,7 @@ class OptimizedChatbot:
 
         # Generate streaming response
         try:
+            logger.debug("Entered _generate_response_stream")
             if hasattr(self.llm, 'stream'):
                 stream = self.llm.stream(prompt)
                 for chunk in stream:
@@ -350,7 +369,7 @@ class OptimizedChatbot:
                     yield ' '.join(words[i:i + 10]) + ' '
                     time.sleep(0.05)
         except Exception as e:
-            print(f"[ERROR] LLM streaming call failed: {e}")
+            logger.error("LLM streaming call failed", exc_info=True)
             fallback_response = self._generate_fallback_response(question, context)            
             for word in fallback_response.split():
                 yield word + ' '
@@ -385,7 +404,9 @@ class OptimizedChatbot:
     """
         return self.context_optimizer.count_tokens_cached(template)
     
-    def _create_optimized_prompt(self, history: str, context: str, question: str, detailed: bool = False) -> str:
+    def _create_optimized_prompt(
+        self, history: str, context: str, question: str, detailed: bool = False
+    ) -> str:
         """
         Create optimized prompt for the LLM with concise/detailed control.
         
@@ -401,9 +422,15 @@ class OptimizedChatbot:
 
         # Set length instructions
         if detailed:
-            length_rule = "Provide a comprehensive, detailed answer using context and examples."
+            length_rule = (
+                "Provide a comprehensive, detailed answer using the context and "
+                "examples where possible. Expand on key points thoroughly."
+            )
         else:
-            length_rule = "Provide a concise answer within ~600 characters using only relevant context."
+            length_rule = (
+                "Provide a concise answer within ~600 characters using only relevant context. "
+                "When relevant, use bullet points or numbered lists to organize information."
+            )
 
         prompt = f"""
     You are a helpful assistant restricted to answering only with information from the provided context or the relevant website.
@@ -421,13 +448,13 @@ class OptimizedChatbot:
     Instructions:
     1. {length_rule}
     2. Use **bold** for key terms and short markdown lists if needed.
-    3. When relevant, include bullet points or numbered lists to organize information
-    4.If the context contains multiple relevant pieces of information, synthesize them into a cohesive response
-    5. Do not fabricate information outside the knowledge base or site scope.
-    6. If the query is irrelevant (e.g., medical diagnostics, treatments), politely respond that you cannot answer.
-    7. If context is insufficient but query seems relevant, fall back to the site-specific web search content.
+    3. If the context contains multiple relevant pieces of information, synthesize them into a cohesive response.
+    4. Do not fabricate information outside the knowledge base or site scope.
+    5. If the query is irrelevant (e.g., medical diagnostics, treatments), politely respond that you cannot answer.
+    6. If context is insufficient but query seems relevant, fall back to the site-specific web search content.
     """
         return prompt.strip()
+
 
     
     def _fallback_web_search(self, query: str, site: str) -> str:
@@ -460,13 +487,13 @@ class OptimizedChatbot:
                                     scraped_texts.append(f"[{title}]({url}): {result}")
                                     break
                     except Exception as e:
-                        print(f"[ERROR] Web scraping failed: {e}")
+                        logger.error("Web scraping failed", exc_info=True)
                         continue
             
             return "\n\n".join(scraped_texts[:8])
             
         except Exception as e:
-            print(f"[ERROR] Web search failed: {e}")
+            logger.error("Web search failed", exc_info=True)
             return "No additional context available from web search."
     
     def _generate_fallback_response(self, question: str, context: str) -> str:

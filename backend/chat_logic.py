@@ -47,7 +47,7 @@ def build_chatbot_response(query: str, chat_history: list, site: str = "ditstek.
     """
     Enhanced chatbot response function with all optimizations.
     """
-    optimized_chatbot = OptimizedChatbot(llm, model="gpt-3.5-turbo")
+    optimized_chatbot = OptimizedChatbot(llm, model="gpt-4o-mini")
 
     try:
         response, success = optimized_chatbot.get_detailed_response(

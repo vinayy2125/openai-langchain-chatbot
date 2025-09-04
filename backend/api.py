@@ -26,7 +26,7 @@ DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
 
 # Make sure llm is already initialized
-optimized_chatbot = OptimizedChatbot(llm, model="gpt-3.5-turbo")
+optimized_chatbot = OptimizedChatbot(llm, model="gpt-4o-mini")
 print("✅ Optimized chatbot initialized successfully")
 
 app = FastAPI()
