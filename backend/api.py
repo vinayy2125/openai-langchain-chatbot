@@ -26,7 +26,7 @@ DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
 
 # Make sure llm is already initialized
-optimized_chatbot = OptimizedChatbot(llm, model="gpt-3.5-turbo")
+optimized_chatbot = OptimizedChatbot(llm, model="gpt-4o-mini")
 print("✅ Optimized chatbot initialized successfully")
 
 app = FastAPI()
@@ -156,7 +156,6 @@ def stream_response_generator(query: str, session_id: str) -> Generator[str, Non
     rows = get_messages_for_session(session_id)
     history = [(r, m) for (r, m, _) in rows]
     
-    # Get streaming response from chatbot
     try:
         response_generator = optimized_chatbot.get_detailed_response(
             query=query,
@@ -168,28 +167,22 @@ def stream_response_generator(query: str, session_id: str) -> Generator[str, Non
         source_flag = None
         matched = True
         
-        # Stream chunks
         for chunk in response_generator:
             full_response += chunk
-            
-            # Convert chunk to HTML
-            chunk_html = markdown2.markdown(chunk, extras=["fenced-code-blocks", "tables"]).strip()
-            
-            # Send chunk as SSE
+
             data = {
                 "session_id": session_id,
-                "chunk": chunk_html,
+                "chunk": chunk,   # ✅ send plain markdown text, frontend renders
                 "source": source_flag,
                 "matched": matched,
                 "done": False
             }
             yield f"data: {json.dumps(data)}\n\n"
         
-        # Save complete response to database
+        # Save full conversation
         save_message(session_id=session_id, role="user", message=query.strip(), timestamp=timestamp)
         save_message(session_id=session_id, role="bot", message=full_response, timestamp=timestamp)
         
-        # Send completion signal
         completion_data = {
             "session_id": session_id,
             "chunk": "",
@@ -200,7 +193,6 @@ def stream_response_generator(query: str, session_id: str) -> Generator[str, Non
         yield f"data: {json.dumps(completion_data)}\n\n"
         
     except Exception as e:
-        # Handle streaming errors
         error_data = {
             "session_id": session_id,
             "chunk": f"I apologize, but I'm experiencing technical difficulties: {str(e)}",
@@ -209,6 +201,7 @@ def stream_response_generator(query: str, session_id: str) -> Generator[str, Non
             "done": True
         }
         yield f"data: {json.dumps(error_data)}\n\n"
+
 
 # ----------------------------
 # API Routes
@@ -293,7 +286,7 @@ def get_chat_messages(session_id: str):
         raise HTTPException(status_code=404, detail="No messages found for this session")
     messages = [
         {"role": role, 
-         "message": markdown2.markdown(msg, extras=["fenced-code-blocks", "tables"]).strip(),
+         "message": msg,
          "timestamp": ts.isoformat() if ts else None
          }
         for (role, msg, ts) in rows
