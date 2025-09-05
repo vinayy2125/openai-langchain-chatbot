@@ -315,72 +315,83 @@ class OptimizedChatbot:
             return self._generate_fallback_response(question, optimized_context)
 
     def _generate_response_stream(
-        self,
-        context: Union[str, List[Tuple[str, dict]]],
-        history: str,
-        question: str,
-        detailed: bool = False
-    ) -> Generator[str, None, None]:
-        """Generate streaming response with clean markdown (no broken words)."""
-        logger.debug("Entered _generate_response_stream")
+                self,
+                context: Union[str, List[Tuple[str, dict]]],
+                history: str,
+                question: str,
+                detailed: bool = False
+            ) -> Generator[str, None, None]:
+            """Generate streaming response with clean markdown (no broken words)."""
+            logger.debug("Entered _generate_response_stream")
 
-        # Normalize context into a single string
-        if isinstance(context, list):
-            context_chunks = []
-            for i, chunk in enumerate(context):
-                if isinstance(chunk, tuple):
-                    text, meta = chunk
-                    source_info = meta.get("source", meta.get("url", "N/A"))
-                    context_chunks.append(f"Source {i+1} ({source_info}):\n{text}")
-                else:
-                    context_chunks.append(str(chunk))
-            context = "\n\n---\n\n".join(context_chunks)
+            # Normalize context into a single string
+            if isinstance(context, list):
+                context_chunks = []
+                for i, chunk in enumerate(context):
+                    if isinstance(chunk, tuple):
+                        text, meta = chunk
+                        source_info = meta.get("source", meta.get("url", "N/A"))
+                        context_chunks.append(f"Source {i+1} ({source_info}):\n{text}")
+                    else:
+                        context_chunks.append(str(chunk))
+                context = "\n\n---\n\n".join(context_chunks)
 
-        prompt = self._create_optimized_prompt(history, context, question, detailed)
+            prompt = self._create_optimized_prompt(history, context, question, detailed)
 
-        cache_key = f"{question[:50]}_{hash(context[:100])}"
-        if cache_key in self.response_cache:
-            cached_response = self.response_cache[cache_key]
-            # ✅ Stream full sentences from cached response
-            sentences = re.split(r'(?<=[.!?]) +', cached_response)
-            for s in sentences:
-                yield s.strip() + " "
-                time.sleep(0.05)
-            return
-
-        try:
-            if hasattr(self.llm, 'stream'):
-                stream = self.llm.stream(prompt)
-                full_response = ""
-
-                for chunk in stream:
-                    content = chunk.content if hasattr(chunk, 'content') else chunk
-                    if content:
-                        full_response += content
-                        # ✅ Yield whole sentences only (prevents broken markdown)
-                        sentences = re.split(r'(?<=[.!?]) +', content)
-                        for s in sentences:
-                            yield s.strip() + " "
-
-                # ✅ Save full response in cache
-                self.response_cache[cache_key] = full_response
-
-            else:
-                raw_answer = self.llm.invoke(prompt)
-                response = raw_answer.content if isinstance(raw_answer, AIMessage) else str(raw_answer)
-                self.response_cache[cache_key] = response
-                sentences = re.split(r'(?<=[.!?]) +', response)
+            cache_key = f"{question[:50]}_{hash(context[:100])}"
+            if cache_key in self.response_cache:
+                cached_response = self.response_cache[cache_key]
+                sentences = re.split(r'(?<=[.!?]) +', cached_response)
                 for s in sentences:
-                    yield s.strip() + " "
-                    time.sleep(0.05)
+                    if s.strip():
+                        yield s + " "
+                        time.sleep(0.05)
+                return
 
-        except Exception:
-            logger.error("LLM streaming call failed", exc_info=True)
-            fallback_response = self._generate_fallback_response(question, context)
-            sentences = re.split(r'(?<=[.!?]) +', fallback_response)
-            for s in sentences:
-                yield s.strip() + " "
-                time.sleep(0.05)
+            try:
+                if hasattr(self.llm, 'stream'):
+                    stream = self.llm.stream(prompt)
+                    buffer = ""
+                    full_response = ""
+
+                    for chunk in stream:
+                        content = chunk.content if hasattr(chunk, 'content') else chunk
+                        if not content:
+                            continue
+
+                        buffer += content
+                        full_response += content
+
+                        # yield only when we see sentence boundary
+                        while re.search(r'(?<=[.!?\n]) +', buffer):
+                            sentences = re.split(r'(?<=[.!?\n]) +', buffer, maxsplit=1)
+                            yield sentences[0]
+                            buffer = sentences[1] if len(sentences) > 1 else ""
+
+                    if buffer:
+                        yield buffer  # flush leftover
+
+                    self.response_cache[cache_key] = full_response
+
+                else:
+                    raw_answer = self.llm.invoke(prompt)
+                    response = raw_answer.content if isinstance(raw_answer, AIMessage) else str(raw_answer)
+                    self.response_cache[cache_key] = response
+                    sentences = re.split(r'(?<=[.!?]) +', response)
+                    for s in sentences:
+                        if s.strip():
+                            yield s + " "
+                            time.sleep(0.05)
+
+            except Exception:
+                logger.error("LLM streaming call failed", exc_info=True)
+                fallback_response = self._generate_fallback_response(question, context)
+                sentences = re.split(r'(?<=[.!?]) +', fallback_response)
+                for s in sentences:
+                    if s.strip():
+                        yield s + " "
+                        time.sleep(0.05)
+
 
     def _format_chunk(self, chunk: str) -> str:
         return chunk
@@ -420,51 +431,46 @@ class OptimizedChatbot:
         self, history: str, context: str, question: str, detailed: bool = False
     ) -> str:
         """
-        Create optimized prompt for the LLM with concise/detailed control.
-        
+        Create optimized prompt for the LLM with unrestricted detailed response.
+
         Args:
             history: Chat history as string
             context: Optimized context string
             question: User's latest query
             detailed: Whether to generate detailed answer (True) or concise (False)
-            
+
         Returns:
             Prompt string
         """
 
         # Set length instructions
-        if detailed:
-            length_rule = (
-                "Provide a comprehensive, detailed answer using the context and "
-                "examples where possible. Expand on key points thoroughly."
-            )
-        else:
-            length_rule = (
-                "Provide a concise answer within ~5000 characters using only relevant context. "
-                "When relevant, use bullet points or numbered lists to organize information."
-            )
+        length_rule = (
+            "Provide a comprehensive, detailed answer using the context and "
+            "examples where possible. Expand on key points thoroughly. "
+            "Do not restrict the output length."
+        )
 
         prompt = f"""
-    You are a helpful assistant restricted to answering only with information from the provided context or the relevant website.
-    If the user's question is outside the website’s domain, politely decline or use fallback web search context.
+You are a helpful assistant restricted to answering only with information from the provided context or the relevant website.
+If the user's question is outside the website’s domain, politely decline or use fallback web search context.
 
-    Conversation so far:
-    {history}
+Conversation so far:
+{history}
 
-    Relevant context from the knowledge base:
-    {context}
+Relevant context from the knowledge base:
+{context}
 
-    User's latest question:
-    {question}
+User's latest question:
+{question}
 
-    Instructions:
-    1. {length_rule}
-    2. Use **bold** for key terms and short markdown lists if needed.
-    3. If the context contains multiple relevant pieces of information, synthesize them into a cohesive response.
-    4. Do not fabricate information outside the knowledge base or site scope.
-    5. If the query is irrelevant (e.g., medical diagnostics, treatments), politely respond that you cannot answer.
-    6. If context is insufficient but query seems relevant, fall back to the site-specific web search content.
-    """
+Instructions:
+1. {length_rule}
+2. Use **bold** for key terms and short markdown lists if needed.
+3. If the context contains multiple relevant pieces of information, synthesize them into a cohesive response.
+4. Do not fabricate information outside the knowledge base or site scope.
+5. If the query is irrelevant (e.g., medical diagnostics, treatments), politely respond that you cannot answer.
+6. If context is insufficient but query seems relevant, fall back to the site-specific web search content.
+"""
         return prompt.strip()
 
 
