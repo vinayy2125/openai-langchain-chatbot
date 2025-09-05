@@ -173,12 +173,12 @@ def stream_response_generator(query: str, session_id: str) -> Generator[str, Non
             full_response += chunk
             
             # Convert chunk to HTML
-            chunk_html = markdown2.markdown(chunk, extras=["fenced-code-blocks", "tables"]).strip()
+            #chunk_html = markdown2.markdown(chunk, extras=["fenced-code-blocks", "tables"]).strip()
             
             # Send chunk as SSE
             data = {
                 "session_id": session_id,
-                "chunk": chunk_html,
+                "chunk": chunk,
                 "source": source_flag,
                 "matched": matched,
                 "done": False
@@ -293,7 +293,7 @@ def get_chat_messages(session_id: str):
         raise HTTPException(status_code=404, detail="No messages found for this session")
     messages = [
         {"role": role, 
-         "message": markdown2.markdown(msg, extras=["fenced-code-blocks", "tables"]).strip(),
+         "message": msg,
          "timestamp": ts.isoformat() if ts else None
          }
         for (role, msg, ts) in rows
