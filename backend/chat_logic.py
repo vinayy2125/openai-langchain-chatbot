@@ -1,9 +1,13 @@
+from dotenv import load_dotenv
+import os    
 from backend.retriever import retriever
 from typing import List, Tuple, Any
 from backend.search_client import search_site
 from crawler.scraper import scrape_url
 from backend.services.chatbot_optimizer import OptimizedChatbot
 from backend.llm_client import llm  # Ensure llm is initialized before importing here
+
+load_dotenv()
 
 def _dedupe_chunks(docs) -> List[Tuple[str, dict]]:
     """
@@ -47,7 +51,7 @@ def build_chatbot_response(query: str, chat_history: list, site: str = "ditstek.
     """
     Enhanced chatbot response function with all optimizations.
     """
-    optimized_chatbot = OptimizedChatbot(llm, model="gpt-4o-mini")
+    optimized_chatbot = OptimizedChatbot(llm, model="gpt-4o-mini")  # Ensure model matches llm
 
     try:
         response, success = optimized_chatbot.get_detailed_response(

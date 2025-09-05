@@ -17,6 +17,7 @@ from functools import lru_cache
 from langchain.schema import AIMessage
 import queue
 import threading
+import re, time
 
 # Configure the logger
 logging.basicConfig(
@@ -32,16 +33,16 @@ class ContextOptimizer:
     while maximizing relevance and information retention.
     """
     
-    def __init__(self, model: str = "gpt-3.5-turbo"):
+    def __init__(self, model: str = "gpt-4o-mini"):
         self.model = model
         self.encoding = tiktoken.encoding_for_model(model)
         self.model_limits = {
-            "gpt-3.5-turbo": 4096,
-            "gpt-3.5-turbo-16k": 16384,
-            "gpt-4": 8192,
-            "gpt-4-32k": 32768,
-            "gpt-4-turbo": 128000,
-            "gpt-4o": 128000
+            # "gpt-3.5-turbo": 4096,
+            # "gpt-3.5-turbo-16k": 16384,
+            # "gpt-4": 8192,
+            # "gpt-4-32k": 32768,
+            # "gpt-4-turbo": 128000,
+            "gpt-4o-mini": 128000
         }
         self.context_limit = self.model_limits.get(model, 4096)
     
@@ -52,8 +53,8 @@ class ContextOptimizer:
     
     def score_chunk_relevance(self, chunk: str, question: str) -> float:
         """Score chunk relevance based on keyword overlap"""
-        question_words = set(question.lower().split())
-        chunk_words = set(chunk.lower().split())
+        question_words = set(question.lower())
+        chunk_words = set(chunk.lower())
         
         overlap = len(question_words.intersection(chunk_words))
         total_question_words = len(question_words)
@@ -232,12 +233,15 @@ class OptimizedChatbot:
         # De-duplicate and preserve metadata
         unique_texts = _dedupe_chunks(all_docs)  # now returns List[Tuple[str, dict]]
 
-        # Format context with source labels
-        MAX_CHUNKS = 2
+        # Define MAX_CHUNKS within the method
+        MAX_CHUNKS = 2  # Adjust the value as needed
+
+        # Format context without source labels for frontend
         context_chunks = []
         for i, (text, meta) in enumerate(unique_texts[:MAX_CHUNKS]):
             source_info = meta.get("source", meta.get("url", "N/A"))
-            context_chunks.append(f"Source {i+1} ({source_info}):\n{text}")
+            logger.debug("Source %d: %s", i + 1, source_info)  # Log source info for backend traceability
+            context_chunks.append(text)  # Exclude source_info from context
 
         context_text = "\n\n---\n\n".join(context_chunks)
 
@@ -310,12 +314,17 @@ class OptimizedChatbot:
             logger.error("LLM call failed", exc_info=True)
             return self._generate_fallback_response(question, optimized_context)
 
-    def _generate_response_stream(self, context: Union[str, List[Tuple[str, dict]]], history: str, question: str, detailed: bool = False) -> Generator:
+    def _generate_response_stream(
+        self,
+        context: Union[str, List[Tuple[str, dict]]],
+        history: str,
+        question: str,
+        detailed: bool = False
+    ) -> Generator[str, None, None]:
+        """Generate streaming response with clean markdown (no broken words)."""
         logger.debug("Entered _generate_response_stream")
-        """Generate streaming response with optimized context"""
-        template_tokens = self._count_template_tokens()
 
-        # Ensure context is string
+        # Normalize context into a single string
         if isinstance(context, list):
             context_chunks = []
             for i, chunk in enumerate(context):
@@ -327,53 +336,56 @@ class OptimizedChatbot:
                     context_chunks.append(str(chunk))
             context = "\n\n---\n\n".join(context_chunks)
 
-        # Log final context
-        logger.debug("Final context for streaming: %s", context[:500] + "...") if len(context) > 500 else logger.debug("Final context for streaming: %s", context)
-
-        # Create prompt
         prompt = self._create_optimized_prompt(history, context, question, detailed)
-        logger.debug("Using llm type: %s Has stream: %s", type(self.llm), hasattr(self.llm, "stream"))
-        logger.debug("Model: %s", getattr(self.llm, "model_name", "unknown"))
 
-
-        # Cache key
         cache_key = f"{question[:50]}_{hash(context[:100])}"
         if cache_key in self.response_cache:
-            logger.debug("Using cached response for streaming")
-            # For cached responses, yield in chunks to simulate streaming
             cached_response = self.response_cache[cache_key]
-            if isinstance(cached_response, str):
-                words = cached_response.split()
-                chunk_size = 10
-                for i in range(0, len(words), chunk_size):
-                    yield ' '.join(words[i:i + chunk_size]) + ' '
-                    time.sleep(0.05)  # Small delay for streaming effect
+            # ✅ Stream full sentences from cached response
+            sentences = re.split(r'(?<=[.!?]) +', cached_response)
+            for s in sentences:
+                yield s.strip() + " "
+                time.sleep(0.05)
             return
 
-        # Generate streaming response
         try:
-            logger.debug("Entered _generate_response_stream")
             if hasattr(self.llm, 'stream'):
                 stream = self.llm.stream(prompt)
+                full_response = ""
+
                 for chunk in stream:
                     content = chunk.content if hasattr(chunk, 'content') else chunk
                     if content:
-                        yield content
-                        self.response_cache[cache_key] = self.response_cache.get(cache_key, "") + content
+                        full_response += content
+                        # ✅ Yield whole sentences only (prevents broken markdown)
+                        sentences = re.split(r'(?<=[.!?]) +', content)
+                        for s in sentences:
+                            yield s.strip() + " "
+
+                # ✅ Save full response in cache
+                self.response_cache[cache_key] = full_response
+
             else:
                 raw_answer = self.llm.invoke(prompt)
                 response = raw_answer.content if isinstance(raw_answer, AIMessage) else str(raw_answer)
                 self.response_cache[cache_key] = response
-                words = response.split()
-                for i in range(0, len(words), 10):
-                    yield ' '.join(words[i:i + 10]) + ' '
+                sentences = re.split(r'(?<=[.!?]) +', response)
+                for s in sentences:
+                    yield s.strip() + " "
                     time.sleep(0.05)
-        except Exception as e:
+
+        except Exception:
             logger.error("LLM streaming call failed", exc_info=True)
-            fallback_response = self._generate_fallback_response(question, context)            
-            for word in fallback_response.split():
-                yield word + ' '
+            fallback_response = self._generate_fallback_response(question, context)
+            sentences = re.split(r'(?<=[.!?]) +', fallback_response)
+            for s in sentences:
+                yield s.strip() + " "
                 time.sleep(0.05)
+
+    def _format_chunk(self, chunk: str) -> str:
+        return chunk
+
+
   
     @lru_cache(maxsize=1)
     def _count_template_tokens(self) -> int:
@@ -428,7 +440,7 @@ class OptimizedChatbot:
             )
         else:
             length_rule = (
-                "Provide a concise answer within ~600 characters using only relevant context. "
+                "Provide a concise answer within ~5000 characters using only relevant context. "
                 "When relevant, use bullet points or numbered lists to organize information."
             )
 
