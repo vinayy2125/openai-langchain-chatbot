@@ -123,3 +123,65 @@ Please provide a helpful answer.
         
     except Exception as e:
         return f"I apologize, but I'm experiencing technical difficulties: {str(e)}", False
+
+def get_prompt_response(session_id: str, selected_prompt_id: int):
+    """
+    Return nested follow-ups for a given prompt ID.
+    Include detailed answer if requested.
+    """
+    from backend.api import _get_conn  # Import _get_conn from api.py
+    conn = _get_conn()
+    cursor = conn.cursor()
+
+    # Fetch the selected prompt
+    cursor.execute("""
+        SELECT prompt_text, response_text
+        FROM prompts
+        WHERE id = %s
+    """, (selected_prompt_id,))
+    prompt = cursor.fetchone()
+
+    if not prompt:
+        cursor.close()
+        conn.close()
+        return None, "Prompt not found", False
+
+    prompt_text, response_text = prompt
+
+    # Fetch child prompts
+    cursor.execute("""
+        SELECT id, prompt_text, response_text, display_order
+        FROM prompts
+        WHERE parent_id = %s
+        ORDER BY display_order ASC
+    """, (selected_prompt_id,))
+    child_prompts = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    # Format child prompts
+    follow_ups = [
+        {
+            "id": row[0],
+            "prompt_text": row[1],
+            "response_text": row[2],
+            "display_order": row[3]
+        }
+        for row in child_prompts
+    ]
+
+    return follow_ups, response_text, True
+
+# Modify build_chatbot_response to enforce website-only responses
+def build_chatbot_response(query, history):
+    # Initialize meta
+    meta = {}
+
+    # Enforce website-only responses
+    if not meta.get("used_web"):
+        answer = "I don’t have this detail. Please mail at admin@admin.com"
+        matched = False
+
+    # ...existing logic...
+    return answer, matched, meta
