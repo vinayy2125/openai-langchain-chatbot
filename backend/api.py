@@ -12,8 +12,12 @@ import os
 from backend.chat_logic import build_chatbot_response
 from .services.chatbot_optimizer import OptimizedChatbot
 from backend.llm_client import llm
+from backend.logger import log_event
+from backend.db_utils import _get_conn
+import logging
 
 from dotenv import load_dotenv
+from functools import lru_cache
 
 # ----------------------------
 # Setup
@@ -36,6 +40,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Configure the logger
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("api")
 
 # ----------------------------
 # Pydantic Models
@@ -79,36 +91,62 @@ class Prompt(BaseModel):
 # ----------------------------
 # DB Helpers
 # ----------------------------
-def _get_conn():
-    return psycopg2.connect(
-        dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT,
-        options="-c client_encoding=UTF8"
-    )
-
 def save_user_and_new_session(*, username=None, email=None, mobile=None, browser, ip) -> str:
     conn = _get_conn()
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO users (username, email, mobile, browser, ip)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (email) DO UPDATE
-        SET username = COALESCE(EXCLUDED.username, users.username),
-            mobile   = COALESCE(EXCLUDED.mobile, users.mobile),
-            browser  = EXCLUDED.browser,
-            ip       = EXCLUDED.ip
-        RETURNING id
-    """, (username, email, mobile, browser, ip))
-    user_id = cursor.fetchone()[0]
+
+    # Check if the user already exists
+    cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
+    user = cursor.fetchone()
+
+    if user:
+        user_id = user[0]
+        # Update existing user details
+        cursor.execute(
+            """
+            UPDATE users
+            SET username = COALESCE(%s, username),
+                mobile = COALESCE(%s, mobile),
+                browser = %s,
+                ip = %s
+            WHERE id = %s
+            """,
+            (username, mobile, browser, ip, user_id)
+        )
+    else:
+        # Insert new user
+        cursor.execute(
+            """
+            INSERT INTO users (username, email, mobile, browser, ip)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (username, email, mobile, browser, ip)
+        )
+        user_id = cursor.fetchone()[0]
+
+    # Deactivate existing sessions for the user
     cursor.execute("UPDATE sessions SET is_active = FALSE WHERE user_id = %s", (user_id,))
+
+    # Create a new session
     session_id = str(uuid4())
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT INTO sessions (user_id, session_id, title, browser, ip, is_active)
         VALUES (%s, %s, %s, %s, %s, TRUE)
-    """, (user_id, session_id, "New Chat", browser, ip))
-    cursor.execute("""
+        """,
+        (user_id, session_id, "New Chat", browser, ip)
+    )
+
+    # Insert a default bot message
+    cursor.execute(
+        """
         INSERT INTO messages (session_id, role, message, timestamp)
         VALUES (%s, %s, %s, %s)
-    """, (session_id, "bot", "Hello! How can I assist you today?", datetime.now().isoformat()))
+        """,
+        (session_id, "bot", "Hello! How can I assist you today?", datetime.now().isoformat())
+    )
+
     conn.commit()
     cursor.close()
     conn.close()
@@ -139,6 +177,7 @@ def get_messages_for_session(session_id):
     conn.close()
     return rows
 
+@lru_cache(maxsize=128)
 def _prompt_type(prompt_id, parent_id) -> str:
     if parent_id is None:
         return "root"
@@ -160,10 +199,10 @@ def _seed_root_prompts():
             INSERT INTO prompts (prompt_text, response_text, display_order, parent_id)
             VALUES (%s, %s, %s, NULL)
         """, [
-            ("Why are you here?", None, 1),
-            ("What can I help you with?", None, 2),
-            ("Tell me about your goals", None, 3),
-            ("Custom chat", None, 4)
+            ("AI/ML", None, 1),
+            ("Do you want to explore our custom development services?", None, 2),
+            ("Can you share your business goals or challenges?", None, 3),
+            ("Would you like to discuss a tailored digital solution?", None, 4)
         ])
         conn.commit()
         print("✅ Seeded default root prompts")
@@ -173,17 +212,27 @@ def _seed_root_prompts():
 _seed_root_prompts()
 
 def save_followups(parent_id: int, followups: List[str]) -> List[int]:
-    """Persist generated follow-ups into prompts table as children"""
+    """Persist generated follow-ups into prompts table as children."""
     conn = _get_conn()
     cursor = conn.cursor()
     ids = []
     for idx, text in enumerate(followups, start=1):
-        cursor.execute("""
-            INSERT INTO prompts (prompt_text, response_text, parent_id, display_order)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id
-        """, (text, None, parent_id, idx))
-        ids.append(cursor.fetchone()[0])
+        # Check if the follow-up already exists
+        cursor.execute("SELECT id FROM prompts WHERE parent_id = %s AND prompt_text = %s", (parent_id, text))
+        existing_prompt = cursor.fetchone()
+        if existing_prompt:
+            logger.debug("Follow-up already exists: %s", text)
+            ids.append(existing_prompt[0])
+        else:
+            cursor.execute(
+                """
+                INSERT INTO prompts (prompt_text, response_text, parent_id, display_order)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id
+                """,
+                (text, None, parent_id, idx)
+            )
+            ids.append(cursor.fetchone()[0])
     conn.commit()
     cursor.close()
     conn.close()
@@ -193,7 +242,7 @@ def save_followups(parent_id: int, followups: List[str]) -> List[int]:
 # Streaming Generator
 # ----------------------------
 def stream_response_generator(query: Optional[str], session_id: str, selected_prompt_id: Optional[int] = None):
-    timestamp = datetime.now().isoformat()
+    user_timestamp = datetime.now().isoformat()
     rows = get_messages_for_session(session_id)
     history = [(r, m) for (r, m, _) in rows]
 
@@ -210,25 +259,38 @@ def stream_response_generator(query: Optional[str], session_id: str, selected_pr
                 raise ValueError("Prompt not found")
             prompt_text = row[0]
 
-            # Generate main response
+            # Combine prompt + user query if present
+            combined_query = prompt_text
+            if query:
+                combined_query += f"\n\nUser additional input: {query}"
+
+            # Generate main response (streaming)
             response_generator = optimized_chatbot.get_detailed_response(
-                query=prompt_text, chat_history=history, stream=True
+                query=combined_query, chat_history=history, stream=True
             )
             full_response = ""
             for chunk in response_generator:
                 full_response += chunk
                 yield f"data: {json.dumps({'session_id': session_id,'chunk': chunk,'done': False})}\n\n"
 
-            # Save bot response
-            save_message(session_id=session_id, role="bot", message=full_response, timestamp=timestamp)
+            # Save messages
+            save_message(session_id=session_id, role="user", message=query or prompt_text, timestamp=user_timestamp)
+            bot_timestamp = datetime.now().isoformat()
+            save_message(session_id=session_id, role="bot", message=full_response, timestamp=bot_timestamp)
 
-            # Generate follow-ups
-            followup_prompt = f"Based on: '{prompt_text}', suggest 5 follow-up questions for deeper discussion."
-            followups = optimized_chatbot.generate_followups(followup_prompt, num=5)
-            followup_ids = save_followups(selected_prompt_id, followups)
+            # Check if follow-ups already exist for this prompt
+            existing_children = get_child_prompts(selected_prompt_id)
+            if not existing_children:
+                followup_prompt = f"Based on: '{prompt_text}', suggest 5 follow-up questions for deeper discussion."
+                followups = optimized_chatbot.generate_followups(followup_prompt, num=5)
+                followup_ids = save_followups(selected_prompt_id, followups)
 
-            for fid, ftext in zip(followup_ids, followups):
-                yield f"data: {json.dumps({'session_id': session_id,'chunk': ftext,'prompt_id': fid,'type': 'followup','done': False})}\n\n"
+                for fid, ftext in zip(followup_ids, followups):
+                    yield f"data: {json.dumps({'session_id': session_id,'chunk': ftext,'prompt_id': fid,'parent_prompt_id': selected_prompt_id,'type': 'followup','done': False})}\n\n"
+            else:
+                # Return existing follow-ups
+                for child in existing_children:
+                    yield f"data: {json.dumps({'session_id': session_id,'chunk': child.prompt_text,'prompt_id': child.id,'parent_prompt_id': selected_prompt_id,'type': 'followup','done': False})}\n\n"
 
         else:
             # Free chat flow
@@ -240,13 +302,15 @@ def stream_response_generator(query: Optional[str], session_id: str, selected_pr
                 full_response += chunk
                 yield f"data: {json.dumps({'session_id': session_id,'chunk': chunk,'done': False})}\n\n"
 
-            save_message(session_id=session_id, role="user", message=query.strip(), timestamp=timestamp)
-            save_message(session_id=session_id, role="bot", message=full_response, timestamp=timestamp)
+            save_message(session_id=session_id, role="user", message=query.strip(), timestamp=user_timestamp)
+            bot_timestamp = datetime.now().isoformat()
+            save_message(session_id=session_id, role="bot", message=full_response, timestamp=bot_timestamp)
 
         yield f"data: {json.dumps({'session_id': session_id,'chunk': '', 'done': True})}\n\n"
 
     except Exception as e:
         yield f"data: {json.dumps({'session_id': session_id,'chunk': str(e),'done': True})}\n\n"
+
 
 # ----------------------------
 # API Routes
@@ -264,9 +328,30 @@ def register_user(user: UserCreate):
 
 @app.post("/chat/send-stream")
 async def send_message_stream(req: SentMessage):
+    """Streaming chat endpoint"""
+    log_event("LLM request initiated", session_id=req.session_id, query=req.query[:200])
+
+    # Save the selected root prompt if clicked
+    if req.selected_prompt_id:
+        conn = _get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT prompt_text FROM prompts WHERE id = %s", (req.selected_prompt_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if row:
+            save_message(session_id=req.session_id, role="user", message=row[0], timestamp=datetime.now().isoformat())
+
     return StreamingResponse(
         stream_response_generator(req.query, req.session_id, req.selected_prompt_id),
         media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+        }
     )
 
 @app.get("/chat/{session_id}/messages", response_model=HistoryResponse)
@@ -274,38 +359,82 @@ def get_chat_messages(session_id: str):
     rows = get_messages_for_session(session_id)
     if not rows:
         raise HTTPException(status_code=404, detail="No messages found for this session")
-    messages = [{"role": role, "message": msg, "timestamp": ts.isoformat() if ts else None} for (role, msg, ts) in rows]
+    messages = [
+        {
+            "role": role,
+            "message": msg.strip(),  # Ensure message is clean and includes selected prompt
+            "timestamp": ts.isoformat() if ts else None
+        }
+        for (role, msg, ts) in rows
+    ]
     return HistoryResponse(session_id=session_id, messages=messages)
 
 @app.get("/prompts/root", response_model=List[Prompt])
 def get_root_prompts():
+    """Fetch top-level prompts with updated greeting message."""
     conn = _get_conn()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT id, prompt_text, response_text, display_order, parent_id
-        FROM prompts WHERE parent_id IS NULL ORDER BY display_order ASC
+        SELECT id, prompt_text, response_text, display_order
+        FROM prompts
+        WHERE parent_id IS NULL
+        ORDER BY display_order ASC
     """)
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
-    return [
-        Prompt(id=row[0], prompt_text=row[1], response_text=row[2], display_order=row[3], type=_prompt_type(row[0], row[4]))
-        for row in rows
-    ]
+
+    log_event("Root prompts fetched", prompt_ids=[row[0] for row in rows])
+
+    # Define the default message
+    default_message = "👋 Hey there! Glad you stopped by.\nI can point you in the right direction — just tell me what’s on your mind."
+
+    # Build the response
+    prompts = []
+    for row in rows:
+        prompt_text = default_message if row[1] == "How can I assist you today?" else row[1]
+        prompts.append({
+            "id": row[0],
+            "prompt_text": prompt_text,
+            "response_text": row[2],
+            "display_order": row[3],
+            "type": "root"  # Root prompts always have type "root"
+        })
+
+    return prompts
 
 @app.get("/prompts/{prompt_id}/children", response_model=List[Prompt])
 def get_child_prompts(prompt_id: int):
+    """Always generate follow-up questions dynamically for a given prompt ID."""
     conn = _get_conn()
     cursor = conn.cursor()
-    cursor.execute("""
-        SELECT id, prompt_text, response_text, display_order, parent_id
-        FROM prompts WHERE parent_id = %s ORDER BY display_order ASC
-    """, (prompt_id,))
-    rows = cursor.fetchall()
+    cursor.execute("SELECT prompt_text FROM prompts WHERE id = %s", (prompt_id,))
+    row = cursor.fetchone()
     cursor.close()
     conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+
+    prompt_text = row[0]
+    followup_prompt = f"Based on: '{prompt_text}', suggest 5 follow-up questions for deeper discussion."
+    followups = optimized_chatbot.generate_followups(followup_prompt, num=5)
+    followup_ids = save_followups(prompt_id, followups)
+
+    rows = [
+        (fid, ftext, None, idx + 1)
+        for idx, (fid, ftext) in enumerate(zip(followup_ids, followups))
+    ]
+
+    log_event("Follow-up questions dynamically generated", parent_prompt_id=prompt_id, follow_up_ids=[row[0] for row in rows])
     return [
-        Prompt(id=row[0], prompt_text=row[1], response_text=row[2], display_order=row[3], type=_prompt_type(row[0], row[4]))
+        {
+            "id": row[0],
+            "prompt_text": row[1].strip(),  # Ensure no serial numbers or extra formatting
+            "response_text": None,  # Exclude response_text
+            "display_order": row[3],
+            "type": _prompt_type(row[0], prompt_id)  # Dynamically determine type
+        }
         for row in rows
     ]
 

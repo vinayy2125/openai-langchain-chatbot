@@ -6,6 +6,8 @@ from backend.search_client import search_site
 from crawler.scraper import scrape_url
 from backend.services.chatbot_optimizer import OptimizedChatbot
 from backend.llm_client import llm  # Ensure llm is initialized before importing here
+from backend.logger import log_event
+from backend.db_utils import _get_conn
 
 load_dotenv()
 
@@ -129,7 +131,6 @@ def get_prompt_response(session_id: str, selected_prompt_id: int):
     Return nested follow-ups for a given prompt ID.
     Include detailed answer if requested.
     """
-    from backend.api import _get_conn  # Import _get_conn from api.py
     conn = _get_conn()
     cursor = conn.cursor()
 
@@ -144,6 +145,7 @@ def get_prompt_response(session_id: str, selected_prompt_id: int):
     if not prompt:
         cursor.close()
         conn.close()
+        log_event("Prompt not found", prompt_id=selected_prompt_id, session_id=session_id)
         return None, "Prompt not found", False
 
     prompt_text, response_text = prompt
@@ -159,6 +161,8 @@ def get_prompt_response(session_id: str, selected_prompt_id: int):
 
     cursor.close()
     conn.close()
+
+    log_event("Follow-up prompts generated", parent_prompt_id=selected_prompt_id, follow_up_ids=[row[0] for row in child_prompts], session_id=session_id)
 
     # Format child prompts
     follow_ups = [
