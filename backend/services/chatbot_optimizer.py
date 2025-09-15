@@ -10,11 +10,12 @@ This service provides optimized chatbot response generation with:
 import logging
 import sys
 import tiktoken
-from typing import List, Tuple, Dict, Generator, Union
+from typing import List, Tuple, Dict, Generator, Union, AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-import queue
-import threading
+from langchain.schema import AIMessage
+import re
+from langchain.schema import AIMessage
 import re
 import time
 from langchain.schema import AIMessage
@@ -125,8 +126,109 @@ class OptimizedChatbot:
     def __init__(self, llm, model: str = "gpt-4o-mini"):
         self.llm = llm
         self.model = model
+        self.follow_ups = {}
+        self.session_data = {}
+        self.conversation_history = {}
+
+    def add_follow_up(self, session_id: str, follow_up: str) -> None:
+        """Add a follow-up question for a session."""
+        if session_id not in self.follow_ups:
+            self.follow_ups[session_id] = []
+        self.follow_ups[session_id].append(follow_up)
+
+    def get_follow_ups(self, session_id: str) -> list[str]:
+        """Get follow-up questions for a session."""
+        return self.follow_ups.get(session_id, [])
+        
+    def get_session_data(self, session_id: str) -> dict:
+        """Get session data for a given session ID."""
+        return self.session_data.get(session_id, {})
+
+    def initialize_session(self, session_id: str, initial_data: dict) -> None:
+        """Initialize a new session with data."""
+        self.session_data[session_id] = initial_data
+        self.conversation_history[session_id] = []
+        
+    def add_to_conversation_history(self, session_id: str, role: str, content: str) -> None:
+        """Add a message to the conversation history."""
+        if session_id not in self.conversation_history:
+            self.conversation_history[session_id] = []
+        self.conversation_history[session_id].append({"role": role, "content": content})
+        
+    def get_conversation_history(self, session_id: str) -> List[dict]:
+        """Get conversation history for a session."""
+        return self.conversation_history.get(session_id, [])
+        
+    def format_conversation_history(self, history: List[dict]) -> str:
+        """Format conversation history into a string."""
+        formatted = []
+        for msg in history:
+            formatted.append(f"{msg['role'].upper()}: {msg['content']}")
+        return "\n".join(formatted)
+
+    def check_requirements(self, session_id: str) -> bool:
+        """Check if all required information is collected."""
+        data = self.get_session_data(session_id)
+        return all(data.get(key) for key in ["initial_prompt", "state"])
+
+
+
+    async def generate_next_follow_up(self, session_id: str):
+        """Generate the next follow-up question with streaming."""
+        history = self.get_conversation_history(session_id)
+        prompt = f"Based on this conversation:\n{self.format_conversation_history(history)}\nWhat should I ask next?"
+        
+        # Use astream for token-by-token streaming
+        async for chunk in self.llm.astream(prompt):
+            if hasattr(chunk, 'content'):
+                yield chunk.content
+            else:
+                yield str(chunk)
+
+
+    async def generate_complete_response(self, session_id: str, query: str) -> str:
+        """Generate a complete response based on conversation history."""
+        history = self.get_conversation_history(session_id)
+        prompt = f"Based on this conversation:\n{self.format_conversation_history(history)}\nPlease respond to: {query}"
+        response = await self.llm.ainvoke(prompt)
+        return response.content if isinstance(response, AIMessage) else str(response)
+
+    async def generate_suggestions(self, session_id: str) -> List[str]:
+        """Generate suggestions based on the conversation."""
+        history = self.get_conversation_history(session_id)
+        prompt = f"Based on this conversation:\n{self.format_conversation_history(history)}\nSuggest 3 relevant follow-up questions."
+        response = await self.llm.ainvoke(prompt)
+        suggestions = response.content.split("\n") if isinstance(response, AIMessage) else str(response).split("\n")
+        return [s.strip() for s in suggestions if s.strip()]
+
+    async def generate_followups(self, followup_prompt: str, num: int = 5) -> List[str]:
+        """Generate follow-up questions and track them."""
+        logger.debug("Generating follow-up questions for prompt: %s", followup_prompt)
+        try:
+            response = await self.llm.ainvoke(followup_prompt)
+            if isinstance(response, AIMessage):
+                followups = response.content.split("\n")
+            else:
+                followups = str(response).split("\n")
+
+            # Filter and track follow-ups
+            unique_followups = list(set(
+                re.sub(r"^\d+\.\s*", "", followup.strip())
+                for followup in followups
+                if followup.strip()
+            ))
+
+            # Add follow-ups to manager
+            for follow_up in unique_followups[:num]:
+                self.add_follow_up("session_id_placeholder", follow_up)
+
+            return unique_followups[:num]
+        except Exception as e:
+            logger.error("Failed to generate follow-up questions: %s", e)
+            return ["Follow-up generation failed. Please try again."]
         self.context_optimizer = ContextOptimizer(model)
         self.response_cache = {}
+        self.generated_followups = []  # Store generated follow-ups internally
         
     def get_detailed_response(self, query: str, chat_history: list, site: str = "ditstek.com", stream: bool = False) -> Generator:
         context = self._retrieve_context(query, site)
@@ -138,6 +240,8 @@ class OptimizedChatbot:
     
     def _generate_response_stream(self, question: str, context: str, history: str) -> Generator[str, None, None]:
         logger.debug("Entered _generate_response_stream")
+
+        # Format context with separators and metadata
         if isinstance(context, list):
             context_chunks = []
             for i, chunk in enumerate(context):
@@ -149,11 +253,15 @@ class OptimizedChatbot:
                     context_chunks.append(str(chunk))
             context = "\n\n---\n\n".join(context_chunks)
 
+        # Log the formatted context
+        logger.debug("Formatted Context: %s", context)
+
         template_tokens = self._count_template_tokens()
         optimized_context, stats = self.context_optimizer.optimize_context(context, question, history, template_tokens)
         logger.debug("Optimization stats: %s", stats)
 
         prompt = self._create_optimized_prompt(history, optimized_context, question)
+        logger.debug("Final Prompt: %s", prompt)
 
         cache_key = f"{question[:50]}_{hash(optimized_context[:100])}"
         if cache_key in self.response_cache:
@@ -200,26 +308,6 @@ class OptimizedChatbot:
                 if s.strip():
                     yield s + " "
                     time.sleep(0.05)
-
-    def generate_followups(self, followup_prompt: str, num: int = 5) -> List[str]:
-        """Generate follow-up questions based on the given follow-up prompt."""
-        logger.debug("Generating follow-up questions for prompt: %s", followup_prompt)
-        try:
-            response = self.llm.invoke(followup_prompt)
-            if isinstance(response, AIMessage):
-                followups = response.content.split("\n")
-            else:
-                followups = str(response).split("\n")
-
-            # Filter out duplicates, overly verbose questions, remove markdown formatting, and strip serial numbers
-            unique_followups = list(set(
-                re.sub(r"^\d+\.\s*", "", re.sub(r"\*\*|\*", "", followup.strip()))  # Remove serial numbers and markdown symbols
-                for followup in followups
-                if followup.strip() and not followup.startswith("-") and len(followup.strip()) < 200
-            ))
-            return unique_followups[:num]
-        except Exception as e:
-            logger.error("Failed to generate follow-up questions: %s", e)
             return ["Follow-up generation failed. Please try again."]
 
     def _retrieve_context(self, query: str, site: str) -> str:
@@ -338,3 +426,5 @@ I apologize, but I'm experiencing technical difficulties. Based on the available
 Please try rephrasing your question or contact support for more detailed assistance.
 Would you like me to try a different approach to answer your question?
 """
+
+# Follow-ups are now handled internally by the OptimizedChatbot class
