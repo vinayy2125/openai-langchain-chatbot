@@ -129,12 +129,75 @@ class OptimizedChatbot:
         self.follow_ups = {}
         self.session_data = {}
         self.conversation_history = {}
+        # Initialize optimization + caching utilities (previously misplaced)
+        self.context_optimizer = ContextOptimizer(model)
+        self.response_cache = {}
+        self.generated_followups = []  # Store generated follow-ups internally
 
     def add_follow_up(self, session_id: str, follow_up: str) -> None:
         """Add a follow-up question for a session."""
         if session_id not in self.follow_ups:
             self.follow_ups[session_id] = []
         self.follow_ups[session_id].append(follow_up)
+
+    # --- Follow-up Streaming Support -------------------------------------------------
+    def stream_follow_up_generation(self, conversation_history: list[dict], latest_query: str, prompt_context: str):
+        """Generate follow-up suggestions/questions as a streaming word-level generator.
+
+        Yields raw text chunks (words with leading spaces preserved) so caller can
+        convert them into SSE events (status=follow_up_chunk).
+        """
+        history_text = []
+        for m in conversation_history:
+            role = m.get("role", "")
+            content = m.get("content", "")
+            history_text.append(f"{role.upper()}: {content}")
+        history_compiled = "\n".join(history_text)
+
+        prompt = f"""You are an assistant that asks EXACTLY ONE next clarifying question to efficiently gather the most important missing information before giving a final answer.
+Conversation so far:\n{history_compiled}\n\nOriginal Context (may be empty):\n{prompt_context}\n\nLatest user query (or starting context): {latest_query}\n\nInstructions:
+- Think briefly about what critical piece of information is still missing.
+- Ask ONE concise, specific question that moves the conversation forward.
+- Do NOT output more than one question.
+- Do NOT include numbering, bullet points, quotes, or any explanation.
+- The output MUST be only the question text ending with a question mark.
+Output:
+<single question only>
+"""
+
+        # Prefer streaming if available
+        try:
+            if hasattr(self.llm, 'stream'):
+                buffer = ""
+                for chunk in self.llm.stream(prompt):
+                    content = getattr(chunk, 'content', str(chunk))
+                    if not content:
+                        continue
+                    buffer += content
+                    # Emit word-level pieces (retain leading spaces for fidelity)
+                    import re as _re
+                    while True:
+                        match = _re.match(r'\s*\S+', buffer)
+                        if not match:
+                            break
+                        token = match.group(0)
+                        yield token
+                        buffer = buffer[len(token):]
+                # Flush remainder
+                if buffer:
+                    yield buffer
+            else:
+                # Fallback single invoke
+                resp = self.llm.invoke(prompt)
+                text = getattr(resp, 'content', str(resp))
+                # Yield word-level tokens
+                import re as _re
+                for tok in _re.findall(r'\s*\S+', text):
+                    yield tok
+        except Exception:
+            import traceback
+            logger.error("Follow-up streaming failed", exc_info=True)
+            yield " What specific detail would help me give you the best answer?"
 
     def get_follow_ups(self, session_id: str) -> list[str]:
         """Get follow-up questions for a session."""
@@ -226,9 +289,6 @@ class OptimizedChatbot:
         except Exception as e:
             logger.error("Failed to generate follow-up questions: %s", e)
             return ["Follow-up generation failed. Please try again."]
-        self.context_optimizer = ContextOptimizer(model)
-        self.response_cache = {}
-        self.generated_followups = []  # Store generated follow-ups internally
         
     def get_detailed_response(self, query: str, chat_history: list, site: str = "ditstek.com", stream: bool = False) -> Generator:
         context = self._retrieve_context(query, site)

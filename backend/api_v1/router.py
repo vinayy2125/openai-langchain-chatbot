@@ -27,11 +27,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["v1"])
 
 # Dependencies
+_follow_up_manager_instance: Optional[FollowUpManager] = None
+
 def get_follow_up_manager():
-    from backend.llm_client import llm
-    from backend.services.chatbot_optimizer import OptimizedChatbot
-    chatbot = OptimizedChatbot(llm)
-    return chatbot
+    """Return a singleton FollowUpManager so in-memory session state persists across requests."""
+    global _follow_up_manager_instance
+    if _follow_up_manager_instance is None:
+        from backend.llm_client import llm
+        _follow_up_manager_instance = FollowUpManager(llm=llm)
+    return _follow_up_manager_instance
 
 # Common headers for SSE
 SSE_HEADERS = {
@@ -243,108 +247,79 @@ async def send_message_stream(
     3. Final detailed response with suggestions
     """
     try:
-        # Validate session
-        session_id = req.session_id.strip() if req.session_id else None
+        # 1. Validate session id
+        session_id = (req.session_id or '').strip()
         if not session_id:
             raise HTTPException(status_code=422, detail="Invalid session_id provided")
 
-        timestamp = datetime.now().isoformat()
-
-        # Get or initialize session state
+        # 2. Fetch existing session (in-memory) – persists via singleton manager
         session_data = follow_up_manager.get_session_data(session_id)
-        if not session_data:
-            if not req.prompt_id:
-                raise HTTPException(status_code=422, detail="prompt_id required for new session")
-                
-            # Initialize session with prompt
-            prompt_data = await initialize_session_with_prompt(session_id, req.prompt_id)
-            
-            # Create session state
-            session_state = SessionState(
-                prompt_id=str(req.prompt_id),
-                prompt_text=prompt_data["prompt_text"],
-                requirements_met=False,
-                follow_up_count=0,
-                conversation_history=[]
-            )
-            
-            # Initialize in follow_up_manager
-            session_data = {
-                "prompt_id": str(req.prompt_id),
-                "prompt_text": prompt_data["prompt_text"],
-                "state": session_state.model_dump()
-            }
-            follow_up_manager.initialize_session(session_id=session_id, initial_data=session_data)
+        is_new = not session_data or not session_data.get("prompt_context")
 
-        # Handle new prompt selection
-        if req.prompt_id and str(req.prompt_id) != str(session_data.get("prompt_id")):
-            session_data = await initialize_session_with_prompt(session_id, req.prompt_id)
+        # 3. If new: establish prompt context from prompt_id OR first free-text query
+        if is_new:
+            prompt_context = None
+            prompt_id_str = None
+            if req.prompt_id:
+                try:
+                    prompt_db = await initialize_session_with_prompt(session_id, req.prompt_id)
+                    prompt_context = prompt_db["prompt_text"]
+                    prompt_id_str = str(req.prompt_id)
+                except HTTPException:
+                    # Fallback to free-text if DB prompt fetch fails and query exists
+                    if req.query:
+                        prompt_context = req.query.strip()
+                    else:
+                        raise
+            else:
+                prompt_context = (req.query or '').strip() or "General assistance"
             follow_up_manager.initialize_session(
                 session_id=session_id,
-                prompt_id=req.prompt_id,
-                prompt_context=session_data["prompt_text"]
+                prompt_id=prompt_id_str,
+                prompt_context=prompt_context
             )
-            logger.info(f"New prompt selected for session {session_id}: {req.prompt_id}")
+            session_data = follow_up_manager.get_session_data(session_id)
+            # If the initial free-text query started the session, store it as first user message only once
+            if req.query:
+                await save_message(MessageCreate(
+                    content=req.query.strip(),
+                    role="user",
+                    session_id=session_id
+                ))
+                follow_up_manager.add_to_conversation_history(session_id, "user", req.query.strip())
+        else:
+            # Continuing session; ignore new prompt_id attempts
+            if req.prompt_id and str(req.prompt_id) != str(session_data.get("prompt_id")):
+                logger.warning(
+                    f"Ignoring new prompt_id {req.prompt_id} for existing session {session_id}; "
+                    f"continuing with original {session_data.get('prompt_id')}"
+                )
+            # Append user reply if provided
+            if req.query:
+                await save_message(MessageCreate(
+                    content=req.query.strip(),
+                    role="user",
+                    session_id=session_id
+                ))
+                follow_up_manager.add_to_conversation_history(session_id, "user", req.query.strip())
 
-        # Process user message if provided
-        if req.query:
-            await save_message(MessageCreate(
-                content=req.query.strip(),
-                role="user",
-                session_id=session_id
-            ))
-            follow_up_manager.add_to_conversation_history(session_id, "user", req.query.strip())
-
-        # Get session state
-        state = SessionState(**session_data.get("state", {}))
         conversation_history = follow_up_manager.get_conversation_history(session_id)
 
         # Check if we need more follow-ups
         if not follow_up_manager.check_requirements(session_id):
             async def stream_follow_up():
-                # Initialize empty list to collect chunks
-                follow_up_text = []
-                
-                # Initial state
+                from backend.chat_logic import build_chatbot_response
                 yield f"data: {json.dumps({'status': 'processing', 'message': 'Preparing follow-up question...'})}\n\n"
-                
-                # Stream each chunk as it's generated
-                async for chunk in follow_up_manager.generate_next_follow_up(session_id):
-                    follow_up_text.append(chunk)
-                    yield f"data: {json.dumps({'status': 'follow_up_chunk', 'chunk': chunk})}\n\n"
-                
-                # Get complete follow-up text
-                complete_follow_up = ''.join(follow_up_text)
-                
-                # Save the complete follow-up question
-                await save_message(MessageCreate(
-                    content=complete_follow_up,
-                    role="assistant",
-                    session_id=session_id
-                ))
-
-                # Create follow-up object for final message
-                follow_up = FollowUp(
-                    type=FollowUpType.CLARIFICATION,
-                    question=complete_follow_up,
-                    context="Gathering more information to provide a complete response",
-                    options=None
-                )
-
-                # Send final message with complete follow-up
-                yield f"data: {json.dumps(StreamingChatResponse(
-                    status='follow_up',
-                    message='Follow-up complete',
-                    follow_up=follow_up,
-                    conversation_history=conversation_history
-                ).model_dump())}\n\n"
-
-            # Return streaming response
-            return StreamingResponse(
-                stream_follow_up(),
-                media_type="text/event-stream",
-                headers=SSE_HEADERS
-            )
+                # Reuse unified streaming generator (follow_up mode)
+                async for evt in build_chatbot_response(
+                    session_id=session_id,
+                    follow_up_manager=follow_up_manager,
+                    conversation_history=conversation_history,
+                    prompt_context=session_data.get('prompt_context'),
+                    mode="follow_up"
+                ):
+                    yield evt
+            return StreamingResponse(stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS)
 
         # Requirements are met, generate full response
         async def generate_full_response():
