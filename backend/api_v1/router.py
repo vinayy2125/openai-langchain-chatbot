@@ -321,41 +321,19 @@ async def send_message_stream(
                     yield evt
             return StreamingResponse(stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS)
 
-        # Requirements are met, generate full response
-        async def generate_full_response():
-            # Initial state message
-            yield f"data: {json.dumps({'status': 'processing', 'message': 'Generating response...'})}\n\n"
-
-            # Generate complete response
-            response = await follow_up_manager.generate_complete_response(
+        # Requirements met: stream full response chunks using build_chatbot_response(mode='complete')
+        async def generate_full_response_stream():
+            from backend.chat_logic import build_chatbot_response
+            async for evt in build_chatbot_response(
                 session_id=session_id,
-                conversation_history=conversation_history
-            )
+                follow_up_manager=follow_up_manager,
+                conversation_history=conversation_history,
+                prompt_context=session_data.get('prompt_context'),
+                mode='complete'
+            ):
+                yield evt
 
-            # Save assistant's response
-            await save_message(MessageCreate(
-                content=response,
-                role="assistant",
-                session_id=session_id
-            ))
-
-            # Generate suggestions
-            suggestions = await follow_up_manager.generate_suggestions(session_id)
-
-            # Final response
-            yield f"data: {json.dumps(StreamingChatResponse(
-                status='complete',
-                message='Response complete',
-                content=response,
-                suggestions=suggestions,
-                conversation_history=conversation_history
-            ).model_dump())}\n\n"
-
-        return StreamingResponse(
-            generate_full_response(),
-            media_type="text/event-stream",
-            headers=SSE_HEADERS
-        )
+        return StreamingResponse(generate_full_response_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
     except HTTPException as http_ex:
         raise http_ex
