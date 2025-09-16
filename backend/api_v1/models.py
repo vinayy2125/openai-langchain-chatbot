@@ -20,6 +20,7 @@ class SessionState(BaseModel):
     current_follow_up: Optional['FollowUp'] = Field(None, description="Current active follow-up if any")
     conversation_history: List[Dict[str, Any]] = Field(default_factory=list, description="History of the conversation")
     prompt_id: Optional[str] = Field(None, description="Current active prompt ID")
+    prompt_text: Optional[str] = Field(None, description="Selected prompt text or initial user-provided context")
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -138,20 +139,17 @@ class SentMessage(BaseModel):
     )
 
     @model_validator(mode='after')
-    def validate_prompt_id_for_new_session(self) -> 'SentMessage':
-        """Validate that prompt_id is provided for new sessions."""
+    def validate_prompt_or_query_for_new_session(self) -> 'SentMessage':
+        """Allow starting a session with either a prompt_id or an initial query.
+        Only raise if neither is provided for a brand-new DB session."""
         from backend.db_utils import get_db_conn
         conn = get_db_conn()
         cursor = conn.cursor()
         try:
-            # Check if session exists
             cursor.execute("SELECT id FROM sessions WHERE session_id = %s", (self.session_id,))
             session_exists = cursor.fetchone() is not None
-            
-            # If session doesn't exist and no prompt_id, raise error
-            if not session_exists and not self.prompt_id:
-                raise ValueError("prompt_id is required for new sessions")
-            
+            if not session_exists and not (self.prompt_id or (self.query and self.query.strip())):
+                raise ValueError("prompt_id or initial query required to start session")
             return self
         finally:
             cursor.close()
