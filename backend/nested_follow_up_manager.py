@@ -141,14 +141,19 @@ class FollowUpManager:
         session_data = self.get_session_data(session_id)
         return session_data.get("conversation_history", [])
         
-    async def generate_complete_response(self, session_id: str):
-        """Generate a complete response using streaming response"""
+    async def generate_complete_response(self, session_id: str, conversation_history: Optional[List[Dict[str, Any]]] = None):
+        """Generate a complete response using streaming response.
+
+        Accepts optional conversation_history (for callers that already fetched it)
+        to avoid duplicative lookups. Falls back to internal storage if not provided.
+        """
         from backend.chat_logic import build_chatbot_response
-        
-        conversation_history = self.get_conversation_history(session_id)
+
+        if conversation_history is None:
+            conversation_history = self.get_conversation_history(session_id)
         session_data = self.get_session_data(session_id)
         prompt_context = session_data.get("prompt_context", "")
-        
+
         complete_response = ""
         async for message in build_chatbot_response(
             session_id=session_id,
@@ -157,9 +162,27 @@ class FollowUpManager:
             prompt_context=prompt_context,
             mode="complete"
         ):
-            message_data = json.loads(message.split("data: ")[1])
+            try:
+                if "data: " in message:
+                    payload = message.split("data: ", 1)[1]
+                else:
+                    payload = message
+                message_data = json.loads(payload)
+            except Exception:
+                continue
             if message_data.get("content"):
                 complete_response = message_data["content"]
-                
+
         return complete_response
+
+    async def generate_suggestions(self, session_id: str) -> List[str]:
+        """Return suggestion follow-up questions (pass-through to chatbot).
+
+        Provides a graceful fallback to an empty list if underlying generation fails.
+        """
+        try:
+            return await self.chatbot.generate_suggestions(session_id)
+        except Exception as e:
+            logger.error(f"[generate_suggestions] Failed: {e}")
+            return []
 

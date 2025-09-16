@@ -157,16 +157,23 @@ async def build_chatbot_response(
 
         else:  # mode == "complete"
             complete_response = ""
+            # Stream chunked completion similar to follow_up_chunk pattern
             for chunk in response_stream:  # synchronous generator
-                if chunk:
-                    complete_response += str(chunk)
-                    yield f"data: {json.dumps({'status': 'complete', 'content': str(chunk)})}\n\n"
+                if not chunk:
+                    continue
+                text_chunk = str(chunk)
+                complete_response += text_chunk
+                yield f"data: {json.dumps({'status': 'complete_chunk', 'chunk': text_chunk})}\n\n"
 
             if complete_response:
-                # Save complete response to history
+                # Save full response
                 follow_up_manager.add_to_conversation_history(session_id, "assistant", complete_response)
-                # Send final message
-                yield f"data: {json.dumps({'status': 'complete', 'content': complete_response, 'final': True})}\n\n"
+                final_payload = {
+                    'status': 'complete',
+                    'content': complete_response,
+                    'final': True
+                }
+                yield f"data: {json.dumps(final_payload)}\n\n"
 
     except Exception as e:
         error_msg = f"Error in build_chatbot_response: {str(e)}"
