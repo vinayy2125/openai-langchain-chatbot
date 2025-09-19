@@ -115,7 +115,10 @@ async def build_chatbot_response(
                 if not token:
                     continue
                 full_text += token
-                yield f"data: {json.dumps({'status': 'follow_up_chunk', 'chunk': token})}\n\n"
+                yield {
+                    "status": "follow_up_chunk",
+                    "chunk": token
+                }
 
             cleaned = full_text.strip()
             # If streaming produced nothing, perform a synchronous fallback generation
