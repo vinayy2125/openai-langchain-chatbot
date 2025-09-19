@@ -19,12 +19,52 @@ from langchain.schema import AIMessage
 import re
 import time
 from langchain.schema import AIMessage
+import random
+from datetime import datetime
 
 # Configure the logger
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[log        prompt = f"        prompt = f"""
+You are a helpful assistant creating a comprehensive response based on the entire conversation history and knowledge base.
+
+Complete conversation history:
+{history}
+
+Relevant context from the knowledge base:
+{context}
+
+User's latest question:
+{question}
+
+Instructions:
+1. {length_rule}
+2. Focus on synthesizing a complete response that addresses the full conversation context, not just the latest question
+3. Ensure your answer maintains continuity with previous exchanges and addresses any themes that have emerged throughout the conversation
+4. Structure your response with appropriate headings and organization to make it easy to follow
+5. If addressing multiple questions from the conversation, organize your response to cover all relevant points
+6. If the context contains multiple relevant pieces of information, synthesize them into a cohesive response
+7. When suggesting next steps, consider the entire conversation flow and what would be most helpful given everything discussed
+8. Do not fabricate information outside the knowledge base or site scopel assistant creating a comprehensive response based on the entire conversation history and knowledge base.
+
+Complete conversation history:
+{history}
+
+Relevant context from the knowledge base:
+{context}
+
+User's latest question:
+{question}
+
+Instructions:
+1. {length_rule}
+2. Focus on synthesizing a complete response that addresses the full conversation context, not just the latest question
+3. Ensure your answer maintains continuity with previous exchanges and addresses any themes that have emerged throughout the conversation
+4. Structure your response with appropriate headings and organization to make it easy to follow
+5. If addressing multiple questions from the conversation, organize your response to cover all relevant points 
+6. If the context contains multiple relevant pieces of information, synthesize them into a cohesive response
+7. When suggesting next steps, consider the entire conversation flow and what would be most helpful given everything discussed(sys.stdout)]
 )
 logger = logging.getLogger("chatbot")
 
@@ -133,6 +173,213 @@ class OptimizedChatbot:
         self.context_optimizer = ContextOptimizer(model)
         self.response_cache = {}
         self.generated_followups = []  # Store generated follow-ups internally
+        # Ordered discovery categories for requirement elicitation (10 criteria)
+        self.requirement_categories = [
+            {
+                'key': 'goal',
+                'name': 'Project Goal / Primary Objective',
+                'question': 'What is the primary goal or outcome you want to achieve?',
+                'patterns': ['goal', 'objective', 'aim', 'purpose']
+            },
+            {
+                'key': 'users',
+                'name': 'Target Users / Audience',
+                'question': 'Who are the primary users or audience for this solution?',
+                'patterns': ['user', 'audience', 'customer', 'client', 'end user']
+            },
+            {
+                'key': 'pain_points',
+                'name': 'Pain Points / Challenges',
+                'question': 'What key pain points or challenges are you trying to solve?',
+                'patterns': ['pain', 'challenge', 'problem', 'issue', 'bottleneck']
+            },
+            {
+                'key': 'features',
+                'name': 'Desired Features / Functionality',
+                'question': 'What core features or functionality do you definitely need?',
+                'patterns': ['feature', 'functionality', 'module', 'capability']
+            },
+            {
+                'key': 'success_metrics',
+                'name': 'Success Metrics / KPIs',
+                'question': 'How will success be measured (KPIs or outcomes)?',
+                'patterns': ['kpi', 'success', 'metric', 'measure', 'roi']
+            },
+            {
+                'key': 'constraints',
+                'name': 'Budget / Resource Constraints',
+                'question': 'Do you have budget or resource constraints we should respect?',
+                'patterns': ['budget', 'cost', 'constraint', 'resource', 'limit']
+            },
+            {
+                'key': 'timeline',
+                'name': 'Timeline / Urgency',
+                'question': 'What is the desired timeline or deadline?',
+                'patterns': ['timeline', 'deadline', 'schedule', 'date', 'milestone']
+            },
+            {
+                'key': 'tech_stack',
+                'name': 'Technology / Platform Preferences',
+                'question': 'Any preferred technologies, platforms, or tools?',
+                'patterns': ['tech', 'technology', 'stack', 'platform', 'framework']
+            },
+            {
+                'key': 'integrations',
+                'name': 'Data / Integrations',
+                'question': 'What external systems or data sources need integration?',
+                'patterns': ['integration', 'api', 'data source', 'crm', 'erp']
+            },
+            {
+                'key': 'compliance',
+                'name': 'Security / Compliance / Privacy',
+                'question': 'Are there security, compliance, or privacy requirements?',
+                'patterns': ['security', 'privacy', 'compliance', 'gdpr', 'hipaa', 'pci']
+            }
+        ]
+        # Track collected category answers per session
+        self.collected_requirements: dict[str, dict] = {}
+
+        # Keep requirement_categories as reference topics but don't rigidly follow them
+        self.requirement_categories = [
+            {
+                'key': 'goal',
+                'name': 'Project Goal / Primary Objective',
+                'question': 'What is the primary goal or outcome you want to achieve?',
+                'patterns': ['goal', 'objective', 'aim', 'purpose']
+            },
+            {
+                'key': 'users',
+                'name': 'Target Users / Audience',
+                'question': 'Who are the primary users or audience for this solution?',
+                'patterns': ['user', 'audience', 'customer', 'client', 'end user']
+            },
+            {
+                'key': 'pain_points',
+                'name': 'Pain Points / Challenges',
+                'question': 'What key pain points or challenges are you trying to solve?',
+                'patterns': ['pain', 'challenge', 'problem', 'issue', 'bottleneck']
+            },
+            {
+                'key': 'features',
+                'name': 'Desired Features / Functionality',
+                'question': 'What core features or functionality do you definitely need?',
+                'patterns': ['feature', 'functionality', 'module', 'capability']
+            },
+            {
+                'key': 'success_metrics',
+                'name': 'Success Metrics / KPIs',
+                'question': 'How will success be measured (KPIs or outcomes)?',
+                'patterns': ['kpi', 'success', 'metric', 'measure', 'roi']
+            },
+            {
+                'key': 'constraints',
+                'name': 'Budget / Resource Constraints',
+                'question': 'Do you have budget or resource constraints we should respect?',
+                'patterns': ['budget', 'cost', 'constraint', 'resource', 'limit']
+            },
+            {
+                'key': 'timeline',
+                'name': 'Timeline / Urgency',
+                'question': 'What is the desired timeline or deadline?',
+                'patterns': ['timeline', 'deadline', 'schedule', 'date', 'milestone']
+            },
+            {
+                'key': 'tech_stack',
+                'name': 'Technology / Platform Preferences',
+                'question': 'Any preferred technologies, platforms, or tools?',
+                'patterns': ['tech', 'technology', 'stack', 'platform', 'framework']
+            },
+            {
+                'key': 'integrations',
+                'name': 'Data / Integrations',
+                'question': 'What external systems or data sources need integration?',
+                'patterns': ['integration', 'api', 'data source', 'crm', 'erp']
+            },
+            {
+                'key': 'compliance',
+                'name': 'Security / Compliance / Privacy',
+                'question': 'Are there security, compliance, or privacy requirements?',
+                'patterns': ['security', 'privacy', 'compliance', 'gdpr', 'hipaa', 'pci']
+            }
+        ]
+        
+        # Track conversation state differently - more flexible
+        self.conversation_state = {}  # session_id -> state object
+        
+    def _init_conversation_state(self, session_id: str):
+        """Initialize a flexible conversation state tracker."""
+        if session_id not in self.conversation_state:
+            self.conversation_state[session_id] = {
+                'topics_covered': set(),        # Topics we've discussed 
+                'topics_to_explore': set(),     # Dynamically discovered topics to ask about
+                'user_context': {},             # Key insights about user/project
+                'follow_up_strategy': 'explore',  # explore, deepen, clarify, challenge, summarize
+                'follow_up_count': 0,           # How many follow-ups we've asked
+                'last_generated': None          # Timestamp of last generation
+            }
+        return self.conversation_state[session_id]
+        
+    def reset_follow_up_count(self, session_id: str):
+        """Reset the follow-up count for a session, useful when switching prompts."""
+        if session_id in self.conversation_state:
+            self.conversation_state[session_id]['follow_up_count'] = 0
+            return True
+        return False
+
+    # ---------------- Requirement Collection Helpers -----------------
+    def _init_requirement_state(self, session_id: str):
+        if session_id not in self.collected_requirements:
+            self.collected_requirements[session_id] = {
+                'answers': {},   # key -> {'question':..., 'answer':...}
+                'asked': set()   # keys already asked
+            }
+
+    def record_user_message(self, session_id: str, content: str):
+        """Attempt to associate latest user reply with the most recently asked unanswered category."""
+        self._init_requirement_state(session_id)
+        state = self.collected_requirements[session_id]
+        # Find last assistant category question not yet answered
+        history = self.get_conversation_history(session_id)
+        last_category_key = None
+        for msg in reversed(history):
+            if msg['role'] == 'assistant' and msg.get('meta_category_key'):
+                key = msg['meta_category_key']
+                if key not in state['answers']:
+                    last_category_key = key
+                    break
+        if last_category_key:
+            state['answers'][last_category_key] = {
+                'question': next(c['question'] for c in self.requirement_categories if c['key']==last_category_key),
+                'answer': content.strip()
+            }
+
+    def _next_missing_category(self, session_id: str) -> dict | None:
+        self._init_requirement_state(session_id)
+        state = self.collected_requirements[session_id]
+        for cat in self.requirement_categories:
+            if cat['key'] not in state['answers'] and cat['key'] not in state['asked']:
+                return cat
+        # If all asked but some unanswered (user skipped), re-ask first unanswered
+        for cat in self.requirement_categories:
+            if cat['key'] not in state['answers']:
+                return cat
+        return None
+
+    def _synthesize_requirement_summary(self, session_id: str) -> tuple[str, list[str]]:
+        """Return (markdown_summary, missing_keys)."""
+        self._init_requirement_state(session_id)
+        state = self.collected_requirements[session_id]
+        lines = []
+        missing = []
+        for cat in self.requirement_categories:
+            key = cat['key']
+            if key in state['answers']:
+                ans = state['answers'][key]['answer'] or 'Not provided'
+                lines.append(f"- **{cat['name']}:** {ans}")
+            else:
+                lines.append(f"- **{cat['name']}:** _pending_")
+                missing.append(key)
+        return "\n".join(lines), missing
 
     def add_follow_up(self, session_id: str, follow_up: str) -> None:
         """Add a follow-up question for a session."""
@@ -141,63 +388,151 @@ class OptimizedChatbot:
         self.follow_ups[session_id].append(follow_up)
 
     # --- Follow-up Streaming Support -------------------------------------------------
-    def stream_follow_up_generation(self, conversation_history: list[dict], latest_query: str, prompt_context: str):
-        """Generate follow-up suggestions/questions as a streaming word-level generator.
-
-        Yields raw text chunks (words with leading spaces preserved) so caller can
-        convert them into SSE events (status=follow_up_chunk).
+    def _extract_requirement_answers_from_history(self, history: list[dict]) -> dict:
+        """Reconstruct requirement answers from conversation history without relying on stored state.
+        Strategy:
+          For each assistant message matching a requirement question, take the next user message (before next assistant) as the answer.
+        Returns: key -> {'question': str, 'answer': str}
         """
-        history_text = []
-        for m in conversation_history:
-            role = m.get("role", "")
-            content = m.get("content", "")
-            history_text.append(f"{role.upper()}: {content}")
-        history_compiled = "\n".join(history_text)
+        q_lookup = {c['question']: c for c in self.requirement_categories}
+        answers: dict[str, dict] = {}
+        for i, msg in enumerate(history):
+            if msg.get('role') == 'assistant':
+                content = (msg.get('content') or '').strip()
+                if content in q_lookup:
+                    cat = q_lookup[content]
+                    # find next user response
+                    answer_text = ''
+                    for j in range(i+1, len(history)):
+                        nm = history[j]
+                        if nm.get('role') == 'assistant':
+                            break  # unanswered / skipped
+                        if nm.get('role') == 'user':
+                            answer_text = (nm.get('content') or '').strip()
+                            break
+                    if answer_text:
+                        answers[cat['key']] = {'question': content, 'answer': answer_text}
+        return answers
 
-        prompt = f"""You are an assistant that asks EXACTLY ONE next clarifying question to efficiently gather the most important missing information before giving a final answer.
-Conversation so far:\n{history_compiled}\n\nOriginal Context (may be empty):\n{prompt_context}\n\nLatest user query (or starting context): {latest_query}\n\nInstructions:
-- Think briefly about what critical piece of information is still missing.
-- Ask ONE concise, specific question that moves the conversation forward.
-- Do NOT output more than one question.
-- Do NOT include numbering, bullet points, quotes, or any explanation.
-- The output MUST be only the question text ending with a question mark.
-Output:
-<single question only>
-"""
+    def stream_follow_up_generation(
+            self,
+            conversation_history: list[dict],
+            latest_query: str,
+            prompt_context: str,
+            combined: bool = False,
+            followup_count: int = 2
+        ):
+        """
+        Generate follow-up questions or combined answer+follow-ups.
+        
+        Key changes:
+        - Yields raw text chunks only (no `data:` or extra JSON inside).
+        - Follow-ups + suggestions handled via prompt.
+        - Context-switch options included when unrelated query detected.
+        """
 
-        # Prefer streaming if available
+        history = conversation_history or []
+        session_id = next((msg.get('session_id') for msg in history 
+                        if msg.get('session_id')), 'generic')
+
+        # Initialize or get conversation state
+        state = self._init_conversation_state(session_id)
+
+        # Build transcript (last 10 messages)
+        transcript = "\n".join([
+            f"{'USER' if msg.get('role') == 'user' else 'ASSISTANT'}: {msg.get('content', '')}"
+            for msg in history[-10:]
+        ])
+
+        category_names = ", ".join([cat['name'] for cat in self.requirement_categories])
+
+        if combined:
+            # Prompt for answer + follow-ups + suggestions
+            prompt = f"""
+    You are an expert requirements consultant having a conversation with a client.
+
+    Transcript so far:
+    {transcript}
+
+    Initial context: {prompt_context}
+    Latest user message: {latest_query}
+
+    Your task:
+    1. Consider the entire conversation context, not just the latest message:
+    - Provide a helpful response (around 100 words) that addresses the latest message while maintaining continuity
+    - Generate {followup_count} natural follow-up questions that help explore different aspects of the topic
+    - If the conversation has shifted, acknowledge the shift and provide options that either:
+        a) Connect the new direction back to the original context
+        b) Continue exploring the new direction if it seems more relevant to the user
+
+    2. Each follow-up should include 1-2 suggested answers to help guide the conversation.
+    3. Include a "suggestions" field with practical next steps that consider the full conversation history.
+    4. When appropriate, explore these areas: {category_names}
+
+    STRICT OUTPUT FORMAT (JSON only):
+    {{
+    "answer": "<helpful response that maintains conversation continuity>",
+    "follow_ups": [
+        {{
+        "question": "<thoughtful follow-up question based on conversation context>",
+        "options": ["<option1>", "<option2>"]
+        }}
+    ],
+    "suggestions": ["<suggestion1 based on full context>", "<suggestion2 based on full context>"]
+    }}
+    """
+        else:
+            # Prompt for follow-ups only
+            prompt = f"""
+    You are an expert requirements consultant having a conversation with a client.
+
+    Recent conversation transcript:
+    {transcript}
+
+    Initial context: {prompt_context}
+    Latest user message: {latest_query}
+
+    Your task:
+    1. Consider the entire conversation history, not just the latest message:
+    - Generate ONE natural follow-up question that helps advance the conversation toward a more complete understanding
+    - Focus on exploring details that haven't been discussed yet but are relevant to the overall project/topic
+    - If the conversation seems to have changed topic, offer a question that either:
+        a) Bridges the new topic back to the original context in a natural way
+        b) Acknowledges the new direction and helps explore it properly
+
+    2. Each follow-up may include 1-2 suggested answer options (using hyphens `-`) to help guide the user.
+    3. Keep the question concise and engaging. No intros or explanations.
+    4. Ensure your question feels like a natural continuation of the conversation, not an abrupt change.
+    """
+
+        # Track generation state
+        state['follow_up_count'] += 1
+        state['last_generated'] = datetime.now()
+
         try:
-            if hasattr(self.llm, 'stream'):
-                buffer = ""
+            # Streaming output from LLM
+            if hasattr(self.llm, "stream"):
                 for chunk in self.llm.stream(prompt):
                     content = getattr(chunk, 'content', str(chunk))
-                    if not content:
-                        continue
-                    buffer += content
-                    # Emit word-level pieces (retain leading spaces for fidelity)
-                    import re as _re
-                    while True:
-                        match = _re.match(r'\s*\S+', buffer)
-                        if not match:
-                            break
-                        token = match.group(0)
-                        yield token
-                        buffer = buffer[len(token):]
-                # Flush remainder
-                if buffer:
-                    yield buffer
+                    if content:
+                        # YIELD RAW CHUNK ONLY
+                        yield content
             else:
-                # Fallback single invoke
-                resp = self.llm.invoke(prompt)
-                text = getattr(resp, 'content', str(resp))
-                # Yield word-level tokens
-                import re as _re
-                for tok in _re.findall(r'\s*\S+', text):
-                    yield tok
-        except Exception:
-            import traceback
-            logger.error("Follow-up streaming failed", exc_info=True)
-            yield " What specific detail would help me give you the best answer?"
+                # Fallback for non-streaming LLMs
+                response = self.llm.invoke(prompt)
+                text = getattr(response, 'content', str(response))
+                for line in text.split('\n'):
+                    yield line
+
+        except Exception as e:
+            logger.error(f"Follow-up generation failed: {e}", exc_info=True)
+            # Simple fallback
+            fallback = "Could you tell me more about your goals for this project?\n- Business growth\n- Process improvement"
+            for line in fallback.split('\n'):
+                yield line
+
+
+
 
     def get_follow_ups(self, session_id: str) -> list[str]:
         """Get follow-up questions for a session."""
@@ -249,20 +584,116 @@ Output:
                 yield str(chunk)
 
 
-    async def generate_complete_response(self, session_id: str, query: str) -> str:
-        """Generate a complete response based on conversation history."""
-        history = self.get_conversation_history(session_id)
-        prompt = f"Based on this conversation:\n{self.format_conversation_history(history)}\nPlease respond to: {query}"
-        response = await self.llm.ainvoke(prompt)
-        return response.content if isinstance(response, AIMessage) else str(response)
+    # async def generate_complete_response(self, session_id: str, query: str) -> str:
+    #     """Generate a comprehensive final solution using reconstructed answers from history (stateless)."""
+    #     history = self.get_conversation_history(session_id)
+    #     answers = self._extract_requirement_answers_from_history(history)
+    #     # Build markdown table-like summary
+    #     lines = []
+    #     missing = []
+    #     for cat in self.requirement_categories:
+    #         if cat['key'] in answers:
+    #             ans = answers[cat['key']]['answer'] or 'Not provided'
+    #             lines.append(f"- **{cat['name']}:** {ans}")
+    #         else:
+    #             lines.append(f"- **{cat['name']}:** _pending_")
+    #             missing.append(cat['key'])
+    #     summary_md = "\n".join(lines)
+    #     base_query = query or next((m['content'] for m in history if m['role']=='user'), '')
+    #     synthesis_instructions = (
+    #         "You are an expert solutions architect. Using the collected requirements summary below, produce a comprehensive proposal that: \n"
+    #         "1. Maps each requirement to specific solution components.\n"
+    #         "2. Provides a concise architecture overview (text).\n"
+    #         "3. Details recommended features grouped logically.\n"
+    #         "4. Lists risks with mitigations.\n"
+    #         "5. Highlights assumptions for any pending items (" + str(len(missing)) + ").\n"
+    #         "6. Ends with next 3 actionable steps.\n"
+    #         "Use only Markdown level 6 headings (######). Keep paragraphs short."
+    #     )
+    #     prompt = (
+    #         f"Conversation transcript (chronological):\n{self.format_conversation_history(history)}\n\n" \
+    #         f"Original user goal / latest query:\n{base_query}\n\n" \
+    #         f"Collected requirements summary (markdown):\n{summary_md}\n\n" \
+    #         f"{synthesis_instructions}\n\nFINAL ANSWER:"
+    #     )
+    #     try:
+    #         response = await self.llm.ainvoke(prompt)
+    #         answer = response.content if isinstance(response, AIMessage) else str(response)
+    #     except Exception:
+    #         logger.error("Final synthesis LLM call failed", exc_info=True)
+    #         answer = (
+    #             "Model synthesis failed. Here is the structured summary instead:\n\n" + summary_md
+    #         )
+    #     return answer
 
     async def generate_suggestions(self, session_id: str) -> List[str]:
-        """Generate suggestions based on the conversation."""
+        """Generate contextual action suggestions based on the conversation."""
         history = self.get_conversation_history(session_id)
-        prompt = f"Based on this conversation:\n{self.format_conversation_history(history)}\nSuggest 3 relevant follow-up questions."
-        response = await self.llm.ainvoke(prompt)
-        suggestions = response.content.split("\n") if isinstance(response, AIMessage) else str(response).split("\n")
-        return [s.strip() for s in suggestions if s.strip()]
+        
+        # For early conversations (few messages), suggest discovery actions
+        if len(history) < 6:
+            return [
+                "Schedule a discovery call",
+                "Share project documentation",
+                "Invite key stakeholders to discussion",
+                "Review similar case studies"
+            ]
+        
+        # Extract key topics/entities from conversation
+        transcript = '\n'.join([
+            f"{msg.get('role','')}: {msg.get('content','')}" 
+            for msg in history[-12:] if msg.get('content')
+        ])
+        
+        # Generate contextual suggestions
+        prompt = f"""Based on this conversation excerpt, suggest 4 specific next actions the user should take.
+Make each suggestion actionable, concrete and specific to their context.
+Keep each suggestion under 8 words if possible.
+
+Conversation:
+{transcript}
+
+Format: Return exactly 4 suggestions, each on its own line with no numbering or bullets."""
+        
+        try:
+            response = await self.llm.ainvoke(prompt)
+            content = response.content if hasattr(response, 'content') else str(response)
+            
+            # Process into clean suggestions list
+            suggestions = []
+            for line in content.strip().split('\n'):
+                clean_line = re.sub(r'^[-•*\d.)\s]+', '', line).strip()
+                if clean_line and len(suggestions) < 4:
+                    # Keep suggestions concise
+                    words = clean_line.split()
+                    if len(words) > 8:
+                        clean_line = ' '.join(words[:8])
+                    suggestions.append(clean_line)
+            
+            # Ensure we have 4 suggestions
+            while len(suggestions) < 4:
+                generic = [
+                    "Schedule a discovery workshop",
+                    "Share your project timeline",
+                    "Define success metrics",
+                    "Review proposed solution with team",
+                    "Request cost estimate",
+                    "Book a follow-up consultation"
+                ]
+                for g in generic:
+                    if g not in suggestions and len(suggestions) < 4:
+                        suggestions.append(g)
+                        
+            return suggestions
+            
+        except Exception as e:
+            logger.error(f"Failed to generate suggestions: {e}")
+            return [
+                "Schedule a discovery workshop",
+                "Share project documentation",
+                "Define key success metrics",
+                "Review next steps with team"
+            ]
 
     async def generate_followups(self, followup_prompt: str, num: int = 5) -> List[str]:
         """Generate follow-up questions and track them."""
@@ -344,8 +775,12 @@ Output:
                         continue
                     buffer += content
                     full_response += content
+                    # Log the content being added to the buffer
+                    logger.debug(f"Buffer content: {buffer}")
                     while re.search(r'(?<=[.!?\n]) +', buffer):
                         sentences = re.split(r'(?<=[.!?\n]) +', buffer, maxsplit=1)
+                        # Log the sentence being yielded
+                        logger.debug(f"Yielding sentence: {sentences[0]}")
                         yield sentences[0]
                         buffer = sentences[1] if len(sentences) > 1 else ""
                 if buffer:
@@ -425,11 +860,18 @@ Format your response with:
         return self.context_optimizer.count_tokens_cached(template)
 
     def _create_optimized_prompt(self, history: str, context: str, question: str) -> str:
-        length_rule = (
-            "Provide a comprehensive, detailed answer using the context and "
-            "examples where possible. Expand on key points thoroughly. "
-            "Do not restrict the output length."
-        )
+        length_rule = length_rule = (
+                                        "Provide a comprehensive, detailed answer using the context and "
+                                        "examples where possible. Expand on key points thoroughly. "
+                                        "Do not restrict the output length. "
+                                        "At the end of your response, append a short 'Suggestions' section "
+                                        "with 2–3 practical next steps or recommendations. "
+                                        "Use appropriate HTML formatting for readability. "
+                                        "You may use <h6> for headings and <b> or <strong> for emphasis. "
+                                        "Do not use markdown formatting like **, *, #, etc."
+                                    )
+
+
         prompt = f"""
 You are a helpful assistant restricted to answering only with information from the provided context or the relevant website.
 If the user's question is outside the website’s domain, politely decline or use fallback web search context.

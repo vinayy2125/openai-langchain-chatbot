@@ -6,6 +6,7 @@ import logging
 from typing import Optional, List
 from uuid import UUID, uuid4
 import psycopg2
+from backend.services.thread_router import ChatRouter, detect_company_intent, handle_company_query
 
 from .models import (
     UserCreate, UserRegisterResponse, SentMessage, 
@@ -152,14 +153,13 @@ async def get_chat_messages(session_id: str):
         if not messages:
             raise HTTPException(status_code=404, detail="No messages found for this session")
 
-        formatted_messages = [
-            {
+        formatted_messages = []
+        for (role, msg, ts) in messages:
+            formatted_messages.append({
                 "role": role, 
                 "message": msg,
                 "timestamp": ts.isoformat() if ts else None
-            }
-            for (role, msg, ts) in messages
-        ]
+            })
         return HistoryResponse(session_id=session_id, messages=formatted_messages)
     except HTTPException as he:
         raise he
@@ -235,28 +235,35 @@ async def get_root_prompts():
         if conn:
             conn.close()
 
+chat_router: ChatRouter = None
+
 @router.post("/chat/send-stream")
 async def send_message_stream(
     req: SentMessage,
-    follow_up_manager = Depends(get_follow_up_manager)
+    follow_up_manager=Depends(get_follow_up_manager)
 ):
     """
-    Enhanced streaming chat endpoint that handles:
-    1. Initial prompt selection and follow-up generation
-    2. Follow-up conversation flow
-    3. Final detailed response with suggestions
+    Enhanced streaming chat endpoint:
+    - Thread/topic management
+    - Company-intent override
+    - Follow-up or complete response handling
+    - Context-switch detection with suggestions
     """
     try:
-        # 1. Validate session id
         session_id = (req.session_id or '').strip()
         if not session_id:
             raise HTTPException(status_code=422, detail="Invalid session_id provided")
 
-        # 2. Fetch existing session (in-memory) – persists via singleton manager
+        # Lazy init ChatRouter
+        global chat_router
+        if chat_router is None:
+            # Initialize ChatRouter without similarity_fn
+            chat_router = ChatRouter(follow_up_manager)
+
         session_data = follow_up_manager.get_session_data(session_id)
         is_new = not session_data or not session_data.get("prompt_context")
 
-        # 3. If new: establish prompt context from prompt_id OR first free-text query
+        # --- First-time session setup ---
         if is_new:
             prompt_context = None
             prompt_id_str = None
@@ -266,20 +273,21 @@ async def send_message_stream(
                     prompt_context = prompt_db["prompt_text"]
                     prompt_id_str = str(req.prompt_id)
                 except HTTPException:
-                    # Fallback to free-text if DB prompt fetch fails and query exists
-                    if req.query:
-                        prompt_context = req.query.strip()
-                    else:
-                        raise
+                    prompt_context = (req.query or '').strip()
             else:
                 prompt_context = (req.query or '').strip() or "General assistance"
+
             follow_up_manager.initialize_session(
                 session_id=session_id,
                 prompt_id=prompt_id_str,
                 prompt_context=prompt_context
             )
+
+            if prompt_id_str and hasattr(follow_up_manager.chatbot, 'reset_follow_up_count'):
+                follow_up_manager.chatbot.reset_follow_up_count(session_id)
+
             session_data = follow_up_manager.get_session_data(session_id)
-            # If the initial free-text query started the session, store it as first user message only once
+
             if req.query:
                 await save_message(MessageCreate(
                     content=req.query.strip(),
@@ -288,13 +296,11 @@ async def send_message_stream(
                 ))
                 follow_up_manager.add_to_conversation_history(session_id, "user", req.query.strip())
         else:
-            # Continuing session; ignore new prompt_id attempts
             if req.prompt_id and str(req.prompt_id) != str(session_data.get("prompt_id")):
                 logger.warning(
                     f"Ignoring new prompt_id {req.prompt_id} for existing session {session_id}; "
                     f"continuing with original {session_data.get('prompt_id')}"
                 )
-            # Append user reply if provided
             if req.query:
                 await save_message(MessageCreate(
                     content=req.query.strip(),
@@ -304,33 +310,48 @@ async def send_message_stream(
                 follow_up_manager.add_to_conversation_history(session_id, "user", req.query.strip())
 
         conversation_history = follow_up_manager.get_conversation_history(session_id)
+        prompt_context = session_data.get('prompt_context')
 
-        # Check if we need more follow-ups
+        # --- Company intent override ---
+        if req.query and detect_company_intent(req.query):
+            async def company_stream():
+                yield f"data: {json.dumps({'status': 'processing', 'message': 'Fetching company info...'})}\n\n"
+                answer_and_suggestions = handle_company_query(req.query)
+                for msg in answer_and_suggestions:
+                    yield f"data: {json.dumps({'status': 'company', 'message': msg})}\n\n"
+            return StreamingResponse(company_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+        # --- Decide if more follow-ups are needed ---
         if not follow_up_manager.check_requirements(session_id):
             async def stream_follow_up():
                 from backend.chat_logic import build_chatbot_response
-                yield f"data: {json.dumps({'status': 'processing', 'message': 'Preparing follow-up question...'})}\n\n"
-                # Reuse unified streaming generator (follow_up mode)
+                # Directly yield the JSON-encoded string without adding an extra `data:` prefix
+                yield json.dumps({'status': 'processing', 'message': 'Preparing follow-up question...'}) + "\n\n"
+
+                # Reuse streaming follow-up generator with context switch & suggestions
                 async for evt in build_chatbot_response(
                     session_id=session_id,
                     follow_up_manager=follow_up_manager,
                     conversation_history=conversation_history,
-                    prompt_context=session_data.get('prompt_context'),
+                    prompt_context=prompt_context,
                     mode="follow_up"
                 ):
-                    yield evt
+                    # Directly yield the event without wrapping it again
+                    yield json.dumps(evt) + "\n\n"
+
             return StreamingResponse(stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS)
 
-        # Requirements met: stream full response chunks using build_chatbot_response(mode='complete')
+        # --- Requirements captured: full response streaming ---
         async def generate_full_response_stream():
             from backend.chat_logic import build_chatbot_response
             async for evt in build_chatbot_response(
                 session_id=session_id,
                 follow_up_manager=follow_up_manager,
                 conversation_history=conversation_history,
-                prompt_context=session_data.get('prompt_context'),
+                prompt_context=prompt_context,
                 mode='complete'
             ):
+                # Directly yield the event without adding an extra `data:` prefix
                 yield evt
 
         return StreamingResponse(generate_full_response_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
@@ -339,12 +360,9 @@ async def send_message_stream(
         raise http_ex
     except Exception as e:
         logger.error(f"Unexpected error in send_message_stream: {str(e)}")
-        
-        async def generate_error_stream():
-            # Initial error notification
+
+        async def generate_error_stream(e=e):
             yield f"data: {json.dumps({'status': 'processing', 'message': 'An error occurred'})}\n\n"
-            
-            # Detailed error message
             error_response = {
                 "status": "error",
                 "message": "An unexpected error occurred",
@@ -358,6 +376,7 @@ async def send_message_stream(
             headers=SSE_HEADERS
         )
 
+        
 async def handle_follow_up_phase(
     session_id: str,
     query: str,
