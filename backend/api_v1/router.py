@@ -325,8 +325,8 @@ async def send_message_stream(
         if not follow_up_manager.check_requirements(session_id):
             async def stream_follow_up():
                 from backend.chat_logic import build_chatbot_response
-                # Directly yield the JSON-encoded string without adding an extra `data:` prefix
-                yield json.dumps({'status': 'processing', 'message': 'Preparing follow-up question...'}) + "\n\n"
+                # Add the `data:` prefix to the JSON-encoded string
+                yield "data: " + json.dumps({'status': 'processing', 'message': 'Preparing response...'}) + "\n\n"
 
                 # Reuse streaming follow-up generator with context switch & suggestions
                 async for evt in build_chatbot_response(
@@ -336,14 +336,43 @@ async def send_message_stream(
                     prompt_context=prompt_context,
                     mode="follow_up"
                 ):
-                    # Directly yield the event without wrapping it again
-                    yield json.dumps(evt) + "\n\n"
+                    # Handle different event types with proper formatting
+                    if isinstance(evt, dict):
+                        status = evt.get('status', 'unknown')
+                        chunk = evt.get('chunk', '')
+                        
+                        if status == 'complete_chunk':
+                            # Main response content - keep as chunks for streaming
+                            yield "data: " + json.dumps({'status': 'complete_chunk', 'chunk': chunk}) + "\n\n"
+                        elif status == 'separator':
+                            # Separator before final suggestions
+                            yield "data: " + json.dumps({'status': 'separator', 'chunk': chunk}) + "\n\n"
+                        elif status == 'followup_header':
+                            # Header for follow-up section
+                            yield "data: " + json.dumps({'status': 'followup_header', 'chunk': chunk}) + "\n\n"
+                        elif status == 'followup_question':
+                            # Individual follow-up question
+                            yield "data: " + json.dumps({'status': 'followup', 'chunk': chunk}) + "\n\n"
+                        elif status == 'suggestion':
+                            # Suggestion
+                            yield "data: " + json.dumps({'status': 'suggestion', 'chunk': chunk}) + "\n\n"
+                        elif status == 'error':
+                            # Error handling
+                            yield "data: " + json.dumps({'status': 'error', 'message': evt.get('message', 'Unknown error')}) + "\n\n"
+                        else:
+                            # Default handling - preserve original structure
+                            yield "data: " + json.dumps(evt) + "\n\n"
+                    else:
+                        # Fallback for non-dict events
+                        yield "data: " + json.dumps({'status': 'complete_chunk', 'chunk': str(evt)}) + "\n\n"
 
             return StreamingResponse(stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS)
 
         # --- Requirements captured: full response streaming ---
         async def generate_full_response_stream():
             from backend.chat_logic import build_chatbot_response
+            yield "data: " + json.dumps({'status': 'processing', 'message': 'Generating comprehensive response...'}) + "\n\n"
+            
             async for evt in build_chatbot_response(
                 session_id=session_id,
                 follow_up_manager=follow_up_manager,
@@ -351,8 +380,35 @@ async def send_message_stream(
                 prompt_context=prompt_context,
                 mode='complete'
             ):
-                # Directly yield the event without adding an extra `data:` prefix
-                yield evt
+                # Handle comprehensive response events
+                if isinstance(evt, dict):
+                    status = evt.get('status', 'unknown')
+                    chunk = evt.get('chunk', '')
+                    
+                    if status == 'complete_chunk':
+                        # Main comprehensive response content - keep as chunks for consistent streaming
+                        yield "data: " + json.dumps({'status': 'complete_chunk', 'chunk': chunk}) + "\n\n"
+                    elif status == 'separator':
+                        # Separator before final suggestions
+                        yield "data: " + json.dumps({'status': 'separator', 'chunk': chunk}) + "\n\n"
+                    elif status == 'followup_header':
+                        # Header for exploration suggestions (keeping for compatibility)
+                        yield "data: " + json.dumps({'status': 'followup_header', 'chunk': chunk}) + "\n\n"
+                    elif status == 'followup_question':
+                        # Follow-up question
+                        yield "data: " + json.dumps({'status': 'followup', 'chunk': chunk}) + "\n\n"
+                    elif status == 'suggestion':
+                        # Suggestion
+                        yield "data: " + json.dumps({'status': 'suggestion', 'chunk': chunk}) + "\n\n"
+                    elif status == 'error':
+                        # Error handling
+                        yield "data: " + json.dumps({'status': 'error', 'message': evt.get('message', 'Unknown error')}) + "\n\n"
+                    else:
+                        # Default handling - preserve original structure
+                        yield "data: " + json.dumps(evt) + "\n\n"
+                else:
+                    # Fallback for non-dict events
+                    yield "data: " + json.dumps({'status': 'complete_chunk', 'chunk': str(evt)}) + "\n\n"
 
         return StreamingResponse(generate_full_response_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 

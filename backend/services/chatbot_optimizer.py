@@ -26,45 +26,7 @@ from datetime import datetime
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    handlers=[log        prompt = f"        prompt = f"""
-You are a helpful assistant creating a comprehensive response based on the entire conversation history and knowledge base.
-
-Complete conversation history:
-{history}
-
-Relevant context from the knowledge base:
-{context}
-
-User's latest question:
-{question}
-
-Instructions:
-1. {length_rule}
-2. Focus on synthesizing a complete response that addresses the full conversation context, not just the latest question
-3. Ensure your answer maintains continuity with previous exchanges and addresses any themes that have emerged throughout the conversation
-4. Structure your response with appropriate headings and organization to make it easy to follow
-5. If addressing multiple questions from the conversation, organize your response to cover all relevant points
-6. If the context contains multiple relevant pieces of information, synthesize them into a cohesive response
-7. When suggesting next steps, consider the entire conversation flow and what would be most helpful given everything discussed
-8. Do not fabricate information outside the knowledge base or site scopel assistant creating a comprehensive response based on the entire conversation history and knowledge base.
-
-Complete conversation history:
-{history}
-
-Relevant context from the knowledge base:
-{context}
-
-User's latest question:
-{question}
-
-Instructions:
-1. {length_rule}
-2. Focus on synthesizing a complete response that addresses the full conversation context, not just the latest question
-3. Ensure your answer maintains continuity with previous exchanges and addresses any themes that have emerged throughout the conversation
-4. Structure your response with appropriate headings and organization to make it easy to follow
-5. If addressing multiple questions from the conversation, organize your response to cover all relevant points 
-6. If the context contains multiple relevant pieces of information, synthesize them into a cohesive response
-7. When suggesting next steps, consider the entire conversation flow and what would be most helpful given everything discussed(sys.stdout)]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("chatbot")
 
@@ -721,13 +683,13 @@ Format: Return exactly 4 suggestions, each on its own line with no numbering or 
             logger.error("Failed to generate follow-up questions: %s", e)
             return ["Follow-up generation failed. Please try again."]
         
-    def get_detailed_response(self, query: str, chat_history: list, site: str = "ditstek.com", stream: bool = False) -> Generator:
+    def get_detailed_response(self, query: str, chat_history: list, site: str = "ditstek.com", stream: bool = True) -> Generator:
         context = self._retrieve_context(query, site)
         history = self._format_history(chat_history)
         logger.debug(">>> Query: %s", query)
         logger.debug(">>> Context Retrieved: %s", context)
         logger.debug(">>> Chat History: %s", history)
-        return self._generate_response_stream(query, context, history) if stream else self._generate_response(query, context, history)
+        return self._generate_response_stream(query, context, history)
     
     def _generate_response_stream(self, question: str, context: str, history: str) -> Generator[str, None, None]:
         logger.debug("Entered _generate_response_stream")
@@ -757,11 +719,7 @@ Format: Return exactly 4 suggestions, each on its own line with no numbering or 
         cache_key = f"{question[:50]}_{hash(optimized_context[:100])}"
         if cache_key in self.response_cache:
             cached_response = self.response_cache[cache_key]
-            sentences = re.split(r'(?<=[.!?]) +', cached_response)
-            for s in sentences:
-                if s.strip():
-                    yield s + " "
-                    time.sleep(0.05)
+            yield cached_response
             return
 
         try:
@@ -769,41 +727,165 @@ Format: Return exactly 4 suggestions, each on its own line with no numbering or 
                 stream = self.llm.stream(prompt)
                 buffer = ""
                 full_response = ""
+                
                 for chunk in stream:
                     content = chunk.content if hasattr(chunk, 'content') else chunk
                     if not content:
                         continue
-                    buffer += content
+                    
                     full_response += content
-                    # Log the content being added to the buffer
-                    logger.debug(f"Buffer content: {buffer}")
-                    while re.search(r'(?<=[.!?\n]) +', buffer):
-                        sentences = re.split(r'(?<=[.!?\n]) +', buffer, maxsplit=1)
-                        # Log the sentence being yielded
-                        logger.debug(f"Yielding sentence: {sentences[0]}")
-                        yield sentences[0]
-                        buffer = sentences[1] if len(sentences) > 1 else ""
-                if buffer:
+                    buffer += content
+                    
+                    # Process buffer to yield complete sections with proper formatting
+                    while True:
+                        # Look for complete sections (headers with content)
+                        header_match = re.search(r'\n(#{1,3}\s+[^\n]+)\n([^#]*?)(?=\n#{1,3}|\n\n|\Z)', buffer, re.DOTALL)
+                        if header_match and len(header_match.group(0)) > 40:
+                            section = header_match.group(0)
+                            buffer = buffer[header_match.end():]
+                            
+                            # Clean up the section - ensure single spaces between words and proper line breaks
+                            section = section.strip() + "\n\n"
+                            section = re.sub(r'\s+', ' ', section)  # Convert any whitespace to single space
+                            section = re.sub(r' +\n', '\n', section)  # Remove spaces before newlines
+                            section = re.sub(r'\n ', '\n', section)  # Remove spaces after newlines
+                            section = re.sub(r'(\n#{1,3}) ', r'\1 ', section)  # Ensure space after headers
+                            
+                            yield section
+                            continue
+                        
+                        # Look for complete paragraphs (double newline separated)
+                        paragraph_match = re.search(r'(?:^|\n\n)([^\n]+(?:\n[^\n#]+)*?)(?=\n\n|\n#{1,3}|\Z)', buffer, re.MULTILINE)
+                        if paragraph_match and len(paragraph_match.group(1)) > 30:
+                            paragraph = paragraph_match.group(0)
+                            buffer = buffer[paragraph_match.end():]
+                            
+                            # Clean formatting - ensure proper spacing and line breaks
+                            paragraph = re.sub(r'\s+', ' ', paragraph)  # Convert any whitespace to single space
+                            paragraph = re.sub(r' +\n', '\n', paragraph)  # Remove spaces before newlines
+                            paragraph = re.sub(r'\n ', '\n', paragraph)  # Remove spaces after newlines
+                            if not paragraph.endswith('\n\n'):
+                                paragraph += '\n\n'
+                            yield paragraph
+                            continue
+                        
+                        # Look for complete bullet point lists
+                        list_match = re.search(r'(\n(?:[-*•]\s+[^\n]+\n)+)', buffer)
+                        if list_match and len(list_match.group(0)) > 20:
+                            list_section = list_match.group(0) + "\n"
+                            buffer = buffer[list_match.end():]
+                            
+                            # Clean formatting - ensure proper spacing
+                            list_section = re.sub(r'\s+', ' ', list_section)  # Single spaces
+                            list_section = re.sub(r' +\n', '\n', list_section)  # No spaces before newlines
+                            list_section = re.sub(r'\n ', '\n', list_section)  # No spaces after newlines
+                            list_section = re.sub(r'(\n[-*•]) ', r'\1 ', list_section)  # Ensure space after bullet
+                            yield list_section
+                            continue
+                        
+                        # Look for complete numbered lists
+                        num_list_match = re.search(r'(\n(?:\d+\.\s+[^\n]+\n)+)', buffer)
+                        if num_list_match and len(num_list_match.group(0)) > 20:
+                            num_list = num_list_match.group(0) + "\n"
+                            buffer = buffer[num_list_match.end():]
+                            
+                            # Clean formatting - ensure proper spacing
+                            num_list = re.sub(r'\s+', ' ', num_list)  # Single spaces
+                            num_list = re.sub(r' +\n', '\n', num_list)  # No spaces before newlines
+                            num_list = re.sub(r'\n ', '\n', num_list)  # No spaces after newlines
+                            num_list = re.sub(r'(\n\d+\.) ', r'\1 ', num_list)  # Ensure space after number
+                            yield num_list
+                            continue
+                        
+                        # Look for sentence boundaries
+                        sentence_match = re.search(r'([^.!?]*[.!?]\s+)', buffer)
+                        if sentence_match and len(sentence_match.group(0)) > 50:
+                            sentence = sentence_match.group(0)
+                            buffer = buffer[sentence_match.end():]
+                            
+                            # Don't break markdown formatting
+                            if not self._would_break_markdown(sentence):
+                                sentence = re.sub(r'\s+', ' ', sentence)  # Single spaces between words
+                                sentence = re.sub(r' +([.!?])', r'\1', sentence)  # No space before punctuation
+                                yield sentence
+                                continue
+                        
+                        # Fallback: word boundary chunking
+                        words = buffer.split()
+                        if len(words) >= 15:
+                            # Find safe breaking point
+                            for i in range(10, min(len(words), 20)):
+                                word_chunk = ' '.join(words[:i])  # Remove the extra space
+                                remaining = ' '.join(words[i:])
+                                
+                                if not self._would_break_markdown(word_chunk):
+                                    buffer = remaining
+                                    # Ensure single spaces between words
+                                    word_chunk = re.sub(r'\s+', ' ', word_chunk).strip() + ' '
+                                    yield word_chunk
+                                    break
+                            else:
+                                # Ultimate fallback
+                                word_chunk = ' '.join(words[:10])  # Remove the extra space
+                                buffer = ' '.join(words[10:])
+                                word_chunk = re.sub(r'\s+', ' ', word_chunk).strip() + ' '
+                                yield word_chunk
+                        else:
+                            break
+                
+                # Send remaining content with proper cleanup
+                if buffer.strip():
+                    buffer = re.sub(r'\s+', ' ', buffer.strip())  # Single spaces between words
+                    buffer = re.sub(r' +\n', '\n', buffer)  # Remove spaces before newlines
+                    buffer = re.sub(r'\n ', '\n', buffer)  # Remove spaces after newlines
+                    
+                    # Ensure proper line breaks for structured content
+                    if '###' in buffer or '-' in buffer or any(char.isdigit() and '.' in buffer for char in buffer):
+                        # This looks like structured content, add proper spacing
+                        buffer = re.sub(r'(\n)([-*•]\s+)', r'\1\n\2', buffer)  # Add space before bullet points
+                        buffer = re.sub(r'(\n)(\d+\.\s+)', r'\1\n\2', buffer)  # Add space before numbered lists
+                        buffer = re.sub(r'(\n)(#{1,3}\s+)', r'\1\n\2', buffer)  # Add space before headers
+                    
+                    if not buffer.endswith('\n'):
+                        buffer += '\n'
                     yield buffer
+                    
                 self.response_cache[cache_key] = full_response
             else:
                 raw_answer = self.llm.invoke(prompt)
                 response = raw_answer.content if isinstance(raw_answer, AIMessage) else str(raw_answer)
                 self.response_cache[cache_key] = response
-                sentences = re.split(r'(?<=[.!?]) +', response)
-                for s in sentences:
-                    if s.strip():
-                        yield s + " "
-                        time.sleep(0.05)
+                yield response
         except Exception:
             logger.error("LLM streaming call failed", exc_info=True)
             fallback_response = self._generate_fallback_response(question, context)
-            sentences = re.split(r'(?<=[.!?]) +', fallback_response)
-            for s in sentences:
-                if s.strip():
-                    yield s + " "
-                    time.sleep(0.05)
-            return ["Follow-up generation failed. Please try again."]
+            yield fallback_response
+
+    def _would_break_markdown(self, text: str) -> bool:
+        """Check if breaking at this point would damage Markdown formatting"""
+        # Count unclosed bold markers
+        bold_count = text.count('**')
+        if bold_count % 2 != 0:
+            return True
+        
+        # Check if we're in the middle of a header
+        lines = text.split('\n')
+        if lines and lines[-1].strip().startswith('#') and not lines[-1].strip().endswith(' '):
+            return True
+        
+        # Check if we're breaking a word that might be part of markdown
+        if text.endswith('**') or text.endswith('*') or text.endswith('#'):
+            return True
+        
+        # Check for incomplete list items
+        if text.strip().endswith('-') and not text.strip().endswith(' -'):
+            return True
+        
+        # Check for incomplete numbered lists
+        if re.search(r'\d+\.$', text.strip()):
+            return True
+            
+        return False
 
     def _retrieve_context(self, query: str, site: str) -> str:
         from backend.chat_logic import _maybe_expand_queries, _dedupe_chunks
@@ -860,20 +942,15 @@ Format your response with:
         return self.context_optimizer.count_tokens_cached(template)
 
     def _create_optimized_prompt(self, history: str, context: str, question: str) -> str:
-        length_rule = length_rule = (
-                                        "Provide a comprehensive, detailed answer using the context and "
-                                        "examples where possible. Expand on key points thoroughly. "
-                                        "Do not restrict the output length. "
-                                        "At the end of your response, append a short 'Suggestions' section "
-                                        "with 2–3 practical next steps or recommendations. "
-                                        "Use appropriate HTML formatting for readability. "
-                                        "You may use <h6> for headings and <b> or <strong> for emphasis. "
-                                        "Do not use markdown formatting like **, *, #, etc."
-                                    )
+        length_rule = (
+            "Provide comprehensive, well-structured responses with proper Markdown formatting. "
+            "Use clear headings, proper spacing, bold text for emphasis, and organized sections. "
+            "Ensure all formatting is clean and readable with proper line breaks and structure."
+        )
 
 
         prompt = f"""
-You are a helpful assistant restricted to answering only with information from the provided context or the relevant website.
+You are a helpful assistant providing well-formatted, comprehensive responses using proper Markdown structure.
 If the user's question is outside the website’s domain, politely decline or use fallback web search context.
 
 Conversation so far:
@@ -885,13 +962,36 @@ Relevant context from the knowledge base:
 User's latest question:
 {question}
 
-Instructions:
+CRITICAL FORMATTING REQUIREMENTS:
 1. {length_rule}
-2. Use **bold** for key terms and short markdown lists if needed.
-3. If the context contains multiple relevant pieces of information, synthesize them into a cohesive response.
-4. Do not fabricate information outside the knowledge base or site scope.
-5. If the query is irrelevant (e.g., medical diagnostics, treatments), politely respond that you cannot answer.
-6. If context is insufficient but query seems relevant, fall back to the site-specific web search content.
+2. Use proper Markdown structure:
+   - ### for main headings (use engaging titles like "### Quick Overview", "### Key Points", "### Implementation Guide")
+   - **Bold text** for important terms, technologies, and key concepts
+   - Proper line breaks between sections
+   - Bullet points or numbered lists for clarity
+   - Code snippets with proper backticks when relevant
+
+3. Structure your response clearly:
+   - Start with a brief overview paragraph
+   - Use sections with descriptive headings
+   - Include specific details and examples
+   - End with actionable recommendations when appropriate
+
+4. Formatting best practices:
+   - Ensure proper spacing around headings and sections
+   - Use **bold** for technologies, key terms, and important concepts
+   - Include bullet points for lists and features
+   - Add line breaks for readability
+   - Use engaging, professional tone
+
+5. Content guidelines:
+   - Synthesize information from multiple context sources when available
+   - Provide comprehensive but focused answers
+   - Include relevant examples and specifics
+   - If context is limited, use general knowledge while staying on topic
+   - Do not fabricate information outside the knowledge base scope
+
+Important: Do NOT include example text, placeholders, or template content in your response. Provide only actual, relevant information.
 """
         return prompt.strip()
 
