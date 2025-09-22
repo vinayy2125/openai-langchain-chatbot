@@ -944,8 +944,22 @@ Format your response with:
     def _create_optimized_prompt(self, history: str, context: str, question: str) -> str:
         length_rule = (
             "Provide comprehensive, well-structured responses with proper Markdown formatting. "
-            "Use clear headings, proper spacing, bold text for emphasis, and organized sections. "
-            "Ensure all formatting is clean and readable with proper line breaks and structure."
+            "Use ONLY ### headings for sections - vary the heading text: "
+            "- ### Implementation Strategy "
+            "- ### Key Considerations "
+            "- ### Recommended Approach "
+            "- ### Technical Overview "
+            "- ### Next Steps "
+            "- ### Important Notes "
+            "Include specific recommendations with **bold highlights**. "
+            "Address all key points discussed in the conversation. "
+            "Make it actionable and practical with **clear next steps**. "
+            "Use natural paragraph breaks for readability. "
+            "Emphasize important frameworks, tools, or concepts with **bold**. "
+            "Structure with clear Markdown sections if helpful. "
+            "Conclude with **highlighted** next steps or recommendations. "
+            "Use Markdown formatting naturally (lists, bold, italics, etc.). "
+            "Vary heading phrases to avoid repetition. "
         )
 
 
