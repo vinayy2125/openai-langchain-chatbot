@@ -121,8 +121,8 @@ Full Conversation:
 {conversation_summary}
 
 FORMATTING INSTRUCTIONS:
-1. Provide a thorough, well-structured response (3-5 paragraphs)
-2. Use **bold text** for key concepts, technologies, and important terms
+1. Provide a thorough, well-structured response (3-5 paragraphs).
+2. Use **bold text** for key concepts, technologies, and important terms.
 3. Use ONLY ### headings for sections - vary the heading text:
    - ### Implementation Strategy
    - ### Key Considerations
@@ -130,31 +130,31 @@ FORMATTING INSTRUCTIONS:
    - ### Technical Overview
    - ### Next Steps
    - ### Important Notes
-4. Include specific recommendations with **bold highlights**
-5. Address all key points discussed in the conversation
-6. Make it actionable and practical with **clear next steps**
-7. Use natural paragraph breaks for readability
-8. Emphasize important frameworks, tools, or concepts with **bold**
-9. Structure with clear Markdown sections if helpful
-10. Conclude with **highlighted** next steps or recommendations
-11. Use Markdown formatting naturally (lists, bold, italics, etc.)
-12. Vary heading phrases to avoid repetition
+4. Include specific recommendations with **bold highlights**.
+5. Address all key points discussed in the conversation.
+6. Make it actionable and practical with **clear next steps**.
+7. Use natural paragraph breaks for readability.
+8. Emphasize important frameworks, tools, or concepts with **bold**.
+9. Structure with clear Markdown sections if helpful.
+10. Conclude with **highlighted** next steps or recommendations.
+11. Use Markdown formatting naturally (lists, bold, italics, etc.).
+12. Vary heading phrases to avoid repetition.
 
 CONTENT REQUIREMENTS:
-- Comprehensive answer addressing the original question
-- Specific recommendations based on gathered requirements
-- Technical details with **bold keywords** for clarity
-- Actionable next steps with **emphasis**
-- Practical implementation guidance
-- Use Markdown headings and formatting for structure
+- Comprehensive answer addressing the original question.
+- Specific recommendations based on gathered requirements.
+- Technical details with **bold keywords** for clarity.
+- Actionable next steps with **emphasis**.
+- Practical implementation guidance.
+- Use Markdown headings and formatting for structure.
 
 Create a complete, well-formatted response that would satisfy the user's original question while incorporating all the information gathered through our conversation.
 
 Use Markdown formatting effectively:
-- **Bold** for key concepts and technologies
-- ### headings only for major sections (vary the phrases)
-- Natural paragraph breaks for readability
-- Emphasis where appropriate
+- **Bold** for key concepts and technologies.
+- ### headings only for major sections (vary the phrases).
+- Natural paragraph breaks for readability.
+- Emphasis where appropriate.
 
 Example structure:
 **Technology/Solution** provides [comprehensive answer].
@@ -245,7 +245,28 @@ Provide 2-3 actionable suggestions based on the conversation."""
             session_id=session_id,
             follow_up_manager=self,
             conversation_history=conversation_history,
-            prompt_context=prompt_context,
+            prompt_context=f"""{prompt_context}
+
+FORMATTING INSTRUCTIONS:
+1. Provide a thorough, well-structured response (3-5 paragraphs).
+2. Use **bold text** for key concepts, technologies, and important terms.
+3. Use ONLY ### headings for sections - vary the heading text:
+   - ### Implementation Strategy
+   - ### Key Considerations
+   - ### Recommended Approach
+   - ### Technical Overview
+   - ### Next Steps
+   - ### Important Notes
+4. Include specific recommendations with **bold highlights**.
+5. Address all key points discussed in the conversation.
+6. Make it actionable and practical with **clear next steps**.
+7. Use natural paragraph breaks for readability.
+8. Emphasize important frameworks, tools, or concepts with **bold**.
+9. Structure with clear Markdown sections if helpful.
+10. Conclude with **highlighted** next steps or recommendations.
+11. Use Markdown formatting naturally (lists, bold, italics, etc.).
+12. Vary heading phrases to avoid repetition.
+""",
             mode="follow_up"
         ):
             if message and "content" in json.loads(message.split("data: ")[1]):
@@ -297,8 +318,8 @@ Full Conversation:
 {conversation_text}
 
 FORMATTING INSTRUCTIONS:
-1. Provide a thorough, well-structured response (3-5 paragraphs)
-2. Use **bold text** for key concepts, technologies, and important terms
+1. Provide a thorough, well-structured response (3-5 paragraphs).
+2. Use **bold text** for key concepts, technologies, and important terms.
 3. Use ONLY ### headings for sections - vary the heading text:
    - ### Implementation Strategy
    - ### Key Considerations
@@ -306,31 +327,31 @@ FORMATTING INSTRUCTIONS:
    - ### Technical Overview
    - ### Next Steps
    - ### Important Notes
-4. Include specific recommendations with **bold highlights**
-5. Address all key points discussed in the conversation
-6. Make it actionable and practical with **clear next steps**
-7. Use natural paragraph breaks for readability
-8. Emphasize important frameworks, tools, or concepts with **bold**
-9. Structure with clear Markdown sections if helpful
-10. Conclude with **highlighted** next steps or recommendations
-11. Use Markdown formatting naturally (lists, bold, italics, etc.)
-12. Vary heading phrases to avoid repetition
+4. Include specific recommendations with **bold highlights**.
+5. Address all key points discussed in the conversation.
+6. Make it actionable and practical with **clear next steps**.
+7. Use natural paragraph breaks for readability.
+8. Emphasize important frameworks, tools, or concepts with **bold**.
+9. Structure with clear Markdown sections if helpful.
+10. Conclude with **highlighted** next steps or recommendations.
+11. Use Markdown formatting naturally (lists, bold, italics, etc.).
+12. Vary heading phrases to avoid repetition.
 
 CONTENT REQUIREMENTS:
-- Comprehensive answer addressing the original question
-- Specific recommendations based on gathered requirements
-- Technical details with **bold keywords** for clarity
-- Actionable next steps with **emphasis**
-- Practical implementation guidance
-- Use Markdown headings and formatting for structure
+- Comprehensive answer addressing the original question.
+- Specific recommendations based on gathered requirements.
+- Technical details with **bold keywords** for clarity.
+- Actionable next steps with **emphasis**.
+- Practical implementation guidance.
+- Use Markdown headings and formatting for structure.
 
 Create a complete, well-formatted response that would satisfy the user's original question while incorporating all the information gathered through our conversation.
 
 Use Markdown formatting effectively:
-- **Bold** for key concepts and technologies
-- ### headings only for major sections (vary the phrases)
-- Natural paragraph breaks for readability
-- Emphasis where appropriate
+- **Bold** for key concepts and technologies.
+- ### headings only for major sections (vary the phrases).
+- Natural paragraph breaks for readability.
+- Emphasis where appropriate.
 
 Example structure:
 **Technology/Solution** provides [comprehensive answer].
@@ -372,10 +393,12 @@ Example structure:
             prompt = (
                 f"Based on the following response, generate 3-5 follow-up questions or suggestions to continue the conversation:\n"
                 f"Response:\n{main_response}\n\n"
-                "Instructions:\n"
-                "- Focus on clarifying user needs or providing actionable next steps\n"
-                "- Ensure the follow-ups are concise and relevant\n"
-                "- Format each follow-up as a single sentence"
+                "FORMATTING INSTRUCTIONS:\n"
+                "1. Use **bold text** for key concepts and terms.\n"
+                "2. Use ### headings for sections.\n"
+                "3. Ensure clear paragraph breaks for readability.\n"
+                "4. Provide actionable next steps with emphasis.\n"
+                "5. Structure responses with Markdown formatting.\n"
             )
 
             # Use the LLM to generate follow-ups

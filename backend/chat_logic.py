@@ -117,7 +117,7 @@ async def build_chatbot_response(
                             yield {'status': 'complete_chunk', 'chunk': word_buffer}
             
             # Add spacing and final suggestions
-            yield {'status': 'separator', 'chunk': '\n\n'}  # Extra spacing after main content
+            yield {'status': 'separator', 'chunk': '\n\n' }  # Extra spacing after main content
             
             # Add single practical suggestion using the suggestion system (no header/label)
             try:
@@ -205,33 +205,40 @@ Query: {latest_query}"""
                 stream=True
             )
             
-            # FIX: Word-level streaming with proper formatting preservation
+            # Ensure structured formatting for manual queries
             for chunk in response_stream:
                 if not chunk:
                     continue
                 text_chunk = str(chunk)
-                
-                # Clean the chunk but PRESERVE important formatting for ChatGPT-like display
-                sanitized_chunk = re.sub(r'<[^>]*>', '', text_chunk)  # Remove HTML tags only
-                
-                # Convert any H1-H5 headers to H6 headers for consistency
-                sanitized_chunk = re.sub(r'^#{1,5}\s', '###### ', sanitized_chunk, flags=re.MULTILINE)
-                
-                # PRESERVE markdown formatting and ensure proper spacing
-                if sanitized_chunk.strip():
-                    # Ensure words have proper spaces and clean formatting
-                    sanitized_chunk = re.sub(r'([a-zA-Z])([A-Z])', r'\1 \2', sanitized_chunk)  # Add space between camelCase
-                    sanitized_chunk = re.sub(r'([!?.])\s*([A-Za-z])', r'\1 \2', sanitized_chunk)  # Space after punctuation
-                    sanitized_chunk = re.sub(r'([,;:])\s*([A-Za-z])', r'\1 \2', sanitized_chunk)  # Space after commas, etc.
-                    sanitized_chunk = re.sub(r' +', ' ', sanitized_chunk)  # Multiple spaces to single
-                    sanitized_chunk = re.sub(r'\n +', '\n', sanitized_chunk)  # Remove spaces after newlines
-                    sanitized_chunk = re.sub(r' +\n', '\n', sanitized_chunk)  # Remove spaces before newlines
-                    sanitized_chunk = re.sub(r'\n{3,}', '\n\n', sanitized_chunk)  # Max 2 consecutive newlines
-                    
-                    main_response += sanitized_chunk
-                    # FIX: Use correct status key 'complete_chunk'
-                    yield {'status': 'complete_chunk', 'chunk': sanitized_chunk}
 
+                # Apply structured formatting logic
+                sections = re.split(r'\n\n', text_chunk)
+                for section in sections:
+                    if section.strip():
+                        # Convert any H1-H2 headers to H3 headers for better readability
+                        section = re.sub(r'^#{1,2}\s', '### ', section.strip(), flags=re.MULTILINE)
+
+                        # Check if this is a heading or regular content
+                        if section.startswith('###'):
+                            # Send heading with proper line breaks
+                            yield {'status': 'complete_chunk', 'chunk': '\n\n' + section + '\n\n'}
+                        else:
+                            # Send content with word-level streaming for readability
+                            words = section.split(' ')
+                            word_buffer = ""
+                            for word in words:
+                                if word_buffer:
+                                    word_buffer += ' ' + word  # Space before word (not after)
+                                else:
+                                    word_buffer = word  # First word, no space before
+                                # Send in chunks of ~5 words to maintain proper spacing
+                                if len(word_buffer.split()) >= 5:
+                                    yield {'status': 'complete_chunk', 'chunk': word_buffer}
+                                    word_buffer = ""
+                            # Send remaining words without extra trailing space
+                            if word_buffer.strip():
+                                yield {'status': 'complete_chunk', 'chunk': word_buffer}
+            
             # Add spacing after main response (no separator lines)
             yield {'status': 'separator', 'chunk': '\n\n'}  # Just spacing, no lines
 
