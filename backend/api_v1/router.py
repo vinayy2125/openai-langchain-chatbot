@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 import logging
 from typing import Optional, List
-from uuid import UUID, uuid4
+from uuid import UUID
 import psycopg2
 from backend.services.thread_router import ChatRouter, detect_company_intent, handle_company_query
 
@@ -90,59 +90,6 @@ async def register_user(user: UserCreate):
             cursor.close()
         if conn:
             conn.close()
-        conn.close()
-
-def save_user_to_db(
-    *, 
-    username: Optional[str] = None,
-    email: Optional[str] = None,
-    mobile: Optional[str] = None,
-    browser: str,
-    ip: str
-) -> str:
-    """Insert a new user if not exists, return the user ID."""
-    conn = get_db_conn()
-    cursor = conn.cursor()
-
-    try:
-        if email:
-            # Check if user already exists
-            cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
-            existing_user = cursor.fetchone()
-            if existing_user:
-                # Update existing user's browser and IP
-                cursor.execute(
-                    """
-                    UPDATE users 
-                    SET browser = %s, ip = %s, updated_at = CURRENT_TIMESTAMP
-                    WHERE email = %s
-                    RETURNING id
-                    """,
-                    (browser, ip, email)
-                )
-                return cursor.fetchone()[0]
-        
-        # Create new user
-        cursor.execute(
-            """
-            INSERT INTO users (
-                username, email, mobile, browser, ip,
-                email_opt_in, created_at, updated_at
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            RETURNING id
-            """,
-            (username, email, mobile, browser, ip, False)
-        )
-        user_id = cursor.fetchone()[0]
-        conn.commit()
-        return user_id
-    except Exception as e:
-        logger.error(f"Error in user registration: {str(e)}")
-        raise HTTPException(status_code=500, detail="Could not create session")
-    finally:
-        cursor.close()
-        conn.close()
 
 # Message History Route
 @router.get("/chat/{session_id}/messages", response_model=HistoryResponse)

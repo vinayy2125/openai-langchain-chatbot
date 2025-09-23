@@ -1,5 +1,5 @@
 from backend.llm_client import llm
-from backend.services.chatbot_optimizer_new import OptimizedChatbot
+from backend.services.chatbot_optimizer import OptimizedChatbot
 from backend.nested_follow_up_manager import FollowUpManager
 
 import json
@@ -150,7 +150,7 @@ async def build_chatbot_response(
             
             # FIX: Unified prompt instruction with smart context awareness
             if is_prompt_selection or is_manual_query:
-                enhanced_query = f"""Analyze this user query and provide an intelligent, engaging response like ChatGPT: "{latest_query}"
+                enhanced_query = f"""Analyze this user query and provide an intelligent, well-structured response: "{latest_query}"
 
 SMART RESPONSE GUIDELINES:
 
@@ -159,39 +159,65 @@ SMART RESPONSE GUIDELINES:
    - Be friendly, professional, and engaging
    - Show understanding: "Here's what I can help you with..."
 
-2. **DYNAMIC FORMATTING:**
-   - Use contextual headers: "Quick Overview", "Here's the breakdown", "Key Points"
-   - Include relevant emojis: ✅ 🚀 💡 ⚡ 📊 (sparingly)
-   - Ensure proper spacing: "Yes, we can definitely help you with that!"
-   - Use proper headers with clear spacing
+2. **CRITICAL FORMATTING REQUIREMENTS:**
+   - Use **bold text** for key technologies, concepts, and important terms
+   - Use ONLY ### headings for sections - vary the heading text:
+     * ### Quick Overview
+     * ### Key Points
+     * ### Implementation Guide
+     * ### Technical Details
+     * ### Recommended Approach
+     * ### Important Considerations
+     * ### Next Steps
+   - Include proper line breaks between sections
+   - Use bullet points for features/benefits with **bold** key terms
+   - Numbered lists for step-by-step processes
+   - Ensure natural paragraph breaks for readability
 
-3. **SMART STRUCTURE:**
-   - **Bold** key technologies, concepts, and important terms
-   - Bullet points for features/benefits
-   - Numbered lists for step-by-step processes  
-   - Clear line breaks and proper formatting
-   - Use meaningful headers (like "Quick Overview", "Key Benefits", "Implementation")
+3. **STRUCTURE REQUIREMENTS:**
+   - Start with a brief overview paragraph
+   - Use descriptive headers with proper spacing
+   - Include specific details and examples with **bold highlights**
+   - End with actionable recommendations when appropriate
+   - Use Markdown formatting naturally (lists, bold, italics, etc.)
 
-4. **CONTEXT DETECTION:**
-   - If about services we provide (web dev, mobile apps, AI, cloud), start confidently
-   - For technical questions, provide direct helpful information
-   - For vague queries, ask for clarification friendly
+4. **CONTENT GUIDELINES:**
+   - Keep responses comprehensive but focused (150-300 words)
+   - Synthesize information from multiple sources when available
+   - Provide practical, actionable information
+   - Include relevant examples and specifics
+   - Structure like professional documentation with clear flow
 
 5. **PROFESSIONAL POLISH:**
-   - Keep responses concise but comprehensive (80-150 words)
-   - End with practical next steps or takeaways
-   - Structure like ChatGPT with natural flow
+   - Use engaging, professional tone
+   - Include relevant context and background
+   - Address all aspects of the user's question
+   - Conclude with **highlighted** next steps or takeaways
 
 Query: {latest_query}"""
             else:
-                # For follow-up responses, continue conversation naturally
-                enhanced_query = f"""Continue this conversation naturally based on the context: "{latest_query}"
+                # For follow-up responses, continue conversation naturally with proper formatting
+                enhanced_query = f"""Continue this conversation naturally with proper formatting: "{latest_query}"
 
-FORMATTING REQUIREMENTS:
-- Use **bold** for key technologies, concepts, and important terms
-- Use proper headers if needed (not multiple hash symbols)
-- Keep response focused and helpful
-- Structure with clear, actionable information
+CRITICAL FORMATTING REQUIREMENTS:
+1. Use **bold text** for key technologies, concepts, and important terms
+2. Use ONLY ### headings for sections when needed:
+   - ### Key Points
+   - ### Technical Details
+   - ### Implementation Notes
+   - ### Recommendations
+3. Include proper line breaks between sections
+4. Use bullet points with **bold** key terms for clarity
+5. Ensure natural paragraph breaks for readability
+6. Structure responses with clear, actionable information
+7. Use Markdown formatting naturally (lists, bold, italics, etc.)
+
+CONTENT GUIDELINES:
+- Build upon previous conversation context naturally
+- Provide comprehensive but focused responses
+- Include specific details with **bold highlights**
+- Address the user's question thoroughly
+- End with practical next steps when appropriate
 
 Previous conversation context: {conversation_history[-2:] if len(conversation_history) >= 2 else 'None'}
 
@@ -252,17 +278,30 @@ Query: {latest_query}"""
             
             if len(user_messages) <= 1:
                 # For initial queries, ask broad requirement-gathering questions
-                follow_up_prompt = f"""Based on this initial user query about: {latest_query}
+                follow_up_prompt = f"""Analyze this initial user query and generate the SINGLE BEST follow-up question to understand their requirements better: "{latest_query}"
 
-Generate the SINGLE BEST follow-up question to understand their requirements better.
+SMART FOLLOW-UP QUESTION GUIDELINES:
 
-Instructions:
-- Generate only ONE specific, actionable follow-up question
-- Focus on gathering the most important information needed
-- Keep the question conversational and brief
-- Prioritize the most critical detail that would help provide a better response
-- Do NOT number the question, provide it as plain text
-- Make it the most valuable question to ask
+1. **CONVERSATIONAL TONE:**
+   - Start naturally: "Got it ✅" or "Absolutely!" when appropriate
+   - Be friendly, professional, and engaging
+   - Show understanding: "Here's what I need to know..."
+
+2. **CRITICAL FORMATTING REQUIREMENTS:**
+   - Use **bold text** for key terms or concepts
+   - Keep the question conversational and brief
+   - Ensure proper line breaks for readability
+
+3. **CONTENT GUIDELINES:**
+   - Focus on gathering the most important information needed
+   - Prioritize the most critical detail that would help provide a better response
+   - Make the question actionable and specific
+   - Avoid generic or overly broad questions
+
+4. **PROFESSIONAL POLISH:**
+   - Use an engaging, professional tone
+   - Address the user's query contextually
+   - Ensure the question is clear and concise
 
 Format:
 [The single best follow-up question]"""
@@ -274,11 +313,33 @@ Recent Response: {main_response[:200]}...
 
 Conversation History: {len(conversation_history_data)} exchanges
 
+SMART FOLLOW-UP QUESTION GUIDELINES:
+
+1. **CONVERSATIONAL TONE:**
+   - Start naturally: "Got it ✅" or "Absolutely!" when appropriate
+   - Be friendly, professional, and engaging
+   - Show understanding: "Here's what I need to know..."
+
+2. **CRITICAL FORMATTING REQUIREMENTS:**
+   - Use **bold text** for key terms or concepts
+   - Keep the question conversational and brief
+   - Ensure proper line breaks for readability
+
+3. **CONTENT GUIDELINES:**
+   - Focus on gathering the most important information needed
+   - Prioritize the most critical detail that would help provide a better response
+   - Make the question actionable and specific
+   - Avoid generic or overly broad questions
+
+4. **PROFESSIONAL POLISH:**
+   - Use an engaging, professional tone
+   - Address the user's query contextually
+   - Ensure the question is clear and concise
+
 Instructions:
 - Generate only ONE targeted follow-up question
 - Identify the most important gap in understanding
 - Ask about the detail that would most improve the final recommendation
-- Keep the question focused and actionable
 - If no important gaps exist, respond with: COMPLETE
 - Do NOT number the question, provide it as plain text
 
