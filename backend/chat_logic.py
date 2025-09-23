@@ -130,13 +130,19 @@ async def build_chatbot_response(
                 logger.error(f"Error generating practical suggestions: {e}")
                 yield {'status': 'suggestion', 'chunk': "Consider implementing a proof of concept to validate the approach"}
             
-            # Add follow-up section with proper spacing (no separation line)
+            # Add follow-up section with proper spacing
             yield {'status': 'separator', 'chunk': '\n\n'}
             
-            # Generate exploration follow-ups with proper formatting (no numbering)
-            yield {'status': 'followup_question', 'chunk': "Would you like me to dive deeper into any specific aspect?"}
-            yield {'status': 'separator', 'chunk': '\n\n'}
-            yield {'status': 'followup_question', 'chunk': "Are there any particular implementation details you'd like to explore?"}
+            # Generate single dynamic follow-up based on context
+            try:
+                follow_ups = follow_up_manager.generate_follow_ups(session_id, latest_query, context="comprehensive response")
+                if follow_ups and len(follow_ups) > 0:
+                    yield {'status': 'followup_question', 'chunk': follow_ups[0]}
+                else:
+                    yield {'status': 'followup_question', 'chunk': "Would you like me to dive deeper into any specific aspect?"}
+            except Exception as e:
+                logger.error(f"Error generating dynamic follow-up: {e}")
+                yield {'status': 'followup_question', 'chunk': "Would you like me to dive deeper into any specific aspect?"}
                 
         else:
             # Generate concise response + specific follow-ups to gather more requirements
@@ -150,78 +156,87 @@ async def build_chatbot_response(
             
             # FIX: Unified prompt instruction with smart context awareness
             if is_prompt_selection or is_manual_query:
-                enhanced_query = f"""Analyze this user query and provide an intelligent, well-structured response: "{latest_query}"
+                # Retrieve context text from the chatbot service for initial queries
+                context_text = follow_up_manager.chatbot._retrieve_context(latest_query, "ditstek.com")
+                
+                enhanced_query = f"""
+You are "Ditstek Assistant", answering on behalf of the Ditstek team. 
+Your response must primarily use the provided Knowledge Base context (≈80%) and may include a short supplemental note (≈20%) if needed.
 
 SMART RESPONSE GUIDELINES:
 
-1. **CONVERSATIONAL TONE:**
-   - Start naturally: "Got it ✅" or "Absolutely!" when appropriate
-   - Be friendly, professional, and engaging
-   - Show understanding: "Here's what I can help you with..."
+1. **DITSTEK VOICE:**
+   - Always respond as "we at Ditstek" or "our team".
+   - Showcase solutions as if implemented in Ditstek projects.
 
-2. **CRITICAL FORMATTING REQUIREMENTS:**
-   - Use **bold text** for key technologies, concepts, and important terms
-   - Use ONLY ### headings for sections - vary the heading text:
-     * ### Quick Overview
-     * ### Key Points
-     * ### Implementation Guide
-     * ### Technical Details
-     * ### Recommended Approach
-     * ### Important Considerations
-     * ### Next Steps
-   - Include proper line breaks between sections
-   - Use bullet points for features/benefits with **bold** key terms
-   - Numbered lists for step-by-step processes
-   - Ensure natural paragraph breaks for readability
+2. **CONTENT SOURCING:**
+   - Use the KB context provided to form the majority of your answer (≈80%).
+   - If additional helpful detail is needed, add a short section labeled:
+     **Ditstek note — supplemental:** (max ≈20% of reply).
+   - If the KB lacks the answer, respond: 
+     "We couldn’t find this in our knowledge base. Please check the source directly."
 
-3. **STRUCTURE REQUIREMENTS:**
-   - Start with a brief overview paragraph
-   - Use descriptive headers with proper spacing
-   - Include specific details and examples with **bold highlights**
-   - End with actionable recommendations when appropriate
-   - Use Markdown formatting naturally (lists, bold, italics, etc.)
+3. **FORMATTING REQUIREMENTS:**
+   - Use **bold text** for key technologies, concepts, and terms
+   - Use ONLY ###### headings for sections:
+     * ###### Key Points
+     * ###### Technical Details
+     * ###### Recommendations
+   - Use bullet points and numbered lists naturally
+   - Include clear line breaks for readability
 
-4. **CONTENT GUIDELINES:**
-   - Keep responses comprehensive but focused (150-300 words)
-   - Synthesize information from multiple sources when available
-   - Provide practical, actionable information
-   - Include relevant examples and specifics
-   - Structure like professional documentation with clear flow
+4. **STRUCTURE:**
+   - Start with a short overview paragraph
+   - Provide well-structured sections (with headings)
+   - Include relevant specifics (examples, tools, approaches)
+   - End with **highlighted next steps**
 
 5. **PROFESSIONAL POLISH:**
-   - Use engaging, professional tone
-   - Include relevant context and background
-   - Address all aspects of the user's question
-   - Conclude with **highlighted** next steps or takeaways
+   - Tone: engaging, professional, and confident
+   - Explicitly mention Ditstek’s role in applying the approach
+   - Cite sources from KB at the end in format:
+     *Sources: [Doc Title — url — score]*
 
-Query: {latest_query}"""
+CONTEXT (use this for main part of the answer):
+{context_text}
+
+USER QUERY:
+{latest_query}
+"""
             else:
                 # For follow-up responses, continue conversation naturally with proper formatting
-                enhanced_query = f"""Continue this conversation naturally with proper formatting: "{latest_query}"
+                # Retrieve context text from the chatbot service
+                context_text = follow_up_manager.chatbot._retrieve_context(latest_query, "ditstek.com")
+
+                enhanced_query = f"""
+Continue this conversation as "Ditstek Assistant", always answering on behalf of the Ditstek team. 
+Base your answer primarily on the Knowledge Base context (≈80%), with an optional short supplement (≈20%) if needed.
 
 CRITICAL FORMATTING REQUIREMENTS:
-1. Use **bold text** for key technologies, concepts, and important terms
-2. Use ONLY ### headings for sections when needed:
-   - ### Key Points
-   - ### Technical Details
-   - ### Implementation Notes
-   - ### Recommendations
-3. Include proper line breaks between sections
-4. Use bullet points with **bold** key terms for clarity
-5. Ensure natural paragraph breaks for readability
-6. Structure responses with clear, actionable information
-7. Use Markdown formatting naturally (lists, bold, italics, etc.)
+1. Use **bold text** for key terms and technologies
+2. Use ONLY ###### headings when sections are needed:
+   - ###### Key Points
+   - ###### Technical Details
+   - ###### Recommendations
+3. Use bullet points for clarity
+4. Maintain natural paragraph breaks
+5. End with actionable takeaways
 
 CONTENT GUIDELINES:
-- Build upon previous conversation context naturally
-- Provide comprehensive but focused responses
-- Include specific details with **bold highlights**
-- Address the user's question thoroughly
-- End with practical next steps when appropriate
+- Ground answers in KB context whenever possible
+- Keep supplement minimal and clearly labeled: 
+  **Ditstek note — supplemental:**
+- Always speak as Ditstek team
+- Provide sources for KB material at the end
 
 Previous conversation context: {conversation_history[-2:] if len(conversation_history) >= 2 else 'None'}
 
-Query: {latest_query}"""
+CONTEXT:
+{context_text}
+
+USER QUERY:
+{latest_query}
+"""
 
             # Generate the main response with word-level streaming
             main_response = ""
@@ -236,34 +251,21 @@ Query: {latest_query}"""
                 if not chunk:
                     continue
                 text_chunk = str(chunk)
+                main_response += text_chunk
 
-                # Apply structured formatting logic
-                sections = re.split(r'\n\n', text_chunk)
-                for section in sections:
-                    if section.strip():
-                        # Convert any H1-H2 headers to H3 headers for better readability
-                        section = re.sub(r'^#{1,2}\s', '### ', section.strip(), flags=re.MULTILINE)
-
-                        # Check if this is a heading or regular content
-                        if section.startswith('###'):
-                            # Send heading with proper line breaks
-                            yield {'status': 'complete_chunk', 'chunk': '\n\n' + section + '\n\n'}
-                        else:
-                            # Send content with word-level streaming for readability
-                            words = section.split(' ')
-                            word_buffer = ""
-                            for word in words:
-                                if word_buffer:
-                                    word_buffer += ' ' + word  # Space before word (not after)
-                                else:
-                                    word_buffer = word  # First word, no space before
-                                # Send in chunks of ~5 words to maintain proper spacing
-                                if len(word_buffer.split()) >= 5:
-                                    yield {'status': 'complete_chunk', 'chunk': word_buffer}
-                                    word_buffer = ""
-                            # Send remaining words without extra trailing space
-                            if word_buffer.strip():
-                                yield {'status': 'complete_chunk', 'chunk': word_buffer}
+                # Apply word-level streaming with proper spacing
+                # Split into words and yield each word individually with proper spacing
+                words = text_chunk.split()
+                for word in words:
+                    if word.strip():  # Only yield non-empty words
+                        # Yield each word with a trailing space for proper separation
+                        yield {'status': 'word', 'chunk': word + ' '}
+                
+                # Handle paragraph breaks and line breaks properly
+                if '\n\n' in text_chunk:
+                    yield {'status': 'paragraph_break', 'chunk': '\n\n'}
+                elif '\n' in text_chunk and not text_chunk.strip().startswith('#'):
+                    yield {'status': 'line_break', 'chunk': '\n'}
             
             # Add spacing after main response (no separator lines)
             yield {'status': 'separator', 'chunk': '\n\n'}  # Just spacing, no lines
@@ -275,79 +277,20 @@ Query: {latest_query}"""
             # Generate intelligent follow-up questions based on conversation state
             conversation_history_data = follow_up_manager.get_session_data(session_id).get('conversation_history', [])
             user_messages = [msg for msg in conversation_history_data if msg.get("role") == "user"]
+            if user_messages:
+                # Access the latest user message for further processing or context
+                latest_user_message = user_messages[-1].get("content", "")
+                logger.info(f"Latest user message: {latest_user_message}")
+                # Use the latest user message for generating follow-ups or suggestions
+                follow_ups = follow_up_manager.generate_follow_ups(session_id, latest_user_message, context=main_response[:150])
+                if follow_ups and len(follow_ups) > 0:
+                    # Clean and send the first follow-up
+                    clean_followup = re.sub(r'#{1,6}\s*', '', follow_ups[0])
+                    followup_text = ' '.join(clean_followup.split())
+                    yield {'status': 'followup_question', 'chunk': followup_text}
+                else:
+                    yield {'status': 'followup_question', 'chunk': "What would you like to focus on next?"}
             
-            if len(user_messages) <= 1:
-                # For initial queries, ask broad requirement-gathering questions
-                follow_up_prompt = f"""Analyze this initial user query and generate the SINGLE BEST follow-up question to understand their requirements better: "{latest_query}"
-
-SMART FOLLOW-UP QUESTION GUIDELINES:
-
-1. **CONVERSATIONAL TONE:**
-   - Start naturally: "Got it ✅" or "Absolutely!" when appropriate
-   - Be friendly, professional, and engaging
-   - Show understanding: "Here's what I need to know..."
-
-2. **CRITICAL FORMATTING REQUIREMENTS:**
-   - Use **bold text** for key terms or concepts
-   - Keep the question conversational and brief
-   - Ensure proper line breaks for readability
-
-3. **CONTENT GUIDELINES:**
-   - Focus on gathering the most important information needed
-   - Prioritize the most critical detail that would help provide a better response
-   - Make the question actionable and specific
-   - Avoid generic or overly broad questions
-
-4. **PROFESSIONAL POLISH:**
-   - Use an engaging, professional tone
-   - Address the user's query contextually
-   - Ensure the question is clear and concise
-
-Format:
-[The single best follow-up question]"""
-            else:
-                # For ongoing conversations, ask targeted questions to fill gaps
-                follow_up_prompt = f"""Analyze this ongoing conversation and generate the SINGLE BEST targeted follow-up question.
-
-Recent Response: {main_response[:200]}...
-
-Conversation History: {len(conversation_history_data)} exchanges
-
-SMART FOLLOW-UP QUESTION GUIDELINES:
-
-1. **CONVERSATIONAL TONE:**
-   - Start naturally: "Got it ✅" or "Absolutely!" when appropriate
-   - Be friendly, professional, and engaging
-   - Show understanding: "Here's what I need to know..."
-
-2. **CRITICAL FORMATTING REQUIREMENTS:**
-   - Use **bold text** for key terms or concepts
-   - Keep the question conversational and brief
-   - Ensure proper line breaks for readability
-
-3. **CONTENT GUIDELINES:**
-   - Focus on gathering the most important information needed
-   - Prioritize the most critical detail that would help provide a better response
-   - Make the question actionable and specific
-   - Avoid generic or overly broad questions
-
-4. **PROFESSIONAL POLISH:**
-   - Use an engaging, professional tone
-   - Address the user's query contextually
-   - Ensure the question is clear and concise
-
-Instructions:
-- Generate only ONE targeted follow-up question
-- Identify the most important gap in understanding
-- Ask about the detail that would most improve the final recommendation
-- If no important gaps exist, respond with: COMPLETE
-- Do NOT number the question, provide it as plain text
-
-Format:
-[The single best targeted follow-up question]
-OR
-COMPLETE"""
-
             # Use the existing chatbot optimizer's generate_followups method
             try:
                 # Generate suggestions first (before follow-ups)
@@ -378,101 +321,41 @@ COMPLETE"""
                 # Just extra spacing before follow-ups
                 yield {'status': 'separator', 'chunk': '\n'}
                 
-                # Generate 2 contextual follow-ups based on the conversation state and context
-                if len(user_messages) <= 1:
-                    # For initial queries, generate context-specific follow-ups based on the query topic
-                    context_keywords = latest_query.lower()
-                    
-                    if any(word in context_keywords for word in ['app', 'mobile', 'web', 'application']):
-                        followups = [
-                            "What specific features or functionalities are most important for your app?",
-                            "What's your target platform - mobile, web, or both?"
-                        ]
-                    elif any(word in context_keywords for word in ['ai', 'machine learning', 'ml', 'chatbot', 'automation']):
-                        followups = [
-                            "What type of AI functionality do you envision for your project?",
-                            "Do you have existing data that can be used for training?"
-                        ]
-                    elif any(word in context_keywords for word in ['website', 'site', 'web', 'portal']):
-                        followups = [
-                            "What's the main purpose of your website - e-commerce, corporate, or service-based?",
-                            "Do you need any specific integrations or third-party services?"
-                        ]
-                    elif any(word in context_keywords for word in ['ecommerce', 'e-commerce', 'shop', 'store', 'payment']):
-                        followups = [
-                            "What payment methods and gateways do you want to integrate?",
-                            "How many products do you expect to manage initially?"
-                        ]
-                    elif any(word in context_keywords for word in ['api', 'integration', 'system', 'backend']):
-                        followups = [
-                            "What systems or platforms do you need to integrate with?",
-                            "What's your expected volume of API requests?"
-                        ]
-                    elif any(word in context_keywords for word in ['cloud', 'aws', 'azure', 'deployment']):
-                        followups = [
-                            "Do you have a preferred cloud provider or hosting environment?",
-                            "What are your scalability and performance requirements?"
-                        ]
-                    else:
-                        # Generic but relevant follow-ups for unclear queries
-                        followups = [
-                            "What's the primary goal you want to achieve with this project?",
-                            "What's your preferred timeline for implementation?"
-                        ]
-                else:
-                    # For ongoing conversations, generate follow-ups based on conversation context
-                    recent_context = main_response[:200] + " " + latest_query
-                    context_lower = recent_context.lower()
-                    
-                    if any(word in context_lower for word in ['implement', 'development', 'build', 'create']):
-                        followups = [
-                            "Would you like to discuss the technical implementation approach?",
-                            "What's your preferred development timeline and budget range?"
-                        ]
-                    elif any(word in context_lower for word in ['feature', 'functionality', 'capability']):
-                        followups = [
-                            "Are there any specific features you'd like to prioritize first?",
-                            "Do you need any advanced or custom functionalities?"
-                        ]
-                    elif any(word in context_lower for word in ['technology', 'platform', 'framework']):
-                        followups = [
-                            "Do you have any technology preferences or constraints?",
-                            "Are there existing systems this needs to integrate with?"
-                        ]
-                    else:
-                        # Default ongoing conversation follow-ups
-                        followups = [
-                            "Are there any specific aspects you'd like me to elaborate on?",
-                            "What would you like to focus on next?"
-                        ]
+                # The follow-up generation is now handled by the dynamic system below
+                pass
                 
-                # Send follow-ups with word-level streaming (no numbering)
-                for followup in followups:
-                    # Add proper spacing before each follow-up
-                    yield {'status': 'separator', 'chunk': '\n\n'}
-                    
-                    # Keep markdown formatting for ChatGPT-like display
-                    # Only remove headers, preserve **bold** and *italic*
-                    clean_followup = re.sub(r'#{1,6}\s*', '', followup)  # Remove headers only
-                    
-                    # Stream follow-up word by word with proper spacing
-                    # Send follow-up question without word-by-word streaming
-                    followup_text = ' '.join(clean_followup.split())  # Clean and rebuild text
-                    yield {'status': 'followup_question', 'chunk': followup_text}
+                # Send single dynamic follow-up
+                yield {'status': 'separator', 'chunk': '\n\n'}
                 
-                # Add final spacing after follow-ups
-                yield {'status': 'separator', 'chunk': '\n'}
+                # Generate single contextual follow-up based on conversation state
+                try:
+                    follow_ups = follow_up_manager.generate_follow_ups(session_id, latest_query, context=main_response[:150])
+                    if follow_ups and len(follow_ups) > 0:
+                        # Clean and send the first follow-up
+                        clean_followup = re.sub(r'#{1,6}\s*', '', follow_ups[0])
+                        followup_text = ' '.join(clean_followup.split())
+                        yield {'status': 'followup_question', 'chunk': followup_text}
+                    else:
+                        # Use keyword-based fallback for single follow-up
+                        context_keywords = latest_query.lower()
+                        if any(word in context_keywords for word in ['app', 'mobile', 'web', 'application']):
+                            yield {'status': 'followup_question', 'chunk': "What specific features or functionalities are most important for your app?"}
+                        elif any(word in context_keywords for word in ['ai', 'machine learning', 'ml', 'chatbot']):
+                            yield {'status': 'followup_question', 'chunk': "What type of AI functionality do you envision for your project?"}
+                        elif any(word in context_keywords for word in ['website', 'site', 'web', 'portal']):
+                            yield {'status': 'followup_question', 'chunk': "What's the main purpose of your website - e-commerce, corporate, or service-based?"}
+                        else:
+                            yield {'status': 'followup_question', 'chunk': "What's the primary goal you want to achieve with this project?"}
+                except Exception as inner_e:
+                    logger.error(f"Error in dynamic follow-up generation: {inner_e}")
+                    yield {'status': 'followup_question', 'chunk': "What would you like to focus on next?"}
                     
             except Exception as e:
                 logger.error(f"Error generating follow-ups: {e}")
-                # Fallback suggestions and follow-ups for initial queries only
-                user_messages = [msg for msg in conversation_history_data if msg.get("role") == "user"]
-                if len(user_messages) <= 1:
-                    yield {'status': 'suggestion', 'chunk': "Consider starting with a basic prototype to test core functionality"}
-                    yield {'status': 'separator', 'chunk': '\n\n'}
-                    yield {'status': 'followup_question', 'chunk': "What specific features are most important to you?"}
-                    yield {'status': 'separator', 'chunk': '\n\n'}
-                    yield {'status': 'followup_question', 'chunk': "What's your target platform preference?"}
+                # Fallback single follow-up for errors
+                yield {'status': 'suggestion', 'chunk': "Consider starting with a basic prototype to test core functionality"}
+                yield {'status': 'separator', 'chunk': '\n\n'}
+                yield {'status': 'followup_question', 'chunk': "What specific features are most important to you?"}
 
     except Exception as e:
         yield {'status': 'error', 'message': str(e)}
