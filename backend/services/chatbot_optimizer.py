@@ -424,25 +424,33 @@ class OptimizedChatbot:
             prompt = f"""
     You are an expert requirements consultant having a conversation with a client.
 
-    Transcript so far:
+    ### Transcript so far:
     {transcript}
 
-    Initial context: {prompt_context}
-    Latest user message: {latest_query}
+    ### Initial context:
+    {prompt_context}
 
-    Your task:
-    1. Consider the entire conversation context, not just the latest message:
-    - Provide a helpful response (around 100 words) that addresses the latest message while maintaining continuity
-    - Generate {followup_count} natural follow-up questions that help explore different aspects of the topic
-    - If the conversation has shifted, acknowledge the shift and provide options that either:
-        a) Connect the new direction back to the original context
-        b) Continue exploring the new direction if it seems more relevant to the user
+    ### Latest user message:
+    {latest_query}
 
-    2. Each follow-up should include 1-2 suggested answers to help guide the conversation.
-    3. Include a "suggestions" field with practical next steps that consider the full conversation history.
-    4. When appropriate, explore these areas: {category_names}
+    ### Your task:
+    1. **Consider the entire conversation context, not just the latest message:**
+       - Provide a helpful response (around 100 words) that addresses the latest message while maintaining continuity.
+       - Generate {followup_count} natural follow-up questions that help explore different aspects of the topic.
+       - If the conversation has shifted, acknowledge the shift and provide options that either:
+         a) Connect the new direction back to the original context.
+         b) Continue exploring the new direction if it seems more relevant to the user.
 
-    STRICT OUTPUT FORMAT (JSON only):
+    2. **Follow-up questions:**
+       - Each follow-up should include 1-2 suggested answers to help guide the conversation.
+
+    3. **Suggestions:**
+       - Include a "suggestions" field with practical next steps that consider the full conversation history.
+
+    4. **Exploration areas:**
+       - When appropriate, explore these areas: {category_names}
+
+    ### STRICT OUTPUT FORMAT (JSON only):
     {{
     "answer": "<helpful response that maintains conversation continuity>",
     "follow_ups": [
@@ -459,23 +467,29 @@ class OptimizedChatbot:
             prompt = f"""
     You are an expert requirements consultant having a conversation with a client.
 
-    Recent conversation transcript:
+    ### Recent conversation transcript:
     {transcript}
 
-    Initial context: {prompt_context}
-    Latest user message: {latest_query}
+    ### Initial context:
+    {prompt_context}
 
-    Your task:
-    1. Consider the entire conversation history, not just the latest message:
-    - Generate ONE natural follow-up question that helps advance the conversation toward a more complete understanding
-    - Focus on exploring details that haven't been discussed yet but are relevant to the overall project/topic
-    - If the conversation seems to have changed topic, offer a question that either:
-        a) Bridges the new topic back to the original context in a natural way
-        b) Acknowledges the new direction and helps explore it properly
+    ### Latest user message:
+    {latest_query}
 
-    2. Each follow-up may include 1-2 suggested answer options (using hyphens `-`) to help guide the user.
-    3. Keep the question concise and engaging. No intros or explanations.
-    4. Ensure your question feels like a natural continuation of the conversation, not an abrupt change.
+    ### Your task:
+    1. **Consider the entire conversation history, not just the latest message:**
+       - Generate ONE natural follow-up question that helps advance the conversation toward a more complete understanding.
+       - Focus on exploring details that haven't been discussed yet but are relevant to the overall project/topic.
+       - If the conversation seems to have changed topic, offer a question that either:
+         a) Bridges the new topic back to the original context in a natural way.
+         b) Acknowledges the new direction and helps explore it properly.
+
+    2. **Follow-up question:**
+       - Each follow-up may include 1-2 suggested answer options (using hyphens `-`) to help guide the user.
+
+    3. **Question requirements:**
+       - Keep the question concise and engaging. No intros or explanations.
+       - Ensure your question feels like a natural continuation of the conversation, not an abrupt change.
     """
 
         # Track generation state
@@ -584,6 +598,51 @@ class OptimizedChatbot:
         fallback_message = f"I understand you're asking about: {query}. Let me provide a general response based on my knowledge."
         yield fallback_message
 
+    def _clean_response_formatting(self, text: str) -> str:
+        """Clean response formatting to ensure consistency and remove unwanted elements"""
+        if not text:
+            return ""
+        
+        # Remove unwanted headers that appear at the beginning
+        unwanted_headers = [
+            r'^#{1,6}\s*Quick Overview.*?\n',
+            r'^#{1,6}\s*Overview of.*?\n',
+            r'^#{1,6}\s*About.*?\n',
+            r'^#{1,6}\s*Introduction.*?\n',
+            r'^#{1,6}\s*Implementation\s+Approach.*?\n',
+            r'^#{1,6}\s*Next\s+Steps.*?\n'
+        ]
+        
+        for pattern in unwanted_headers:
+            text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
+        
+        # Fix spacing issues while preserving markdown formatting
+        # Remove multiple spaces but preserve markdown formatting
+        text = re.sub(r'(?<!\*) {2,}(?!\*)', ' ', text)  # Multiple spaces to single, preserve **bold**
+        text = re.sub(r' +\n', '\n', text)  # Remove spaces before newlines
+        text = re.sub(r'\n +(?![#*-])', '\n', text)  # Remove spaces after newlines (except markdown)
+        
+        # Ensure single space after punctuation
+        text = re.sub(r'([.!?:;,])\s+', r'\1 ', text)
+        
+        # Clean up header formatting
+        text = re.sub(r'(\n)(#{1,3})\s+', r'\1\2 ', text)  # Ensure single space after headers
+        
+        # Clean up bullet points
+        text = re.sub(r'(\n)([-*•])\s+', r'\1\2 ', text)  # Ensure single space after bullets
+        
+        # Clean up numbered lists
+        text = re.sub(r'(\n)(\d+\.)\s+', r'\1\2 ', text)  # Ensure single space after numbers
+        
+        # Remove multiple newlines (max 2)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        
+        # Ensure proper spacing around bold text
+        text = re.sub(r'\*\*\s+', '**', text)  # Remove space after opening **
+        text = re.sub(r'\s+\*\*', '**', text)  # Remove space before closing **
+        
+        return text.strip()
+
     def _generate_response_stream(self, question: str, context: str, history: str) -> Generator[str, None, None]:
         logger.debug("Entered _generate_response_stream")
 
@@ -629,126 +688,114 @@ class OptimizedChatbot:
                     full_response += content
                     buffer += content
                     
-                    # Process buffer to yield complete sections with proper formatting
+                    # Process buffer for word-level streaming with proper formatting preservation
                     while True:
-                        # Look for complete sections (headers with content)
-                        header_match = re.search(r'\n(#{1,3}\s+[^\n]+)\n([^#]*?)(?=\n#{1,3}|\n\n|\Z)', buffer, re.DOTALL)
-                        if header_match and len(header_match.group(0)) > 40:
-                            section = header_match.group(0)
-                            buffer = buffer[header_match.end():]
+                        # Check for complete words to stream
+                        # Look for word boundaries while preserving markdown formatting
+                        word_match = re.search(r'(\S+(?:\s+|$))', buffer)
+                        if word_match:
+                            word = word_match.group(1)
+                            buffer = buffer[word_match.end():]
                             
-                            # Clean up the section - ensure single spaces between words and proper line breaks
-                            section = section.strip() + "\n\n"
-                            section = re.sub(r'\s+', ' ', section)  # Convert any whitespace to single space
-                            section = re.sub(r' +\n', '\n', section)  # Remove spaces before newlines
-                            section = re.sub(r'\n ', '\n', section)  # Remove spaces after newlines
-                            section = re.sub(r'(\n#{1,3}) ', r'\1 ', section)  # Ensure space after headers
-                            
-                            yield section
-                            continue
-                        
-                        # Look for complete paragraphs (double newline separated)
-                        paragraph_match = re.search(r'(?:^|\n\n)([^\n]+(?:\n[^\n#]+)*?)(?=\n\n|\n#{1,3}|\Z)', buffer, re.MULTILINE)
-                        if paragraph_match and len(paragraph_match.group(1)) > 30:
-                            paragraph = paragraph_match.group(0)
-                            buffer = buffer[paragraph_match.end():]
-                            
-                            # Clean formatting - ensure proper spacing and line breaks
-                            paragraph = re.sub(r'\s+', ' ', paragraph)  # Convert any whitespace to single space
-                            paragraph = re.sub(r' +\n', '\n', paragraph)  # Remove spaces before newlines
-                            paragraph = re.sub(r'\n ', '\n', paragraph)  # Remove spaces after newlines
-                            if not paragraph.endswith('\n\n'):
-                                paragraph += '\n\n'
-                            yield paragraph
-                            continue
-                        
-                        # Look for complete bullet point lists
-                        list_match = re.search(r'(\n(?:[-*•]\s+[^\n]+\n)+)', buffer)
-                        if list_match and len(list_match.group(0)) > 20:
-                            list_section = list_match.group(0) + "\n"
-                            buffer = buffer[list_match.end():]
-                            
-                            # Clean formatting - ensure proper spacing
-                            list_section = re.sub(r'\s+', ' ', list_section)  # Single spaces
-                            list_section = re.sub(r' +\n', '\n', list_section)  # No spaces before newlines
-                            list_section = re.sub(r'\n ', '\n', list_section)  # No spaces after newlines
-                            list_section = re.sub(r'(\n[-*•]) ', r'\1 ', list_section)  # Ensure space after bullet
-                            yield list_section
-                            continue
-                        
-                        # Look for complete numbered lists
-                        num_list_match = re.search(r'(\n(?:\d+\.\s+[^\n]+\n)+)', buffer)
-                        if num_list_match and len(num_list_match.group(0)) > 20:
-                            num_list = num_list_match.group(0) + "\n"
-                            buffer = buffer[num_list_match.end():]
-                            
-                            # Clean formatting - ensure proper spacing
-                            num_list = re.sub(r'\s+', ' ', num_list)  # Single spaces
-                            num_list = re.sub(r' +\n', '\n', num_list)  # No spaces before newlines
-                            num_list = re.sub(r'\n ', '\n', num_list)  # No spaces after newlines
-                            num_list = re.sub(r'(\n\d+\.) ', r'\1 ', num_list)  # Ensure space after number
-                            yield num_list
-                            continue
-                        
-                        # Look for sentence boundaries
-                        sentence_match = re.search(r'([^.!?]*[.!?]\s+)', buffer)
-                        if sentence_match and len(sentence_match.group(0)) > 50:
-                            sentence = sentence_match.group(0)
-                            buffer = buffer[sentence_match.end():]
-                            
-                            # Don't break markdown formatting
-                            if not self._would_break_markdown(sentence):
-                                sentence = re.sub(r'\s+', ' ', sentence)  # Single spaces between words
-                                sentence = re.sub(r' +([.!?])', r'\1', sentence)  # No space before punctuation
-                                yield sentence
-                                continue
-                        
-                        # Fallback: word boundary chunking
-                        words = buffer.split()
-                        if len(words) >= 15:
-                            # Find safe breaking point
-                            for i in range(10, min(len(words), 20)):
-                                word_chunk = ' '.join(words[:i])  # Remove the extra space
-                                remaining = ' '.join(words[i:])
-                                
-                                if not self._would_break_markdown(word_chunk):
-                                    buffer = remaining
-                                    # Ensure single spaces between words
-                                    word_chunk = re.sub(r'\s+', ' ', word_chunk).strip() + ' '
-                                    yield word_chunk
-                                    break
-                            else:
-                                # Ultimate fallback
-                                word_chunk = ' '.join(words[:10])  # Remove the extra space
-                                buffer = ' '.join(words[10:])
-                                word_chunk = re.sub(r'\s+', ' ', word_chunk).strip() + ' '
-                                yield word_chunk
+                            # Clean up spacing but preserve markdown formatting
+                            if word.strip():
+                                # Handle newlines and paragraph breaks properly
+                                if '\n\n' in word:
+                                    # This is a paragraph break
+                                    parts = word.split('\n\n')
+                                    for i, part in enumerate(parts):
+                                        if part.strip():
+                                            yield part.strip() + ' '
+                                        if i < len(parts) - 1:  # Not the last part
+                                            yield '\n\n'
+                                elif '\n' in word and not word.strip().startswith('#'):
+                                    # This is a line break (not a header)
+                                    parts = word.split('\n')
+                                    for i, part in enumerate(parts):
+                                        if part.strip():
+                                            yield part.strip() + ' '
+                                        if i < len(parts) - 1:  # Not the last part
+                                            yield '\n'
+                                else:
+                                    # Regular word handling
+                                    if word.endswith('.') or word.endswith('!') or word.endswith('?'):
+                                        cleaned_word = word.strip() + ' '
+                                    elif word.endswith('\n'):
+                                        cleaned_word = word.strip() + '\n'
+                                    else:
+                                        cleaned_word = word.strip() + ' '
+                                    
+                                    # Handle special markdown cases
+                                    if '**' in cleaned_word or '###' in cleaned_word or cleaned_word.startswith('-') or cleaned_word.startswith('*'):
+                                        # Preserve formatting for markdown elements
+                                        yield cleaned_word
+                                    else:
+                                        # Regular word with proper spacing
+                                        yield cleaned_word
                         else:
+                            # No more complete words in buffer
                             break
                 
-                # Send remaining content with proper cleanup
+                # Send remaining content word by word with proper cleanup
                 if buffer.strip():
-                    buffer = re.sub(r'\s+', ' ', buffer.strip())  # Single spaces between words
-                    buffer = re.sub(r' +\n', '\n', buffer)  # Remove spaces before newlines
-                    buffer = re.sub(r'\n ', '\n', buffer)  # Remove spaces after newlines
+                    # Apply comprehensive response cleaning first
+                    buffer = self._clean_response_formatting(buffer)
                     
-                    # Ensure proper line breaks for structured content
-                    if '###' in buffer or '-' in buffer or any(char.isdigit() and '.' in buffer for char in buffer):
-                        # This looks like structured content, add proper spacing
-                        buffer = re.sub(r'(\n)([-*•]\s+)', r'\1\n\2', buffer)  # Add space before bullet points
-                        buffer = re.sub(r'(\n)(\d+\.\s+)', r'\1\n\2', buffer)  # Add space before numbered lists
-                        buffer = re.sub(r'(\n)(#{1,3}\s+)', r'\1\n\2', buffer)  # Add space before headers
+                    # Handle remaining content with proper line break preservation
+                    # Split by double newlines first (paragraph breaks)
+                    paragraphs = buffer.split('\n\n')
+                    for p_idx, paragraph in enumerate(paragraphs):
+                        if paragraph.strip():
+                            # Split paragraph into lines
+                            lines = paragraph.split('\n')
+                            for l_idx, line in enumerate(lines):
+                                if line.strip():
+                                    # Split line into words
+                                    words = line.split()
+                                    for word in words:
+                                        if word.strip():
+                                            # Add proper spacing after each word
+                                            if word.endswith('.') or word.endswith('!') or word.endswith('?'):
+                                                yield word + ' '
+                                            else:
+                                                yield word + ' '
+                                # Add line break after each line (except last)
+                                if l_idx < len(lines) - 1:
+                                    yield '\n'
+                        # Add paragraph break after each paragraph (except last)
+                        if p_idx < len(paragraphs) - 1:
+                            yield '\n\n'
                     
-                    if not buffer.endswith('\n'):
-                        buffer += '\n'
-                    yield buffer
-                    
-                self.response_cache[cache_key] = full_response
+                # Cache the cleaned response
+                self.response_cache[cache_key] = self._clean_response_formatting(full_response)
             else:
                 raw_answer = self.llm.invoke(prompt)
                 response = raw_answer.content if isinstance(raw_answer, AIMessage) else str(raw_answer)
+                # Apply response cleaning
+                response = self._clean_response_formatting(response)
                 self.response_cache[cache_key] = response
-                yield response
+                
+                # Stream the response word by word with proper line break handling
+                paragraphs = response.split('\n\n')
+                for p_idx, paragraph in enumerate(paragraphs):
+                    if paragraph.strip():
+                        lines = paragraph.split('\n')
+                        for l_idx, line in enumerate(lines):
+                            if line.strip():
+                                words = line.split()
+                                for word in words:
+                                    if word.strip():
+                                        # Add proper spacing after each word
+                                        if word.endswith('.') or word.endswith('!') or word.endswith('?'):
+                                            yield word + ' '
+                                        else:
+                                            yield word + ' '
+                            # Add line break after each line (except last)
+                            if l_idx < len(lines) - 1:
+                                yield '\n'
+                    # Add paragraph break after each paragraph (except last)
+                    if p_idx < len(paragraphs) - 1:
+                        yield '\n\n'
         except Exception:
             logger.error("LLM streaming call failed", exc_info=True)
             fallback_response = self._generate_fallback_response(question, context)
@@ -920,22 +967,16 @@ Format your response with:
     def _create_optimized_prompt(self, history: str, context: str, question: str) -> str:
         length_rule = (
             "Provide comprehensive, well-structured responses with proper Markdown formatting. "
-            "Use ONLY ### headings for sections - vary the heading text: "
-            "- ### Implementation Strategy "
-            "- ### Key Considerations "
-            "- ### Recommended Approach "
-            "- ### Technical Overview "
-            "- ### Next Steps "
-            "- ### Important Notes "
+            "Use **bold text extensively** for key terms, technologies, and important concepts. "
+            "Use ### headings only when truly needed for organization (avoid generic titles like 'Quick Overview'). "
             "Include specific recommendations with **bold highlights**. "
             "Address all key points discussed in the conversation. "
-            "Make it actionable and practical with **clear next steps**. "
+            "Make responses knowledge-base oriented and informative. "
             "Use natural paragraph breaks for readability. "
             "Emphasize important frameworks, tools, or concepts with **bold**. "
-            "Structure with clear Markdown sections if helpful. "
-            "Conclude with **highlighted** next steps or recommendations. "
+            "Structure content logically with proper spacing. "
             "Use Markdown formatting naturally (lists, bold, italics, etc.). "
-            "Vary heading phrases to avoid repetition. "
+            "Ensure consistent single spacing between words. "
         )
 
 
@@ -962,40 +1003,32 @@ CONVERSATIONAL TONE REQUIREMENTS:
 2. CRITICAL FORMATTING REQUIREMENTS:
 1. {length_rule}
 2. Use proper Markdown structure:
-   - ### for main headings (use engaging titles like "### Quick Overview", "### Key Points", "### Implementation Guide")
-   - **Bold text** extensively for important terms, technologies, and key concepts
-   - Proper line breaks between sections
+   - Use **bold text extensively** for key terms, names, technologies, and important concepts
+   - Use ### headings only when truly needed for organization (avoid generic titles like "Quick Overview")
+   - Ensure proper single spacing between words - no multiple spaces
    - Use bullet points with **bold** key terms for clarity
-   - Code snippets with proper backticks when relevant
+   - Proper line breaks between sections
 
-3. Structure your response clearly:
-   - Start with a brief overview paragraph
-   - Use sections with descriptive headings
-   - Include specific details and examples
-   - End with actionable recommendations when appropriate
+3. Content Guidelines:
+   - Use the knowledge base context as your primary information source
+   - Be comprehensive but focused (50-150 words)
+   - Include specific details and examples with **bold formatting**
+   - Maintain professional, conversational tone
+   - Address the user's question directly and thoroughly
 
-4. Formatting best practices:
-   - Ensure proper spacing around headings and sections
-   - Use **bold** for technologies, key terms, and important concepts
-   - Include bullet points for lists and features
-   - Add line breaks for readability
-   - Use engaging, professional tone
+4. Structure Requirements:
+   - Start with the most relevant information immediately
+   - Organize content logically with proper spacing
+   - Use natural paragraph breaks for readability
+   - Include actionable information when relevant to the question
 
-5. Content guidelines:
-   - Synthesize information from multiple context sources when available
-   - Provide comprehensive but focused answers with engaging tone
-   - Include relevant examples and specifics with **bold terms**
-   - If context is limited, use general knowledge while staying on topic
-   - Address the user's question thoroughly with conversational flow
+5. Professional Standards:
+   - Use engaging, professional tone while staying informative
+   - Include relevant context and background from the knowledge base
+   - Ensure consistent spacing and formatting throughout
    - Do not fabricate information outside the knowledge base scope
 
-6. PROFESSIONAL POLISH:
-   - Use engaging, conversational tone while staying professional
-   - Include relevant context and background information
-   - Address all aspects of the user's question comprehensively
-   - Conclude with **highlighted** next steps or takeaways
-
-Important: Do NOT include example text, placeholders, or template content in your response. Provide only actual, relevant information with proper conversational flow and extensive **bold formatting**.
+Important: Provide direct, informative responses based on the knowledge base context. Avoid generic introductory headers and focus on delivering valuable information with extensive **bold formatting** for key concepts.
 """
         return prompt.strip()
 
