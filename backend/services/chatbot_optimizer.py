@@ -10,7 +10,7 @@ This service provides optimized chatbot response generation with:
 import logging
 import sys
 import tiktoken
-from typing import List, Tuple, Dict, Generator, Union, AsyncGenerator
+from typing import List, Tuple, Dict, Generator, Union, AsyncGenerator, Any
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from langchain.schema import AIMessage
@@ -36,11 +36,11 @@ class ContextOptimizer:
     while maximizing relevance and information retention.
     """
     
-    def __init__(self, model: str = "gpt-4o-mini"):
+    def __init__(self, model: str = "gpt-4o"):
         self.model = model
         self.encoding = tiktoken.encoding_for_model(model)
         self.model_limits = {
-            "gpt-4o-mini": 128000
+            "gpt-4o": 128000
         }
         self.context_limit = self.model_limits.get(model, 4096)
     
@@ -125,7 +125,7 @@ class OptimizedChatbot:
     Streaming-only chatbot service with optimized context handling.
     """
     
-    def __init__(self, llm, model: str = "gpt-4o-mini"):
+    def __init__(self, llm, model: str = "gpt-4o"):
         self.llm = llm
         self.model = model
         self.follow_ups = {}
@@ -135,6 +135,17 @@ class OptimizedChatbot:
         self.context_optimizer = ContextOptimizer(model)
         self.response_cache = {}
         self.generated_followups = []  # Store generated follow-ups internally
+        
+        # ADD: Separate LLM for query key generation with GPT-4o-mini
+        import os
+        from langchain_openai import ChatOpenAI
+        self.query_llm = ChatOpenAI(
+            model_name="gpt-4o-mini",  # Dedicated model for query processing
+            temperature=0.3,  # Lower temperature for more focused key generation
+            max_tokens=150,   # Limit tokens for key generation
+            openai_api_key=os.getenv("OPENAI_API_KEY")
+        )
+        logger.info("Initialized OptimizedChatbot with GPT-4o-mini for query processing")
         # Ordered discovery categories for requirement elicitation (10 criteria)
         self.requirement_categories = [
             {
@@ -530,167 +541,49 @@ class OptimizedChatbot:
         """Check if all required information is collected."""
         data = self.get_session_data(session_id)
         return all(data.get(key) for key in ["initial_prompt", "state"])
-
-
-
-    async def generate_next_follow_up(self, session_id: str):
-        """Generate the next follow-up question with streaming."""
-        history = self.get_conversation_history(session_id)
-        prompt = f"Based on this conversation:\n{self.format_conversation_history(history)}\nWhat should I ask next?"
-        
-        # Use astream for token-by-token streaming
-        async for chunk in self.llm.astream(prompt):
-            if hasattr(chunk, 'content'):
-                yield chunk.content
-            else:
-                yield str(chunk)
-
-
-    # async def generate_complete_response(self, session_id: str, query: str) -> str:
-    #     """Generate a comprehensive final solution using reconstructed answers from history (stateless)."""
-    #     history = self.get_conversation_history(session_id)
-    #     answers = self._extract_requirement_answers_from_history(history)
-    #     # Build markdown table-like summary
-    #     lines = []
-    #     missing = []
-    #     for cat in self.requirement_categories:
-    #         if cat['key'] in answers:
-    #             ans = answers[cat['key']]['answer'] or 'Not provided'
-    #             lines.append(f"- **{cat['name']}:** {ans}")
-    #         else:
-    #             lines.append(f"- **{cat['name']}:** _pending_")
-    #             missing.append(cat['key'])
-    #     summary_md = "\n".join(lines)
-    #     base_query = query or next((m['content'] for m in history if m['role']=='user'), '')
-    #     synthesis_instructions = (
-    #         "You are an expert solutions architect. Using the collected requirements summary below, produce a comprehensive proposal that: \n"
-    #         "1. Maps each requirement to specific solution components.\n"
-    #         "2. Provides a concise architecture overview (text).\n"
-    #         "3. Details recommended features grouped logically.\n"
-    #         "4. Lists risks with mitigations.\n"
-    #         "5. Highlights assumptions for any pending items (" + str(len(missing)) + ").\n"
-    #         "6. Ends with next 3 actionable steps.\n"
-    #         "Use only Markdown level 6 headings (######). Keep paragraphs short."
-    #     )
-    #     prompt = (
-    #         f"Conversation transcript (chronological):\n{self.format_conversation_history(history)}\n\n" \
-    #         f"Original user goal / latest query:\n{base_query}\n\n" \
-    #         f"Collected requirements summary (markdown):\n{summary_md}\n\n" \
-    #         f"{synthesis_instructions}\n\nFINAL ANSWER:"
-    #     )
-    #     try:
-    #         response = await self.llm.ainvoke(prompt)
-    #         answer = response.content if isinstance(response, AIMessage) else str(response)
-    #     except Exception:
-    #         logger.error("Final synthesis LLM call failed", exc_info=True)
-    #         answer = (
-    #             "Model synthesis failed. Here is the structured summary instead:\n\n" + summary_md
-    #         )
-    #     return answer
-
-    async def generate_suggestions(self, session_id: str) -> List[str]:
-        """Generate contextual action suggestions based on the conversation."""
-        history = self.get_conversation_history(session_id)
-        
-        # For early conversations (few messages), suggest discovery actions
-        if len(history) < 6:
-            return [
-                "Schedule a discovery call",
-                "Share project documentation",
-                "Invite key stakeholders to discussion",
-                "Review similar case studies"
-            ]
-        
-        # Extract key topics/entities from conversation
-        transcript = '\n'.join([
-            f"{msg.get('role','')}: {msg.get('content','')}" 
-            for msg in history[-12:] if msg.get('content')
-        ])
-        
-        # Generate contextual suggestions
-        prompt = f"""Based on this conversation excerpt, suggest 4 specific next actions the user should take.
-Make each suggestion actionable, concrete and specific to their context.
-Keep each suggestion under 8 words if possible.
-
-Conversation:
-{transcript}
-
-Format: Return exactly 4 suggestions, each on its own line with no numbering or bullets."""
-        
-        try:
-            response = await self.llm.ainvoke(prompt)
-            content = response.content if hasattr(response, 'content') else str(response)
-            
-            # Process into clean suggestions list
-            suggestions = []
-            for line in content.strip().split('\n'):
-                clean_line = re.sub(r'^[-•*\d.)\s]+', '', line).strip()
-                if clean_line and len(suggestions) < 4:
-                    # Keep suggestions concise
-                    words = clean_line.split()
-                    if len(words) > 8:
-                        clean_line = ' '.join(words[:8])
-                    suggestions.append(clean_line)
-            
-            # Ensure we have 4 suggestions
-            while len(suggestions) < 4:
-                generic = [
-                    "Schedule a discovery workshop",
-                    "Share your project timeline",
-                    "Define success metrics",
-                    "Review proposed solution with team",
-                    "Request cost estimate",
-                    "Book a follow-up consultation"
-                ]
-                for g in generic:
-                    if g not in suggestions and len(suggestions) < 4:
-                        suggestions.append(g)
-                        
-            return suggestions
-            
-        except Exception as e:
-            logger.error(f"Failed to generate suggestions: {e}")
-            return [
-                "Schedule a discovery workshop",
-                "Share project documentation",
-                "Define key success metrics",
-                "Review next steps with team"
-            ]
-
-    async def generate_followups(self, followup_prompt: str, num: int = 5) -> List[str]:
-        """Generate follow-up questions and track them."""
-        logger.debug("Generating follow-up questions for prompt: %s", followup_prompt)
-        try:
-            response = await self.llm.ainvoke(followup_prompt)
-            if isinstance(response, AIMessage):
-                followups = response.content.split("\n")
-            else:
-                followups = str(response).split("\n")
-
-            # Filter and track follow-ups
-            unique_followups = list(set(
-                re.sub(r"^\d+\.\s*", "", followup.strip())
-                for followup in followups
-                if followup.strip()
-            ))
-
-            # Add follow-ups to manager
-            for follow_up in unique_followups[:num]:
-                self.add_follow_up("session_id_placeholder", follow_up)
-
-            return unique_followups[:num]
-        except Exception as e:
-            logger.error("Failed to generate follow-up questions: %s", e)
-            return ["Follow-up generation failed. Please try again."]
         
     def get_detailed_response(self, query: str, chat_history: list, site: str = "ditstek.com", stream: bool = True) -> Generator:
-        context = self._retrieve_context(query, site)
-        history = self._format_history(chat_history)
-        logger.debug(">>> Query: %s", query)
-        logger.debug(">>> Context Retrieved: %s", context)
-        logger.debug(">>> Chat History: %s", history)
-        return self._generate_response_stream(query, context, history)
+        """
+        Enhanced response generation with explicit flow:
+        1. Query → GPT-4o-mini → Search Keys
+        2. Search Keys → Vector DB → Retrieved Context  
+        3. Query + Context + History + Instructions → Main LLM → Response
+        """
+        try:
+            # STEP 1: Log the enhanced flow start
+            logger.info(f"Starting enhanced response generation for query: {query[:100]}...")
+            
+            # STEP 2: Retrieve context using enhanced key generation
+            context = self._retrieve_context(query, site)
+            
+            # STEP 3: Format chat history
+            history = self._format_history(chat_history)
+            
+            # STEP 4: Log the complete flow for debugging
+            logger.info(f"Enhanced Flow Summary:")
+            logger.info(f"- Original Query: {query[:100]}")
+            logger.info(f"- Context Retrieved: {len(context)} characters")
+            logger.info(f"- Chat History: {len(chat_history)} messages")
+            logger.info(f"- Model for keys: gpt-4o-mini")
+            logger.info(f"- Model for response: {getattr(self.llm, 'model_name', 'Unknown')}")
+            
+            # Debug logs for verification
+            logger.debug(">>> Enhanced Query Processing: %s", query)
+            logger.debug(">>> Enhanced Context Retrieved: %s", context[:500] + "..." if len(context) > 500 else context)
+            logger.debug(">>> Enhanced Chat History: %s", history)
+            
+            # STEP 5: Generate response using enhanced context
+            return self._generate_response_stream(query, context, history)
+            
+        except Exception as e:
+            logger.error(f"Enhanced response generation failed: {e}")
+            return self._fallback_response_stream(query)
     
+    def _fallback_response_stream(self, query: str) -> Generator[str, None, None]:
+        """Fallback response when enhanced flow fails"""
+        fallback_message = f"I understand you're asking about: {query}. Let me provide a general response based on my knowledge."
+        yield fallback_message
+
     def _generate_response_stream(self, question: str, context: str, history: str) -> Generator[str, None, None]:
         logger.debug("Entered _generate_response_stream")
 
@@ -887,25 +780,108 @@ Format: Return exactly 4 suggestions, each on its own line with no numbering or 
             
         return False
 
+    def _generate_search_keys(self, query: str) -> List[str]:
+        """Generate search keys using GPT-4o-mini for better vector DB retrieval"""
+        
+        key_generation_prompt = f"""Break down this user query into 3-5 specific search keys/terms that would help find relevant information in a knowledge base about software development, web development, and technology services.
+
+User Query: {query}
+
+Instructions:
+1. Extract the main technical concepts, technologies, or services mentioned
+2. Include related/synonym terms that might be used in documentation
+3. Focus on actionable keywords that would match knowledge base content
+4. Avoid overly broad terms like "help" or "information"
+5. Include both specific and general terms related to the query
+
+Return ONLY the search keys, one per line, without numbers or bullets.
+
+Example for "How to build a React app with authentication":
+React application development
+authentication implementation
+user login system
+frontend security
+React authentication libraries"""
+
+        try:
+            # Use GPT-4o-mini for key generation
+            messages = [
+                {"role": "system", "content": "You are an expert at extracting search keywords from user queries for knowledge base retrieval."},
+                {"role": "user", "content": key_generation_prompt}
+            ]
+            
+            response = self.query_llm.invoke(messages)
+            search_keys = [key.strip() for key in response.content.split('\n') if key.strip()]
+            
+            # Fallback to original query if no keys generated
+            if not search_keys:
+                search_keys = [query]
+                
+            logger.info(f"Generated {len(search_keys)} search keys from query: {query}")
+            return search_keys
+            
+        except Exception as e:
+            logger.error(f"Key generation failed: {e}")
+            return [query]  # Fallback to original query
+
     def _retrieve_context(self, query: str, site: str) -> str:
+        """Enhanced context retrieval with dedicated key generation"""
         from backend.chat_logic import _maybe_expand_queries, _dedupe_chunks
         from backend.retriever import retriever
 
-        variant_queries = _maybe_expand_queries(query)
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            all_docs = []
-            for q in variant_queries:
-                docs = list(executor.map(retriever.get_relevant_documents, [q]))[0]
-                all_docs.extend(docs)
-        unique_texts = _dedupe_chunks(all_docs)
-        MAX_CHUNKS = 4
-        context_chunks = []
-        for i, (text, meta) in enumerate(unique_texts[:MAX_CHUNKS]):
-            context_chunks.append(text)
-        context_text = "\n\n---\n\n".join(context_chunks)
-        if not context_text.strip():
-            context_text = self._fallback_web_search(query, site)
-        return context_text
+        try:
+            # STEP 1: Use GPT-4o-mini to generate search keys from query context
+            search_keys = self._generate_search_keys(query)
+            logger.info(f"Using {len(search_keys)} search keys for context retrieval")
+            
+            # STEP 2: Perform vector search with generated keys
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                all_docs = []
+                for key in search_keys:
+                    docs = list(executor.map(retriever.get_relevant_documents, [key]))[0]
+                    all_docs.extend(docs)
+                
+                # Also search with original query for completeness
+                original_docs = list(executor.map(retriever.get_relevant_documents, [query]))[0]
+                all_docs.extend(original_docs)
+            
+            # STEP 3: Deduplicate and limit context
+            unique_texts = _dedupe_chunks(all_docs)
+            MAX_CHUNKS = 8  # Increased from 4 for better context
+            context_chunks = []
+            
+            for i, (text, meta) in enumerate(unique_texts[:MAX_CHUNKS]):
+                source = meta.get('source', 'Unknown') if meta else 'Unknown'
+                context_chunks.append(f"Source: {source}\n{text}")
+            
+            context_text = "\n\n---\n\n".join(context_chunks)
+            
+            # STEP 4: Fallback if no context found
+            if not context_text.strip():
+                logger.warning("No context found from vector search, using fallback")
+                context_text = self._fallback_web_search(query, site)
+            
+            logger.info(f"Retrieved context from {len(context_chunks)} documents using enhanced key generation")
+            return context_text
+            
+        except Exception as e:
+            logger.error(f"Enhanced context retrieval failed: {e}")
+            # Fallback to original method
+            variant_queries = _maybe_expand_queries(query)
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                all_docs = []
+                for q in variant_queries:
+                    docs = list(executor.map(retriever.get_relevant_documents, [q]))[0]
+                    all_docs.extend(docs)
+            unique_texts = _dedupe_chunks(all_docs)
+            MAX_CHUNKS = 4
+            context_chunks = []
+            for i, (text, meta) in enumerate(unique_texts[:MAX_CHUNKS]):
+                context_chunks.append(text)
+            context_text = "\n\n---\n\n".join(context_chunks)
+            if not context_text.strip():
+                context_text = self._fallback_web_search(query, site)
+            return context_text
 
     def _format_history(self, chat_history: list) -> str:
         return "\n".join(
@@ -964,7 +940,7 @@ Format your response with:
 
 
         prompt = f"""
-You are a helpful assistant providing well-formatted, comprehensive responses using proper Markdown structure.
+You are a helpful assistant providing well-formatted, comprehensive responses using proper Markdown structure with a conversational, engaging tone like ChatGPT.
 If the user's question is outside the website’s domain, politely decline or use fallback web search context.
 
 Conversation so far:
@@ -976,13 +952,20 @@ Relevant context from the knowledge base:
 User's latest question:
 {question}
 
-CRITICAL FORMATTING REQUIREMENTS:
+CONVERSATIONAL TONE REQUIREMENTS:
+1. Start naturally and engaging:
+   - Use "Absolutely!" or "Great question!" when appropriate
+   - Show understanding: "Here's what I can help you with..."
+   - Be friendly, professional, and engaging like ChatGPT
+   - Use natural conversational flow
+
+2. CRITICAL FORMATTING REQUIREMENTS:
 1. {length_rule}
 2. Use proper Markdown structure:
    - ### for main headings (use engaging titles like "### Quick Overview", "### Key Points", "### Implementation Guide")
-   - **Bold text** for important terms, technologies, and key concepts
+   - **Bold text** extensively for important terms, technologies, and key concepts
    - Proper line breaks between sections
-   - Bullet points or numbered lists for clarity
+   - Use bullet points with **bold** key terms for clarity
    - Code snippets with proper backticks when relevant
 
 3. Structure your response clearly:
@@ -1000,14 +983,47 @@ CRITICAL FORMATTING REQUIREMENTS:
 
 5. Content guidelines:
    - Synthesize information from multiple context sources when available
-   - Provide comprehensive but focused answers
-   - Include relevant examples and specifics
+   - Provide comprehensive but focused answers with engaging tone
+   - Include relevant examples and specifics with **bold terms**
    - If context is limited, use general knowledge while staying on topic
+   - Address the user's question thoroughly with conversational flow
    - Do not fabricate information outside the knowledge base scope
 
-Important: Do NOT include example text, placeholders, or template content in your response. Provide only actual, relevant information.
+6. PROFESSIONAL POLISH:
+   - Use engaging, conversational tone while staying professional
+   - Include relevant context and background information
+   - Address all aspects of the user's question comprehensively
+   - Conclude with **highlighted** next steps or takeaways
+
+Important: Do NOT include example text, placeholders, or template content in your response. Provide only actual, relevant information with proper conversational flow and extensive **bold formatting**.
 """
         return prompt.strip()
+
+    def get_flow_debug_info(self, query: str, site: str = "ditstek.com") -> Dict[str, Any]:
+        """Get detailed flow information for debugging the enhanced process"""
+        try:
+            # Generate search keys
+            search_keys = self._generate_search_keys(query)
+            
+            # Get context
+            context = self._retrieve_context(query, site)
+            
+            return {
+                "original_query": query,
+                "generated_keys": search_keys,
+                "context_length": len(context),
+                "context_preview": context[:300] + "..." if len(context) > 300 else context,
+                "model_used_for_keys": "gpt-4o-mini",
+                "model_used_for_response": getattr(self.llm, 'model_name', 'Unknown'),
+                "enhancement_status": "Enhanced flow active with GPT-4o-mini key generation",
+                "timestamp": datetime.now().isoformat()
+            }
+        except Exception as e:
+            return {
+                "error": str(e),
+                "enhancement_status": "Enhanced flow failed, using fallback",
+                "timestamp": datetime.now().isoformat()
+            }
 
     def _fallback_web_search(self, query: str, site: str) -> str:
         try:
