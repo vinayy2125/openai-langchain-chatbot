@@ -87,62 +87,91 @@ async def build_chatbot_response(
             logger.info(f"Requirements complete for session {session_id}, generating comprehensive response")
             comprehensive_response = follow_up_manager.generate_comprehensive_response(session_id)
             
-            # Stream the comprehensive response preserving markdown formatting
-            # Split by double line breaks to preserve markdown structure and fix any header issues
-            sections = re.split(r'\n\n', comprehensive_response)
-            for section in sections:
-                if section.strip():
-                    # Convert any H1-H2 headers to H3 headers for better readability
-                    section = re.sub(r'^#{1,2}\s', '### ', section.strip(), flags=re.MULTILINE)
+            # Format and stream the response in a concise, structured way
+            # Process the response to ensure proper markdown formatting and structure
+            lines = comprehensive_response.split('\n')
+            current_section = []
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
                     
-                    # Check if this is a heading or regular content
-                    if section.startswith('###'):
-                        # Send heading with proper line breaks
-                        yield {'status': 'complete_chunk', 'chunk': '\n\n' + section + '\n\n'}
-                    else:
-                        # Send content with word-level streaming for readability
-                        words = section.split(' ')
-                        word_buffer = ""
-                        for word in words:
-                            if word_buffer:
-                                word_buffer += ' ' + word  # Space before word (not after)
-                            else:
-                                word_buffer = word  # First word, no space before
-                            # Send in chunks of ~5 words to maintain proper spacing
-                            if len(word_buffer.split()) >= 5:
-                                yield {'status': 'complete_chunk', 'chunk': word_buffer}
-                                word_buffer = ""
-                        # Send remaining words without extra trailing space
-                        if word_buffer.strip():
-                            yield {'status': 'complete_chunk', 'chunk': word_buffer}
+                # Convert headers to consistent format
+                if line.startswith('#'):
+                    # If we have accumulated content, send it
+                    if current_section:
+                        yield {'status': 'complete_chunk', 'chunk': '\n'.join(current_section)}
+                        current_section = []
+                    
+                    # Format header and send
+                    header = re.sub(r'^#{1,6}\s*', '###### ', line)
+                    yield {'status': 'complete_chunk', 'chunk': '\n\n' + header + '\n'}
+                else:
+                    # Process regular content
+                    # Ensure proper bold formatting
+                    line = re.sub(r'\*\*([^*]+)\*\*', r'**\1**', line)
+                    # Ensure bullet points are properly formatted
+                    if line.lstrip().startswith('- '):
+                        line = line.strip()
+                    current_section.append(line)
+            
+            # Send any remaining content
+            if current_section:
+                yield {'status': 'complete_chunk', 'chunk': '\n'.join(current_section)}
             
             # Add spacing and final suggestions
             yield {'status': 'separator', 'chunk': '\n\n' }  # Extra spacing after main content
             
-            # Add single practical suggestion using the suggestion system (no header/label)
-            try:
-                practical_suggestions = follow_up_manager.generate_suggestions(session_id, context="comprehensive response completed")
-                if practical_suggestions:
-                    yield {'status': 'suggestion', 'chunk': practical_suggestions[0]}
-                else:
-                    yield {'status': 'suggestion', 'chunk': "Consider implementing a proof of concept to validate the approach"}
-            except Exception as e:
-                logger.error(f"Error generating practical suggestions: {e}")
-                yield {'status': 'suggestion', 'chunk': "Consider implementing a proof of concept to validate the approach"}
-            
-            # Add follow-up section with proper spacing
+            # Add clear separation before suggestions and follow-ups
             yield {'status': 'separator', 'chunk': '\n\n'}
-            
-            # Generate single dynamic follow-up based on context
+
             try:
+                # Generate both suggestions and follow-ups
+                suggestions = follow_up_manager.generate_suggestions(session_id, context="comprehensive response completed")
                 follow_ups = follow_up_manager.generate_follow_ups(session_id, latest_query, context="comprehensive response")
-                if follow_ups and len(follow_ups) > 0:
-                    yield {'status': 'followup_question', 'chunk': follow_ups[0]}
+
+                # Format suggestions with bullet points and bold highlights
+                if suggestions:
+                    formatted_suggestions = []
+                    for s in suggestions[:2]:  # Limit to 2 suggestions
+                        # Ensure suggestion starts with bullet point
+                        s = s.strip()
+                        if not s.startswith('- '):
+                            s = '- ' + s
+                        # Ensure key terms are bold
+                        if '**' not in s:
+                            words = s.split()
+                            for i, word in enumerate(words):
+                                if word.lower() in ['implement', 'create', 'use', 'develop', 'build', 'integrate']:
+                                    words[i] = f'**{word}**'
+                            s = ' '.join(words)
+                        formatted_suggestions.append(s)
+                    yield {'status': 'suggestions', 'chunk': '\n'.join(formatted_suggestions)}
                 else:
-                    yield {'status': 'followup_question', 'chunk': "Would you like me to dive deeper into any specific aspect?"}
+                    yield {'status': 'suggestions', 'chunk': "- Consider implementing a **proof of concept** to validate the approach"}
+
+                # Add spacing between sections
+                yield {'status': 'separator', 'chunk': '\n\n'}
+
+                # Format follow-ups with clear structure
+                if follow_ups and len(follow_ups) > 0:
+                    formatted_followups = []
+                    for f in follow_ups[:2]:  # Limit to 2 follow-ups
+                        f = f.strip()
+                        if not f.startswith('- '):
+                            f = '- ' + f
+                        formatted_followups.append(f)
+                    yield {'status': 'followups', 'chunk': '\n'.join(formatted_followups)}
+                else:
+                    yield {'status': 'followups', 'chunk': "- What specific aspects would you like to explore further?"}
+
             except Exception as e:
-                logger.error(f"Error generating dynamic follow-up: {e}")
-                yield {'status': 'followup_question', 'chunk': "Would you like me to dive deeper into any specific aspect?"}
+                logger.error(f"Error generating suggestions and follow-ups: {e}")
+                # Fallback with generic grouped suggestions and follow-ups
+                yield {'status': 'suggestions', 'chunk': "Consider implementing a proof of concept to validate the approach"}
+                yield {'status': 'separator', 'chunk': '\n\n'}
+                yield {'status': 'followups', 'chunk': "Would you like to explore any specific aspect of the solution?"}
                 
         else:
             # Generate concise response + specific follow-ups to gather more requirements
@@ -161,47 +190,23 @@ async def build_chatbot_response(
                 
                 enhanced_query = f"""
 You are "Ditstek Assistant", answering on behalf of the Ditstek team. 
-Your response must primarily use the provided Knowledge Base context (≈80%) and may include a short supplemental note (≈20%) if needed.
+Your response must primarily use the provided Knowledge Base context (≈80%) 
+and may include a short supplemental note (≈20%) if needed.
 
 SMART RESPONSE GUIDELINES:
 
-1. **DITSTEK VOICE:**
-   - Always respond as "we at Ditstek" or "our team".
-   - Showcase solutions as if implemented in Ditstek projects.
-
-2. **CONTENT SOURCING:**
-   - Use the KB context provided to form the majority of your answer (≈80%).
-   - If additional helpful detail is needed, add a short section labeled:
-     **Ditstek note — supplemental:** (max ≈20% of reply).
-   - If the KB lacks the answer, respond: 
-     "We couldn’t find this in our knowledge base. Please check the source directly."
-
-3. **FORMATTING REQUIREMENTS:**
-   - Use **bold text** for key technologies, concepts, and terms
-   - Use ONLY ###### headings for sections:
-     * ###### Key Points
-     * ###### Technical Details
-     * ###### Recommendations
-   - Use bullet points and numbered lists naturally
-   - Include clear line breaks for readability
-
-4. **STRUCTURE:**
-   - Start with a short overview paragraph
-   - Provide well-structured sections (with headings)
-   - Include relevant specifics (examples, tools, approaches)
-   - End with **highlighted next steps**
-
-5. **PROFESSIONAL POLISH:**
-   - Tone: engaging, professional, and confident
-   - Explicitly mention Ditstek’s role in applying the approach
-   - Cite sources from KB at the end in format:
-     *Sources: [Doc Title — url — score]*
+FORMATTING INSTRUCTIONS:  
+1. Limit the response to **around 200 words** — concise, informative, and focused.  
+2. Use **bold text** to highlight important terms, technologies, and key concepts.  
+3. Maintain a natural, conversational flow similar to ChatGPT responses.  
+4. Use Markdown formatting naturally (bold, lists, headings) for readability. 
 
 CONTEXT (use this for main part of the answer):
 {context_text}
 
 USER QUERY:
 {latest_query}
+
 """
             else:
                 # For follow-up responses, continue conversation naturally with proper formatting
@@ -216,7 +221,6 @@ CRITICAL FORMATTING REQUIREMENTS:
 1. Use **bold text** for key terms and technologies
 2. Use ONLY ###### headings when sections are needed:
    - ###### Key Points
-   - ###### Technical Details
    - ###### Recommendations
 3. Use bullet points for clarity
 4. Maintain natural paragraph breaks
@@ -238,7 +242,7 @@ USER QUERY:
 {latest_query}
 """
 
-            # Generate the main response with word-level streaming
+            # Generate and format the main response
             main_response = ""
             response_stream = follow_up_manager.chatbot.get_detailed_response(
                 query=enhanced_query,
@@ -246,26 +250,54 @@ USER QUERY:
                 stream=True
             )
             
-            # Ensure structured formatting for manual queries
+            # Process and format the response
+            current_section = []
             for chunk in response_stream:
                 if not chunk:
                     continue
-                text_chunk = str(chunk)
-                main_response += text_chunk
-
-                # Apply word-level streaming with proper spacing
-                # Split into words and yield each word individually with proper spacing
-                words = text_chunk.split()
-                for word in words:
-                    if word.strip():  # Only yield non-empty words
-                        # Yield each word with a trailing space for proper separation
-                        yield {'status': 'word', 'chunk': word + ' '}
                 
-                # Handle paragraph breaks and line breaks properly
-                if '\n\n' in text_chunk:
-                    yield {'status': 'paragraph_break', 'chunk': '\n\n'}
-                elif '\n' in text_chunk and not text_chunk.strip().startswith('#'):
-                    yield {'status': 'line_break', 'chunk': '\n'}
+                text_chunk = str(chunk).strip()
+                main_response += text_chunk
+                
+                # Split into lines to process sections
+                lines = text_chunk.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        if current_section:
+                            # Join and send accumulated section
+                            section_text = ' '.join(current_section)
+                            yield {'status': 'complete_chunk', 'chunk': section_text}
+                            current_section = []
+                        continue
+                    
+                    # Handle headers
+                    if line.startswith('#'):
+                        if current_section:
+                            section_text = ' '.join(current_section)
+                            yield {'status': 'complete_chunk', 'chunk': section_text}
+                            current_section = []
+                        
+                        # Format header consistently
+                        header = re.sub(r'^#{1,6}\s*', '###### ', line)
+                        yield {'status': 'complete_chunk', 'chunk': '\n\n' + header + '\n'}
+                    else:
+                        # Process regular content
+                        # Ensure bullet points are properly formatted
+                        if line.lstrip().startswith('- '):
+                            if current_section:
+                                section_text = ' '.join(current_section)
+                                yield {'status': 'complete_chunk', 'chunk': section_text}
+                                current_section = []
+                            # Send bullet points as complete chunks
+                            yield {'status': 'complete_chunk', 'chunk': line}
+                        else:
+                            current_section.append(line)
+            
+            # Send any remaining content
+            if current_section:
+                section_text = ' '.join(current_section)
+                yield {'status': 'complete_chunk', 'chunk': section_text}
             
             # Add spacing after main response (no separator lines)
             yield {'status': 'separator', 'chunk': '\n\n'}  # Just spacing, no lines
@@ -274,88 +306,61 @@ USER QUERY:
             if main_response:
                 follow_up_manager.add_to_conversation_history(session_id, "assistant", main_response)
 
-            # Generate intelligent follow-up questions based on conversation state
-            conversation_history_data = follow_up_manager.get_session_data(session_id).get('conversation_history', [])
-            user_messages = [msg for msg in conversation_history_data if msg.get("role") == "user"]
-            if user_messages:
-                # Access the latest user message for further processing or context
-                latest_user_message = user_messages[-1].get("content", "")
-                logger.info(f"Latest user message: {latest_user_message}")
-                # Use the latest user message for generating follow-ups or suggestions
-                follow_ups = follow_up_manager.generate_follow_ups(session_id, latest_user_message, context=main_response[:150])
-                if follow_ups and len(follow_ups) > 0:
-                    # Clean and send the first follow-up
-                    clean_followup = re.sub(r'#{1,6}\s*', '', follow_ups[0])
-                    followup_text = ' '.join(clean_followup.split())
-                    yield {'status': 'followup_question', 'chunk': followup_text}
-                else:
-                    yield {'status': 'followup_question', 'chunk': "What would you like to focus on next?"}
-            
-            # Use the existing chatbot optimizer's generate_followups method
+            # Add spacing after main response
+            yield {'status': 'separator', 'chunk': '\n\n'}
+
             try:
-                # Generate suggestions first (before follow-ups)
-                suggestions = follow_up_manager.generate_suggestions(session_id, context=main_response[:100])
+                # Generate single suggestion and follow-up
+                suggestion = follow_up_manager.generate_suggestions(session_id, context=main_response[:200])[0] if follow_up_manager.generate_suggestions(session_id, context=main_response[:200]) else None
+                follow_up = follow_up_manager.generate_follow_ups(session_id, latest_query, context=main_response[:200])[0] if follow_up_manager.generate_follow_ups(session_id, latest_query, context=main_response[:200]) else None
                 
-                # Send single suggestion with word-level streaming
-                if suggestions:
-                    best_suggestion = suggestions[0]
-                    # Remove any existing numbering and clean up
-                    clean_suggestion = re.sub(r'^\d+\.\s*', '', best_suggestion).strip()
-                    # Keep markdown formatting for ChatGPT-like display
-                    # Only remove headers, preserve **bold** and *italic*
-                    clean_suggestion = re.sub(r'#{1,6}\s*', '', clean_suggestion)  # Remove headers only
-                    
-                    # Stream suggestion word by word with proper spacing
-                    suggestion_words = clean_suggestion.split()
-                    suggestion_text = ' '.join(suggestion_words)  # Rebuild without extra spaces
-                    yield {'status': 'suggestion', 'chunk': suggestion_text}
+                # Format suggestion
+                if suggestion:
+                    # Clean up and format suggestion
+                    clean_suggestion = re.sub(r'#{1,6}\s*', '', suggestion.strip())
+                    clean_suggestion = re.sub(r'^\d+\.\s*|-\s*', '', clean_suggestion)
+                    # Ensure proper bold formatting for key terms
+                    for term in ['implement', 'create', 'use', 'integrate', 'develop', 'leverage']:
+                        pattern = f'(?i)\\b{term}\\b'
+                        clean_suggestion = re.sub(pattern, f'**{term}**', clean_suggestion)
+                    yield {'status': 'suggestions', 'chunk': f'- {clean_suggestion.strip()}'}
                 else:
-                    # Fallback suggestion without word streaming
-                    fallback_suggestion = "Consider starting with a proof of concept to validate your approach"
-                    yield {'status': 'suggestion', 'chunk': fallback_suggestion}
-                
-                # Add spacing between suggestion and follow-ups (no separator lines)
-                yield {'status': 'separator', 'chunk': '\n\n'}  # Just spacing, no lines
-                
-                # No separator lines as requested by user
-                # Just extra spacing before follow-ups
-                yield {'status': 'separator', 'chunk': '\n'}
-                
-                # The follow-up generation is now handled by the dynamic system below
-                pass
-                
-                # Send single dynamic follow-up
+                    yield {'status': 'suggestions', 'chunk': '- Consider **implementing** a proof of concept to validate your approach'}
+
+                # Single separator
                 yield {'status': 'separator', 'chunk': '\n\n'}
+
+                # Format follow-up
+                # Format and send a single follow-up
+                follow_up = follow_up_manager.generate_follow_ups(session_id, latest_query, context=main_response[:150])[0] if follow_up_manager.generate_follow_ups(session_id, latest_query, context=main_response[:150]) else None
                 
-                # Generate single contextual follow-up based on conversation state
-                try:
-                    follow_ups = follow_up_manager.generate_follow_ups(session_id, latest_query, context=main_response[:150])
-                    if follow_ups and len(follow_ups) > 0:
-                        # Clean and send the first follow-up
-                        clean_followup = re.sub(r'#{1,6}\s*', '', follow_ups[0])
-                        followup_text = ' '.join(clean_followup.split())
-                        yield {'status': 'followup_question', 'chunk': followup_text}
-                    else:
-                        # Use keyword-based fallback for single follow-up
-                        context_keywords = latest_query.lower()
-                        if any(word in context_keywords for word in ['app', 'mobile', 'web', 'application']):
-                            yield {'status': 'followup_question', 'chunk': "What specific features or functionalities are most important for your app?"}
-                        elif any(word in context_keywords for word in ['ai', 'machine learning', 'ml', 'chatbot']):
-                            yield {'status': 'followup_question', 'chunk': "What type of AI functionality do you envision for your project?"}
-                        elif any(word in context_keywords for word in ['website', 'site', 'web', 'portal']):
-                            yield {'status': 'followup_question', 'chunk': "What's the main purpose of your website - e-commerce, corporate, or service-based?"}
-                        else:
-                            yield {'status': 'followup_question', 'chunk': "What's the primary goal you want to achieve with this project?"}
-                except Exception as inner_e:
-                    logger.error(f"Error in dynamic follow-up generation: {inner_e}")
-                    yield {'status': 'followup_question', 'chunk': "What would you like to focus on next?"}
+                if follow_up:
+                    # Clean up and format follow-up
+                    clean_followup = re.sub(r'#{1,6}\s*', '', follow_up.strip())
+                    clean_followup = re.sub(r'^\d+\.\s*|-\s*', '', clean_followup)
                     
+                    # Make it more engaging if it's not already a question
+                    if not any(clean_followup.lower().startswith(q) for q in ['what', 'how', 'could', 'would', 'can', 'which']):
+                        clean_followup = f"Could you tell us more about {clean_followup.lower()}"
+                    
+                    yield {'status': 'followup', 'chunk': f'- {clean_followup.strip()}?'}
+                else:
+                    # Context-aware fallback follow-up
+                    context_keywords = latest_query.lower() if latest_query else ""
+                    if any(word in context_keywords for word in ['app', 'mobile', 'web', 'application']):
+                        yield {'status': 'followup', 'chunk': "- What specific features or functionalities are most important for your app?"}
+                    elif any(word in context_keywords for word in ['ai', 'machine learning', 'ml', 'chatbot']):
+                        yield {'status': 'followup', 'chunk': "- What type of AI functionality do you envision for your project?"}
+                    elif any(word in context_keywords for word in ['website', 'site', 'web', 'portal']):
+                        yield {'status': 'followup', 'chunk': "- What's the main purpose of your website - e-commerce, corporate, or service-based?"}
+                    else:
+                        yield {'status': 'followup', 'chunk': "- What specific aspects would you like to explore further?"}
             except Exception as e:
                 logger.error(f"Error generating follow-ups: {e}")
-                # Fallback single follow-up for errors
-                yield {'status': 'suggestion', 'chunk': "Consider starting with a basic prototype to test core functionality"}
+                # Fallback with generic suggestion and follow-up
+                yield {'status': 'suggestion', 'chunk': "- Consider **implementing** a basic prototype to test core functionality"}
                 yield {'status': 'separator', 'chunk': '\n\n'}
-                yield {'status': 'followup_question', 'chunk': "What specific features are most important to you?"}
+                yield {'status': 'followup', 'chunk': "- What specific features are most important to you?"}
 
     except Exception as e:
         yield {'status': 'error', 'message': str(e)}
