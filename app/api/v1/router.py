@@ -17,6 +17,7 @@ from .helpers import (
 from . import helpers
 from app.db.base import get_db_conn
 from app.api.deps import get_follow_up_manager
+from app.db import redis_operations as redis_crud
 
 # Get logger
 logger = logging.getLogger(__name__)
@@ -182,3 +183,29 @@ async def post_send_message_stream(
 ):
     """Delegate to helper implementation for streaming chat."""
     return await helpers.send_message_stream(req, follow_up_manager)
+
+
+@router.post("/init-embeddings")
+async def init_embeddings():
+    """Initialize embedding model and Redis index, return connection/model status."""
+    try:
+        r = redis_crud.get_redis_client()
+    except Exception as e:
+        logger.error("Redis connection failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Redis connection failed: {e}")
+
+    # Ensure index exists (will create if missing)
+    try:
+        redis_crud.ensure_index_exists(r)
+    except Exception as e:
+        logger.error("Failed to ensure index: %s", e)
+        raise HTTPException(status_code=500, detail=f"Index creation failed: {e}")
+
+    # Try loading embedding model
+    try:
+        model = redis_crud.get_embedding_model()
+    except Exception as e:
+        logger.error("Embedding model load failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Embedding model load failed: {e}")
+
+    return {"status": "ok", "redis_index": redis_crud.INDEX_NAME, "embed_dim": redis_crud.EMBED_DIM}
