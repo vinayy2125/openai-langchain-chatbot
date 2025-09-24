@@ -1,18 +1,15 @@
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 import json
-from datetime import datetime
 import logging
 from typing import Optional, List
-from uuid import UUID
-import psycopg2
 from backend.services.thread_router import ChatRouter, detect_company_intent, handle_company_query
 
 from .models import (
     UserCreate, UserRegisterResponse, SentMessage, 
     HistoryResponse, StreamingChatResponse,
-    SessionState, Prompt, FollowUp, MessageCreate,
-    PromptType, FollowUpType
+    SessionState, Prompt, MessageCreate,
+    PromptType
 )
 from backend.nested_follow_up_manager import FollowUpManager
 from .helpers import (
@@ -216,7 +213,7 @@ async def send_message_stream(
             prompt_id_str = None
             if req.prompt_id:
                 try:
-                    prompt_db = await initialize_session_with_prompt(session_id, req.prompt_id)
+                    prompt_db = await initialize_sessvion_with_prompt(session_id, req.prompt_id)
                     prompt_context = prompt_db["prompt_text"]
                     prompt_id_str = str(req.prompt_id)
                 except HTTPException:
