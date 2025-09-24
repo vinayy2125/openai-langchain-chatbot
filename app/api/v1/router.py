@@ -209,3 +209,67 @@ async def init_embeddings():
         raise HTTPException(status_code=500, detail=f"Embedding model load failed: {e}")
 
     return {"status": "ok", "redis_index": redis_crud.INDEX_NAME, "embed_dim": redis_crud.EMBED_DIM}
+
+
+# ---------------- Redis document endpoints -----------------
+@router.get("/redis/docs")
+async def list_redis_docs(limit: int = 50):
+    """List JSON documents stored under the configured prefix."""
+    try:
+        r = redis_crud.get_redis_client()
+        # Scan keys using the prefix
+        keys = r.scan_iter(match=f"{redis_crud.PREFIX}*")
+        docs = []
+        count = 0
+        for k in keys:
+            if count >= limit:
+                break
+            doc = r.json().get(k)
+            docs.append({"key": k, "doc": doc})
+            count += 1
+        return {"count": len(docs), "docs": docs}
+    except Exception as e:
+        logger.error("Error listing redis docs: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/redis/docs/{doc_id}")
+async def get_redis_doc(doc_id: str):
+    """Fetch a single JSON document by id (without prefix)."""
+    try:
+        r = redis_crud.get_redis_client()
+        key = f"{redis_crud.PREFIX}{doc_id}"
+        doc = r.json().get(key)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return {"key": key, "doc": doc}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error fetching redis doc %s: %s", doc_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/redis/docs")
+async def create_redis_doc(payload: dict):
+    """Create a new message document and generate/store its embedding.
+
+    Payload example: {"message": "hello world", "metadata": {"user_id": "123"}}
+    """
+    try:
+        message = payload.get("message")
+        metadata = payload.get("metadata", {})
+        if not message:
+            raise HTTPException(status_code=400, detail="'message' is required")
+
+        r = redis_crud.get_redis_client()
+        # Ensure index exists
+        redis_crud.ensure_index_exists(r)
+
+        msg_id = redis_crud.generate_and_store_embedding(r, message, metadata)
+        return {"status": "created", "id": msg_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error creating redis doc: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
