@@ -7,6 +7,7 @@ This service provides optimized chatbot response generation with:
 - Robust fallback handling
 - Streaming response support
 """
+
 import logging
 import sys
 import tiktoken
@@ -26,28 +27,27 @@ from datetime import datetime
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("chatbot")
+
 
 class ContextOptimizer:
     """
     Handles context optimization to fit within model token limits
     while maximizing relevance and information retention.
     """
-    
+
     def __init__(self, model: str = "gpt-4o"):
         self.model = model
         self.encoding = tiktoken.encoding_for_model(model)
-        self.model_limits = {
-            "gpt-4o": 128000
-        }
+        self.model_limits = {"gpt-4o": 128000}
         self.context_limit = self.model_limits.get(model, 4096)
-    
+
     @lru_cache(maxsize=1000)
     def count_tokens_cached(self, text: str) -> int:
         return len(self.encoding.encode(text))
-    
+
     def score_chunk_relevance(self, chunk: str, question: str) -> float:
         question_words = set(question.lower())
         chunk_words = set(chunk.lower())
@@ -56,31 +56,45 @@ class ContextOptimizer:
         if total_question_words == 0:
             return 0.0
         relevance_score = overlap / total_question_words
-        key_terms = ['what', 'how', 'why', 'when', 'where', 'who', 'which']
+        key_terms = ["what", "how", "why", "when", "where", "who", "which"]
         for term in key_terms:
             if term in question.lower() and term in chunk.lower():
                 relevance_score += 0.1
         return min(relevance_score, 1.0)
-    
-    def prioritize_chunks(self, chunks: List[str], question: str, max_chunks: int = 8) -> List[str]:
+
+    def prioritize_chunks(
+        self, chunks: List[str], question: str, max_chunks: int = 8
+    ) -> List[str]:
         if not chunks:
             return []
         with ThreadPoolExecutor(max_workers=4) as executor:
-            scores = list(executor.map(lambda chunk: self.score_chunk_relevance(chunk, question), chunks))
+            scores = list(
+                executor.map(
+                    lambda chunk: self.score_chunk_relevance(chunk, question), chunks
+                )
+            )
         chunk_scores = list(zip(chunks, scores))
         chunk_scores.sort(key=lambda x: x[1], reverse=True)
         prioritized_chunks = [chunk for chunk, score in chunk_scores[:max_chunks]]
-        logger.debug(f"Prioritized {len(chunks)} chunks to {len(prioritized_chunks)} most relevant")
+        logger.debug(
+            f"Prioritized {len(chunks)} chunks to {len(prioritized_chunks)} most relevant"
+        )
         return prioritized_chunks
-    
-    def optimize_context(self, context: str, question: str, history: str, template_tokens: int) -> Tuple[str, Dict]:
+
+    def optimize_context(
+        self, context: str, question: str, history: str, template_tokens: int
+    ) -> Tuple[str, Dict]:
         question_tokens = self.count_tokens_cached(question)
         history_tokens = self.count_tokens_cached(history)
         response_reservation = 1000
         safety_buffer = 500
         available_for_context = (
-            self.context_limit - template_tokens - question_tokens - 
-            history_tokens - response_reservation - safety_buffer
+            self.context_limit
+            - template_tokens
+            - question_tokens
+            - history_tokens
+            - response_reservation
+            - safety_buffer
         )
         logger.debug(f"Available tokens for context: {available_for_context}")
         if isinstance(context, list):
@@ -92,15 +106,22 @@ class ContextOptimizer:
         for chunk in prioritized_chunks:
             chunk_tokens = self.count_tokens_cached(chunk)
             separator_tokens = self.count_tokens_cached("\n\n---\n\n")
-            if current_tokens + chunk_tokens + separator_tokens <= available_for_context:
+            if (
+                current_tokens + chunk_tokens + separator_tokens
+                <= available_for_context
+            ):
                 optimized_context.append(chunk)
                 current_tokens += chunk_tokens + separator_tokens
             else:
                 remaining_tokens = available_for_context - current_tokens
                 if remaining_tokens > 100:
-                    partial_chunk = self.truncate_to_tokens(chunk, remaining_tokens - separator_tokens)
+                    partial_chunk = self.truncate_to_tokens(
+                        chunk, remaining_tokens - separator_tokens
+                    )
                     optimized_context.append(partial_chunk)
-                    current_tokens += self.count_tokens_cached(partial_chunk) + separator_tokens
+                    current_tokens += (
+                        self.count_tokens_cached(partial_chunk) + separator_tokens
+                    )
                 break
         final_context = "\n\n---\n\n".join(optimized_context)
         optimization_stats = {
@@ -109,22 +130,24 @@ class ContextOptimizer:
             "final_chunks": len(optimized_context),
             "original_tokens": self.count_tokens_cached(context),
             "final_tokens": self.count_tokens_cached(final_context),
-            "tokens_saved": self.count_tokens_cached(context) - self.count_tokens_cached(final_context)
+            "tokens_saved": self.count_tokens_cached(context)
+            - self.count_tokens_cached(final_context),
         }
         logger.debug(f"Context optimization stats: {optimization_stats}")
         return final_context, optimization_stats
-    
+
     def truncate_to_tokens(self, text: str, max_tokens: int) -> str:
         tokens = self.encoding.encode(text)
         if len(tokens) <= max_tokens:
             return text
         return self.encoding.decode(tokens[:max_tokens])
 
+
 class OptimizedChatbot:
     """
     Streaming-only chatbot service with optimized context handling.
     """
-    
+
     def __init__(self, llm, model: str = "gpt-4o"):
         self.llm = llm
         self.model = model
@@ -135,79 +158,89 @@ class OptimizedChatbot:
         self.context_optimizer = ContextOptimizer(model)
         self.response_cache = {}
         self.generated_followups = []  # Store generated follow-ups internally
-        
+
         # ADD: Separate LLM for query key generation with GPT-4o-mini
         import os
         from langchain_openai import ChatOpenAI
+
         self.query_llm = ChatOpenAI(
             model_name="gpt-4o-mini",  # Dedicated model for query processing
             temperature=0.3,  # Lower temperature for more focused key generation
-            max_tokens=150,   # Limit tokens for key generation
-            openai_api_key=os.getenv("OPENAI_API_KEY")
+            max_tokens=150,  # Limit tokens for key generation
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
         )
-        logger.info("Initialized OptimizedChatbot with GPT-4o-mini for query processing")
+        logger.info(
+            "Initialized OptimizedChatbot with GPT-4o-mini for query processing"
+        )
         # Ordered discovery categories for requirement elicitation (10 criteria)
         self.requirement_categories = [
             {
-                'key': 'goal',
-                'name': 'Project Goal / Primary Objective',
-                'question': 'What is the primary goal or outcome you want to achieve?',
-                'patterns': ['goal', 'objective', 'aim', 'purpose']
+                "key": "goal",
+                "name": "Project Goal / Primary Objective",
+                "question": "What is the primary goal or outcome you want to achieve?",
+                "patterns": ["goal", "objective", "aim", "purpose"],
             },
             {
-                'key': 'users',
-                'name': 'Target Users / Audience',
-                'question': 'Who are the primary users or audience for this solution?',
-                'patterns': ['user', 'audience', 'customer', 'client', 'end user']
+                "key": "users",
+                "name": "Target Users / Audience",
+                "question": "Who are the primary users or audience for this solution?",
+                "patterns": ["user", "audience", "customer", "client", "end user"],
             },
             {
-                'key': 'pain_points',
-                'name': 'Pain Points / Challenges',
-                'question': 'What key pain points or challenges are you trying to solve?',
-                'patterns': ['pain', 'challenge', 'problem', 'issue', 'bottleneck']
+                "key": "pain_points",
+                "name": "Pain Points / Challenges",
+                "question": "What key pain points or challenges are you trying to solve?",
+                "patterns": ["pain", "challenge", "problem", "issue", "bottleneck"],
             },
             {
-                'key': 'features',
-                'name': 'Desired Features / Functionality',
-                'question': 'What core features or functionality do you definitely need?',
-                'patterns': ['feature', 'functionality', 'module', 'capability']
+                "key": "features",
+                "name": "Desired Features / Functionality",
+                "question": "What core features or functionality do you definitely need?",
+                "patterns": ["feature", "functionality", "module", "capability"],
             },
             {
-                'key': 'success_metrics',
-                'name': 'Success Metrics / KPIs',
-                'question': 'How will success be measured (KPIs or outcomes)?',
-                'patterns': ['kpi', 'success', 'metric', 'measure', 'roi']
+                "key": "success_metrics",
+                "name": "Success Metrics / KPIs",
+                "question": "How will success be measured (KPIs or outcomes)?",
+                "patterns": ["kpi", "success", "metric", "measure", "roi"],
             },
             {
-                'key': 'constraints',
-                'name': 'Budget / Resource Constraints',
-                'question': 'Do you have budget or resource constraints we should respect?',
-                'patterns': ['budget', 'cost', 'constraint', 'resource', 'limit']
+                "key": "constraints",
+                "name": "Budget / Resource Constraints",
+                "question": "Do you have budget or resource constraints we should respect?",
+                "patterns": ["budget", "cost", "constraint", "resource", "limit"],
             },
             {
-                'key': 'timeline',
-                'name': 'Timeline / Urgency',
-                'question': 'What is the desired timeline or deadline?',
-                'patterns': ['timeline', 'deadline', 'schedule', 'date', 'milestone']
+                "key": "timeline",
+                "name": "Timeline / Urgency",
+                "question": "What is the desired timeline or deadline?",
+                "patterns": ["timeline", "deadline", "schedule", "date", "milestone"],
             },
             {
-                'key': 'tech_stack',
-                'name': 'Technology / Platform Preferences',
-                'question': 'Any preferred technologies, platforms, or tools?',
-                'patterns': ['tech', 'technology', 'stack', 'platform', 'framework']
+                "key": "tech_stack",
+                "name": "Technology / Platform Preferences",
+                "question": "Any preferred technologies, platforms, or tools?",
+                "patterns": ["tech", "technology", "stack", "platform", "framework"],
             },
             {
-                'key': 'integrations',
-                'name': 'Data / Integrations',
-                'question': 'What external systems or data sources need integration?',
-                'patterns': ['integration', 'api', 'data source', 'crm', 'erp']
+                "key": "integrations",
+                "name": "Data / Integrations",
+                "question": "What external systems or data sources need integration?",
+                "patterns": ["integration", "api", "data source", "crm", "erp"],
             },
             {
-                'key': 'compliance',
-                'name': 'Security / Compliance / Privacy',
-                'question': 'Are there security, compliance, or privacy requirements?',
-                'patterns': ['security', 'privacy', 'compliance', 'gdpr', 'hipaa', 'pci']
-            }
+                "key": "compliance",
+                "name": "Security / Compliance / Privacy",
+                "question": "Are there security, compliance, or privacy requirements?",
+                "patterns": [
+                    "security",
+                    "privacy",
+                    "compliance",
+                    "gdpr",
+                    "hipaa",
+                    "pci",
+                ],
+            },
         ]
         # Track collected category answers per session
         self.collected_requirements: dict[str, dict] = {}
@@ -215,87 +248,94 @@ class OptimizedChatbot:
         # Keep requirement_categories as reference topics but don't rigidly follow them
         self.requirement_categories = [
             {
-                'key': 'goal',
-                'name': 'Project Goal / Primary Objective',
-                'question': 'What is the primary goal or outcome you want to achieve?',
-                'patterns': ['goal', 'objective', 'aim', 'purpose']
+                "key": "goal",
+                "name": "Project Goal / Primary Objective",
+                "question": "What is the primary goal or outcome you want to achieve?",
+                "patterns": ["goal", "objective", "aim", "purpose"],
             },
             {
-                'key': 'users',
-                'name': 'Target Users / Audience',
-                'question': 'Who are the primary users or audience for this solution?',
-                'patterns': ['user', 'audience', 'customer', 'client', 'end user']
+                "key": "users",
+                "name": "Target Users / Audience",
+                "question": "Who are the primary users or audience for this solution?",
+                "patterns": ["user", "audience", "customer", "client", "end user"],
             },
             {
-                'key': 'pain_points',
-                'name': 'Pain Points / Challenges',
-                'question': 'What key pain points or challenges are you trying to solve?',
-                'patterns': ['pain', 'challenge', 'problem', 'issue', 'bottleneck']
+                "key": "pain_points",
+                "name": "Pain Points / Challenges",
+                "question": "What key pain points or challenges are you trying to solve?",
+                "patterns": ["pain", "challenge", "problem", "issue", "bottleneck"],
             },
             {
-                'key': 'features',
-                'name': 'Desired Features / Functionality',
-                'question': 'What core features or functionality do you definitely need?',
-                'patterns': ['feature', 'functionality', 'module', 'capability']
+                "key": "features",
+                "name": "Desired Features / Functionality",
+                "question": "What core features or functionality do you definitely need?",
+                "patterns": ["feature", "functionality", "module", "capability"],
             },
             {
-                'key': 'success_metrics',
-                'name': 'Success Metrics / KPIs',
-                'question': 'How will success be measured (KPIs or outcomes)?',
-                'patterns': ['kpi', 'success', 'metric', 'measure', 'roi']
+                "key": "success_metrics",
+                "name": "Success Metrics / KPIs",
+                "question": "How will success be measured (KPIs or outcomes)?",
+                "patterns": ["kpi", "success", "metric", "measure", "roi"],
             },
             {
-                'key': 'constraints',
-                'name': 'Budget / Resource Constraints',
-                'question': 'Do you have budget or resource constraints we should respect?',
-                'patterns': ['budget', 'cost', 'constraint', 'resource', 'limit']
+                "key": "constraints",
+                "name": "Budget / Resource Constraints",
+                "question": "Do you have budget or resource constraints we should respect?",
+                "patterns": ["budget", "cost", "constraint", "resource", "limit"],
             },
             {
-                'key': 'timeline',
-                'name': 'Timeline / Urgency',
-                'question': 'What is the desired timeline or deadline?',
-                'patterns': ['timeline', 'deadline', 'schedule', 'date', 'milestone']
+                "key": "timeline",
+                "name": "Timeline / Urgency",
+                "question": "What is the desired timeline or deadline?",
+                "patterns": ["timeline", "deadline", "schedule", "date", "milestone"],
             },
             {
-                'key': 'tech_stack',
-                'name': 'Technology / Platform Preferences',
-                'question': 'Any preferred technologies, platforms, or tools?',
-                'patterns': ['tech', 'technology', 'stack', 'platform', 'framework']
+                "key": "tech_stack",
+                "name": "Technology / Platform Preferences",
+                "question": "Any preferred technologies, platforms, or tools?",
+                "patterns": ["tech", "technology", "stack", "platform", "framework"],
             },
             {
-                'key': 'integrations',
-                'name': 'Data / Integrations',
-                'question': 'What external systems or data sources need integration?',
-                'patterns': ['integration', 'api', 'data source', 'crm', 'erp']
+                "key": "integrations",
+                "name": "Data / Integrations",
+                "question": "What external systems or data sources need integration?",
+                "patterns": ["integration", "api", "data source", "crm", "erp"],
             },
             {
-                'key': 'compliance',
-                'name': 'Security / Compliance / Privacy',
-                'question': 'Are there security, compliance, or privacy requirements?',
-                'patterns': ['security', 'privacy', 'compliance', 'gdpr', 'hipaa', 'pci']
-            }
+                "key": "compliance",
+                "name": "Security / Compliance / Privacy",
+                "question": "Are there security, compliance, or privacy requirements?",
+                "patterns": [
+                    "security",
+                    "privacy",
+                    "compliance",
+                    "gdpr",
+                    "hipaa",
+                    "pci",
+                ],
+            },
         ]
-        
+
         # Track conversation state differently - more flexible
         self.conversation_state = {}  # session_id -> state object
-        
+
     def _init_conversation_state(self, session_id: str):
         """Initialize a flexible conversation state tracker."""
         if session_id not in self.conversation_state:
             self.conversation_state[session_id] = {
-                'topics_covered': set(),        # Topics we've discussed 
-                'topics_to_explore': set(),     # Dynamically discovered topics to ask about
-                'user_context': {},             # Key insights about user/project
-                'follow_up_strategy': 'explore',  # explore, deepen, clarify, challenge, summarize
-                'follow_up_count': 0,           # How many follow-ups we've asked
-                'last_generated': None          # Timestamp of last generation
+                "topics_covered": set(),  # Topics we've discussed
+                "topics_to_explore": set(),  # Dynamically discovered topics to ask about
+                "user_context": {},  # Key insights about user/project
+                "follow_up_strategy": "explore",  # explore, deepen, clarify, challenge, summarize
+                "follow_up_count": 0,  # How many follow-ups we've asked
+                "last_generated": None,  # Timestamp of last generation
             }
         return self.conversation_state[session_id]
-        
+
     def reset_follow_up_count(self, session_id: str):
         """Reset the follow-up count for a session, useful when switching prompts."""
         if session_id in self.conversation_state:
-            self.conversation_state[session_id]['follow_up_count'] = 0
+            self.conversation_state[session_id]["follow_up_count"] = 0
             return True
         return False
 
@@ -303,8 +343,8 @@ class OptimizedChatbot:
     def _init_requirement_state(self, session_id: str):
         if session_id not in self.collected_requirements:
             self.collected_requirements[session_id] = {
-                'answers': {},   # key -> {'question':..., 'answer':...}
-                'asked': set()   # keys already asked
+                "answers": {},  # key -> {'question':..., 'answer':...}
+                "asked": set(),  # keys already asked
             }
 
     def record_user_message(self, session_id: str, content: str):
@@ -315,26 +355,30 @@ class OptimizedChatbot:
         history = self.get_conversation_history(session_id)
         last_category_key = None
         for msg in reversed(history):
-            if msg['role'] == 'assistant' and msg.get('meta_category_key'):
-                key = msg['meta_category_key']
-                if key not in state['answers']:
+            if msg["role"] == "assistant" and msg.get("meta_category_key"):
+                key = msg["meta_category_key"]
+                if key not in state["answers"]:
                     last_category_key = key
                     break
         if last_category_key:
-            state['answers'][last_category_key] = {
-                'question': next(c['question'] for c in self.requirement_categories if c['key']==last_category_key),
-                'answer': content.strip()
+            state["answers"][last_category_key] = {
+                "question": next(
+                    c["question"]
+                    for c in self.requirement_categories
+                    if c["key"] == last_category_key
+                ),
+                "answer": content.strip(),
             }
 
     def _next_missing_category(self, session_id: str) -> dict | None:
         self._init_requirement_state(session_id)
         state = self.collected_requirements[session_id]
         for cat in self.requirement_categories:
-            if cat['key'] not in state['answers'] and cat['key'] not in state['asked']:
+            if cat["key"] not in state["answers"] and cat["key"] not in state["asked"]:
                 return cat
         # If all asked but some unanswered (user skipped), re-ask first unanswered
         for cat in self.requirement_categories:
-            if cat['key'] not in state['answers']:
+            if cat["key"] not in state["answers"]:
                 return cat
         return None
 
@@ -345,9 +389,9 @@ class OptimizedChatbot:
         lines = []
         missing = []
         for cat in self.requirement_categories:
-            key = cat['key']
-            if key in state['answers']:
-                ans = state['answers'][key]['answer'] or 'Not provided'
+            key = cat["key"]
+            if key in state["answers"]:
+                ans = state["answers"][key]["answer"] or "Not provided"
                 lines.append(f"- **{cat['name']}:** {ans}")
             else:
                 lines.append(f"- **{cat['name']}:** _pending_")
@@ -367,37 +411,40 @@ class OptimizedChatbot:
           For each assistant message matching a requirement question, take the next user message (before next assistant) as the answer.
         Returns: key -> {'question': str, 'answer': str}
         """
-        q_lookup = {c['question']: c for c in self.requirement_categories}
+        q_lookup = {c["question"]: c for c in self.requirement_categories}
         answers: dict[str, dict] = {}
         for i, msg in enumerate(history):
-            if msg.get('role') == 'assistant':
-                content = (msg.get('content') or '').strip()
+            if msg.get("role") == "assistant":
+                content = (msg.get("content") or "").strip()
                 if content in q_lookup:
                     cat = q_lookup[content]
                     # find next user response
-                    answer_text = ''
-                    for j in range(i+1, len(history)):
+                    answer_text = ""
+                    for j in range(i + 1, len(history)):
                         nm = history[j]
-                        if nm.get('role') == 'assistant':
+                        if nm.get("role") == "assistant":
                             break  # unanswered / skipped
-                        if nm.get('role') == 'user':
-                            answer_text = (nm.get('content') or '').strip()
+                        if nm.get("role") == "user":
+                            answer_text = (nm.get("content") or "").strip()
                             break
                     if answer_text:
-                        answers[cat['key']] = {'question': content, 'answer': answer_text}
+                        answers[cat["key"]] = {
+                            "question": content,
+                            "answer": answer_text,
+                        }
         return answers
 
     def stream_follow_up_generation(
-            self,
-            conversation_history: list[dict],
-            latest_query: str,
-            prompt_context: str,
-            combined: bool = False,
-            followup_count: int = 2
-        ):
+        self,
+        conversation_history: list[dict],
+        latest_query: str,
+        prompt_context: str,
+        combined: bool = False,
+        followup_count: int = 2,
+    ):
         """
         Generate follow-up questions or combined answer+follow-ups.
-        
+
         Key changes:
         - Yields raw text chunks only (no `data:` or extra JSON inside).
         - Follow-ups + suggestions handled via prompt.
@@ -405,19 +452,23 @@ class OptimizedChatbot:
         """
 
         history = conversation_history or []
-        session_id = next((msg.get('session_id') for msg in history 
-                        if msg.get('session_id')), 'generic')
+        session_id = next(
+            (msg.get("session_id") for msg in history if msg.get("session_id")),
+            "generic",
+        )
 
         # Initialize or get conversation state
         state = self._init_conversation_state(session_id)
 
         # Build transcript (last 10 messages)
-        transcript = "\n".join([
-            f"{'USER' if msg.get('role') == 'user' else 'ASSISTANT'}: {msg.get('content', '')}"
-            for msg in history[-10:]
-        ])
+        transcript = "\n".join(
+            [
+                f"{'USER' if msg.get('role') == 'user' else 'ASSISTANT'}: {msg.get('content', '')}"
+                for msg in history[-10:]
+            ]
+        )
 
-        category_names = ", ".join([cat['name'] for cat in self.requirement_categories])
+        category_names = ", ".join([cat["name"] for cat in self.requirement_categories])
 
         if combined:
             # Prompt for answer + follow-ups + suggestions
@@ -493,38 +544,35 @@ class OptimizedChatbot:
     """
 
         # Track generation state
-        state['follow_up_count'] += 1
-        state['last_generated'] = datetime.now()
+        state["follow_up_count"] += 1
+        state["last_generated"] = datetime.now()
 
         try:
             # Streaming output from LLM
             if hasattr(self.llm, "stream"):
                 for chunk in self.llm.stream(prompt):
-                    content = getattr(chunk, 'content', str(chunk))
+                    content = getattr(chunk, "content", str(chunk))
                     if content:
                         # YIELD RAW CHUNK ONLY
                         yield content
             else:
                 # Fallback for non-streaming LLMs
                 response = self.llm.invoke(prompt)
-                text = getattr(response, 'content', str(response))
-                for line in text.split('\n'):
+                text = getattr(response, "content", str(response))
+                for line in text.split("\n"):
                     yield line
 
         except Exception as e:
             logger.error(f"Follow-up generation failed: {e}", exc_info=True)
             # Simple fallback
             fallback = "Could you tell me more about your goals for this project?\n- Business growth\n- Process improvement"
-            for line in fallback.split('\n'):
+            for line in fallback.split("\n"):
                 yield line
-
-
-
 
     def get_follow_ups(self, session_id: str) -> list[str]:
         """Get follow-up questions for a session."""
         return self.follow_ups.get(session_id, [])
-        
+
     def get_session_data(self, session_id: str) -> dict:
         """Get session data for a given session ID."""
         return self.session_data.get(session_id, {})
@@ -533,17 +581,19 @@ class OptimizedChatbot:
         """Initialize a new session with data."""
         self.session_data[session_id] = initial_data
         self.conversation_history[session_id] = []
-        
-    def add_to_conversation_history(self, session_id: str, role: str, content: str) -> None:
+
+    def add_to_conversation_history(
+        self, session_id: str, role: str, content: str
+    ) -> None:
         """Add a message to the conversation history."""
         if session_id not in self.conversation_history:
             self.conversation_history[session_id] = []
         self.conversation_history[session_id].append({"role": role, "content": content})
-        
+
     def get_conversation_history(self, session_id: str) -> List[dict]:
         """Get conversation history for a session."""
         return self.conversation_history.get(session_id, [])
-        
+
     def format_conversation_history(self, history: List[dict]) -> str:
         """Format conversation history into a string."""
         formatted = []
@@ -555,44 +605,57 @@ class OptimizedChatbot:
         """Check if all required information is collected."""
         data = self.get_session_data(session_id)
         return all(data.get(key) for key in ["initial_prompt", "state"])
-        
-    def get_detailed_response(self, query: str, chat_history: list, site: str = "ditstek.com", stream: bool = True) -> Generator:
+
+    def get_detailed_response(
+        self,
+        query: str,
+        chat_history: list,
+        site: str = "ditstek.com",
+        stream: bool = True,
+    ) -> Generator:
         """
         Enhanced response generation with explicit flow:
         1. Query → GPT-4o-mini → Search Keys
-        2. Search Keys → Vector DB → Retrieved Context  
+        2. Search Keys → Vector DB → Retrieved Context
         3. Query + Context + History + Instructions → Main LLM → Response
         """
         try:
             # STEP 1: Log the enhanced flow start
-            logger.info(f"Starting enhanced response generation for query: {query[:100]}...")
-            
+            logger.info(
+                f"Starting enhanced response generation for query: {query[:100]}..."
+            )
+
             # STEP 2: Retrieve context using enhanced key generation
             context = self._retrieve_context(query, site)
-            
+
             # STEP 3: Format chat history
             history = self._format_history(chat_history)
-            
+
             # STEP 4: Log the complete flow for debugging
             logger.info(f"Enhanced Flow Summary:")
             logger.info(f"- Original Query: {query[:100]}")
             logger.info(f"- Context Retrieved: {len(context)} characters")
             logger.info(f"- Chat History: {len(chat_history)} messages")
             logger.info(f"- Model for keys: gpt-4o-mini")
-            logger.info(f"- Model for response: {getattr(self.llm, 'model_name', 'Unknown')}")
-            
+            logger.info(
+                f"- Model for response: {getattr(self.llm, 'model_name', 'Unknown')}"
+            )
+
             # Debug logs for verification
             logger.debug(">>> Enhanced Query Processing: %s", query)
-            logger.debug(">>> Enhanced Context Retrieved: %s", context[:500] + "..." if len(context) > 500 else context)
+            logger.debug(
+                ">>> Enhanced Context Retrieved: %s",
+                context[:500] + "..." if len(context) > 500 else context,
+            )
             logger.debug(">>> Enhanced Chat History: %s", history)
-            
+
             # STEP 5: Generate response using enhanced context
             return self._generate_response_stream(query, context, history)
-            
+
         except Exception as e:
             logger.error(f"Enhanced response generation failed: {e}")
             return self._fallback_response_stream(query)
-    
+
     def _fallback_response_stream(self, query: str) -> Generator[str, None, None]:
         """Fallback response when enhanced flow fails"""
         fallback_message = f"I understand you're asking about: {query}. Let me provide a general response based on my knowledge."
@@ -602,48 +665,60 @@ class OptimizedChatbot:
         """Clean response formatting to ensure consistency and remove unwanted elements"""
         if not text:
             return ""
-        
+
         # Remove unwanted headers that appear at the beginning
         unwanted_headers = [
-            r'^#{1,6}\s*Quick Overview.*?\n',
-            r'^#{1,6}\s*Overview of.*?\n',
-            r'^#{1,6}\s*About.*?\n',
-            r'^#{1,6}\s*Introduction.*?\n',
-            r'^#{1,6}\s*Implementation\s+Approach.*?\n',
-            r'^#{1,6}\s*Next\s+Steps.*?\n'
+            r"^#{1,6}\s*Quick Overview.*?\n",
+            r"^#{1,6}\s*Overview of.*?\n",
+            r"^#{1,6}\s*About.*?\n",
+            r"^#{1,6}\s*Introduction.*?\n",
+            r"^#{1,6}\s*Implementation\s+Approach.*?\n",
+            r"^#{1,6}\s*Next\s+Steps.*?\n",
         ]
-        
+
         for pattern in unwanted_headers:
-            text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
-        
+            text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.MULTILINE)
+
         # Fix spacing issues while preserving markdown formatting
         # Remove multiple spaces but preserve markdown formatting
-        text = re.sub(r'(?<!\*) {2,}(?!\*)', ' ', text)  # Multiple spaces to single, preserve **bold**
-        text = re.sub(r' +\n', '\n', text)  # Remove spaces before newlines
-        text = re.sub(r'\n +(?![#*-])', '\n', text)  # Remove spaces after newlines (except markdown)
-        
+        text = re.sub(
+            r"(?<!\*) {2,}(?!\*)", " ", text
+        )  # Multiple spaces to single, preserve **bold**
+        text = re.sub(r" +\n", "\n", text)  # Remove spaces before newlines
+        text = re.sub(
+            r"\n +(?![#*-])", "\n", text
+        )  # Remove spaces after newlines (except markdown)
+
         # Ensure single space after punctuation
-        text = re.sub(r'([.!?:;,])\s+', r'\1 ', text)
-        
+        text = re.sub(r"([.!?:;,])\s+", r"\1 ", text)
+
         # Clean up header formatting
-        text = re.sub(r'(\n)(#{1,3})\s+', r'\1\2 ', text)  # Ensure single space after headers
-        
+        text = re.sub(
+            r"(\n)(#{1,3})\s+", r"\1\2 ", text
+        )  # Ensure single space after headers
+
         # Clean up bullet points
-        text = re.sub(r'(\n)([-*•])\s+', r'\1\2 ', text)  # Ensure single space after bullets
-        
+        text = re.sub(
+            r"(\n)([-*•])\s+", r"\1\2 ", text
+        )  # Ensure single space after bullets
+
         # Clean up numbered lists
-        text = re.sub(r'(\n)(\d+\.)\s+', r'\1\2 ', text)  # Ensure single space after numbers
-        
+        text = re.sub(
+            r"(\n)(\d+\.)\s+", r"\1\2 ", text
+        )  # Ensure single space after numbers
+
         # Remove multiple newlines (max 2)
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        
+        text = re.sub(r"\n{3,}", "\n\n", text)
+
         # Ensure proper spacing around bold text
-        text = re.sub(r'\*\*\s+', '**', text)  # Remove space after opening **
-        text = re.sub(r'\s+\*\*', '**', text)  # Remove space before closing **
-        
+        text = re.sub(r"\*\*\s+", "**", text)  # Remove space after opening **
+        text = re.sub(r"\s+\*\*", "**", text)  # Remove space before closing **
+
         return text.strip()
 
-    def _generate_response_stream(self, question: str, context: str, history: str) -> Generator[str, None, None]:
+    def _generate_response_stream(
+        self, question: str, context: str, history: str
+    ) -> Generator[str, None, None]:
         logger.debug("Entered _generate_response_stream")
 
         # Format context with separators and metadata
@@ -662,7 +737,9 @@ class OptimizedChatbot:
         logger.debug("Formatted Context: %s", context)
 
         template_tokens = self._count_template_tokens()
-        optimized_context, stats = self.context_optimizer.optimize_context(context, question, history, template_tokens)
+        optimized_context, stats = self.context_optimizer.optimize_context(
+            context, question, history, template_tokens
+        )
         logger.debug("Optimization stats: %s", stats)
 
         prompt = self._create_optimized_prompt(history, optimized_context, question)
@@ -675,58 +752,67 @@ class OptimizedChatbot:
             return
 
         try:
-            if hasattr(self.llm, 'stream'):
+            if hasattr(self.llm, "stream"):
                 stream = self.llm.stream(prompt)
                 buffer = ""
                 full_response = ""
-                
+
                 for chunk in stream:
-                    content = chunk.content if hasattr(chunk, 'content') else chunk
+                    content = chunk.content if hasattr(chunk, "content") else chunk
                     if not content:
                         continue
-                    
+
                     full_response += content
                     buffer += content
-                    
+
                     # Process buffer for word-level streaming with proper formatting preservation
                     while True:
                         # Check for complete words to stream
                         # Look for word boundaries while preserving markdown formatting
-                        word_match = re.search(r'(\S+(?:\s+|$))', buffer)
+                        word_match = re.search(r"(\S+(?:\s+|$))", buffer)
                         if word_match:
                             word = word_match.group(1)
-                            buffer = buffer[word_match.end():]
-                            
+                            buffer = buffer[word_match.end() :]
+
                             # Clean up spacing but preserve markdown formatting
                             if word.strip():
                                 # Handle newlines and paragraph breaks properly
-                                if '\n\n' in word:
+                                if "\n\n" in word:
                                     # This is a paragraph break
-                                    parts = word.split('\n\n')
+                                    parts = word.split("\n\n")
                                     for i, part in enumerate(parts):
                                         if part.strip():
-                                            yield part.strip() + ' '
+                                            yield part.strip() + " "
                                         if i < len(parts) - 1:  # Not the last part
-                                            yield '\n\n'
-                                elif '\n' in word and not word.strip().startswith('#'):
+                                            yield "\n\n"
+                                elif "\n" in word and not word.strip().startswith("#"):
                                     # This is a line break (not a header)
-                                    parts = word.split('\n')
+                                    parts = word.split("\n")
                                     for i, part in enumerate(parts):
                                         if part.strip():
-                                            yield part.strip() + ' '
+                                            yield part.strip() + " "
                                         if i < len(parts) - 1:  # Not the last part
-                                            yield '\n'
+                                            yield "\n"
                                 else:
                                     # Regular word handling
-                                    if word.endswith('.') or word.endswith('!') or word.endswith('?'):
-                                        cleaned_word = word.strip() + ' '
-                                    elif word.endswith('\n'):
-                                        cleaned_word = word.strip() + '\n'
+                                    if (
+                                        word.endswith(".")
+                                        or word.endswith("!")
+                                        or word.endswith("?")
+                                    ):
+                                        cleaned_word = word.strip() + " "
+                                    elif word.endswith("\n"):
+                                        cleaned_word = word.strip() + "\n"
                                     else:
-                                        cleaned_word = word.strip() + ' '
-                                    
+                                        cleaned_word = word.strip() + " "
+
                                     # Handle special markdown cases
-                                    if '**' in cleaned_word or '###' in cleaned_word or cleaned_word.startswith('-') or cleaned_word.startswith('*'):
+                                    if (
+                                        "**" in cleaned_word
+                                        or "###" in cleaned_word
+                                        or cleaned_word.startswith("-")
+                                        or cleaned_word.startswith("*")
+                                    ):
                                         # Preserve formatting for markdown elements
                                         yield cleaned_word
                                     else:
@@ -735,19 +821,19 @@ class OptimizedChatbot:
                         else:
                             # No more complete words in buffer
                             break
-                
+
                 # Send remaining content word by word with proper cleanup
                 if buffer.strip():
                     # Apply comprehensive response cleaning first
                     buffer = self._clean_response_formatting(buffer)
-                    
+
                     # Handle remaining content with proper line break preservation
                     # Split by double newlines first (paragraph breaks)
-                    paragraphs = buffer.split('\n\n')
+                    paragraphs = buffer.split("\n\n")
                     for p_idx, paragraph in enumerate(paragraphs):
                         if paragraph.strip():
                             # Split paragraph into lines
-                            lines = paragraph.split('\n')
+                            lines = paragraph.split("\n")
                             for l_idx, line in enumerate(lines):
                                 if line.strip():
                                     # Split line into words
@@ -755,47 +841,61 @@ class OptimizedChatbot:
                                     for word in words:
                                         if word.strip():
                                             # Add proper spacing after each word
-                                            if word.endswith('.') or word.endswith('!') or word.endswith('?'):
-                                                yield word + ' '
+                                            if (
+                                                word.endswith(".")
+                                                or word.endswith("!")
+                                                or word.endswith("?")
+                                            ):
+                                                yield word + " "
                                             else:
-                                                yield word + ' '
+                                                yield word + " "
                                 # Add line break after each line (except last)
                                 if l_idx < len(lines) - 1:
-                                    yield '\n'
+                                    yield "\n"
                         # Add paragraph break after each paragraph (except last)
                         if p_idx < len(paragraphs) - 1:
-                            yield '\n\n'
-                    
+                            yield "\n\n"
+
                 # Cache the cleaned response
-                self.response_cache[cache_key] = self._clean_response_formatting(full_response)
+                self.response_cache[cache_key] = self._clean_response_formatting(
+                    full_response
+                )
             else:
                 raw_answer = self.llm.invoke(prompt)
-                response = raw_answer.content if isinstance(raw_answer, AIMessage) else str(raw_answer)
+                response = (
+                    raw_answer.content
+                    if isinstance(raw_answer, AIMessage)
+                    else str(raw_answer)
+                )
                 # Apply response cleaning
                 response = self._clean_response_formatting(response)
                 self.response_cache[cache_key] = response
-                
+
                 # Stream the response word by word with proper line break handling
-                paragraphs = response.split('\n\n')
+                paragraphs = response.split("\n\n")
                 for p_idx, paragraph in enumerate(paragraphs):
                     if paragraph.strip():
-                        lines = paragraph.split('\n')
+                        lines = paragraph.split("\n")
                         for l_idx, line in enumerate(lines):
                             if line.strip():
                                 words = line.split()
                                 for word in words:
                                     if word.strip():
                                         # Add proper spacing after each word
-                                        if word.endswith('.') or word.endswith('!') or word.endswith('?'):
-                                            yield word + ' '
+                                        if (
+                                            word.endswith(".")
+                                            or word.endswith("!")
+                                            or word.endswith("?")
+                                        ):
+                                            yield word + " "
                                         else:
-                                            yield word + ' '
+                                            yield word + " "
                             # Add line break after each line (except last)
                             if l_idx < len(lines) - 1:
-                                yield '\n'
+                                yield "\n"
                     # Add paragraph break after each paragraph (except last)
                     if p_idx < len(paragraphs) - 1:
-                        yield '\n\n'
+                        yield "\n\n"
         except Exception:
             logger.error("LLM streaming call failed", exc_info=True)
             fallback_response = self._generate_fallback_response(question, context)
@@ -804,32 +904,36 @@ class OptimizedChatbot:
     def _would_break_markdown(self, text: str) -> bool:
         """Check if breaking at this point would damage Markdown formatting"""
         # Count unclosed bold markers
-        bold_count = text.count('**')
+        bold_count = text.count("**")
         if bold_count % 2 != 0:
             return True
-        
+
         # Check if we're in the middle of a header
-        lines = text.split('\n')
-        if lines and lines[-1].strip().startswith('#') and not lines[-1].strip().endswith(' '):
+        lines = text.split("\n")
+        if (
+            lines
+            and lines[-1].strip().startswith("#")
+            and not lines[-1].strip().endswith(" ")
+        ):
             return True
-        
+
         # Check if we're breaking a word that might be part of markdown
-        if text.endswith('**') or text.endswith('*') or text.endswith('#'):
+        if text.endswith("**") or text.endswith("*") or text.endswith("#"):
             return True
-        
+
         # Check for incomplete list items
-        if text.strip().endswith('-') and not text.strip().endswith(' -'):
+        if text.strip().endswith("-") and not text.strip().endswith(" -"):
             return True
-        
+
         # Check for incomplete numbered lists
-        if re.search(r'\d+\.$', text.strip()):
+        if re.search(r"\d+\.$", text.strip()):
             return True
-            
+
         return False
 
     def _generate_search_keys(self, query: str) -> List[str]:
         """Generate search keys using GPT-4o-mini for better vector DB retrieval"""
-        
+
         key_generation_prompt = f"""Break down this user query into 3-5 specific search keys/terms that would help find relevant information in a knowledge base about software development, web development, and technology services.
 
 User Query: {query}
@@ -853,64 +957,75 @@ React authentication libraries"""
         try:
             # Use GPT-4o-mini for key generation
             messages = [
-                {"role": "system", "content": "You are an expert at extracting search keywords from user queries for knowledge base retrieval."},
-                {"role": "user", "content": key_generation_prompt}
+                {
+                    "role": "system",
+                    "content": "You are an expert at extracting search keywords from user queries for knowledge base retrieval.",
+                },
+                {"role": "user", "content": key_generation_prompt},
             ]
-            
+
             response = self.query_llm.invoke(messages)
-            search_keys = [key.strip() for key in response.content.split('\n') if key.strip()]
-            
+            search_keys = [
+                key.strip() for key in response.content.split("\n") if key.strip()
+            ]
+
             # Fallback to original query if no keys generated
             if not search_keys:
                 search_keys = [query]
-                
+
             logger.info(f"Generated {len(search_keys)} search keys from query: {query}")
             return search_keys
-            
+
         except Exception as e:
             logger.error(f"Key generation failed: {e}")
             return [query]  # Fallback to original query
 
     def _retrieve_context(self, query: str, site: str) -> str:
         """Enhanced context retrieval with dedicated key generation"""
-        from backend.chat_logic import _maybe_expand_queries, _dedupe_chunks
-        from backend.retriever import retriever
+        from app.core.chat_logic import _maybe_expand_queries, _dedupe_chunks
+        from app.core.retriever import retriever
 
         try:
             # STEP 1: Use GPT-4o-mini to generate search keys from query context
             search_keys = self._generate_search_keys(query)
             logger.info(f"Using {len(search_keys)} search keys for context retrieval")
-            
+
             # STEP 2: Perform vector search with generated keys
             with ThreadPoolExecutor(max_workers=4) as executor:
                 all_docs = []
                 for key in search_keys:
-                    docs = list(executor.map(retriever.get_relevant_documents, [key]))[0]
+                    docs = list(executor.map(retriever.get_relevant_documents, [key]))[
+                        0
+                    ]
                     all_docs.extend(docs)
-                
+
                 # Also search with original query for completeness
-                original_docs = list(executor.map(retriever.get_relevant_documents, [query]))[0]
+                original_docs = list(
+                    executor.map(retriever.get_relevant_documents, [query])
+                )[0]
                 all_docs.extend(original_docs)
-            
+
             # STEP 3: Deduplicate and limit context
             unique_texts = _dedupe_chunks(all_docs)
             MAX_CHUNKS = 8  # Increased from 4 for better context
             context_chunks = []
-            
+
             for i, (text, meta) in enumerate(unique_texts[:MAX_CHUNKS]):
-                source = meta.get('source', 'Unknown') if meta else 'Unknown'
+                source = meta.get("source", "Unknown") if meta else "Unknown"
                 context_chunks.append(f"Source: {source}\n{text}")
-            
+
             context_text = "\n\n---\n\n".join(context_chunks)
-            
+
             # STEP 4: Fallback if no context found
             if not context_text.strip():
                 logger.warning("No context found from vector search, using fallback")
                 context_text = self._fallback_web_search(query, site)
-            
-            logger.info(f"Retrieved context from {len(context_chunks)} documents using enhanced key generation")
+
+            logger.info(
+                f"Retrieved context from {len(context_chunks)} documents using enhanced key generation"
+            )
             return context_text
-            
+
         except Exception as e:
             logger.error(f"Enhanced context retrieval failed: {e}")
             # Fallback to original method
@@ -964,7 +1079,9 @@ Format your response with:
 """
         return self.context_optimizer.count_tokens_cached(template)
 
-    def _create_optimized_prompt(self, history: str, context: str, question: str) -> str:
+    def _create_optimized_prompt(
+        self, history: str, context: str, question: str
+    ) -> str:
         length_rule = (
             "Provide direct, concise responses with minimal formatting. "
             "Limit responses to 200 words maximum. "
@@ -975,7 +1092,6 @@ Format your response with:
             "Keep markdown formatting minimal. "
             "Ensure consistent single spacing between words. "
         )
-
 
         prompt = f"""
 You are a focused AI assistant that provides clear, concise responses (200 words maximum) while maintaining a professional tone. Keep formatting minimal and prioritize direct answers to questions.
@@ -1029,36 +1145,41 @@ Important: Provide direct, informative responses based on the knowledge base con
 """
         return prompt.strip()
 
-    def get_flow_debug_info(self, query: str, site: str = "ditstek.com") -> Dict[str, Any]:
+    def get_flow_debug_info(
+        self, query: str, site: str = "ditstek.com"
+    ) -> Dict[str, Any]:
         """Get detailed flow information for debugging the enhanced process"""
         try:
             # Generate search keys
             search_keys = self._generate_search_keys(query)
-            
+
             # Get context
             context = self._retrieve_context(query, site)
-            
+
             return {
                 "original_query": query,
                 "generated_keys": search_keys,
                 "context_length": len(context),
-                "context_preview": context[:300] + "..." if len(context) > 300 else context,
+                "context_preview": (
+                    context[:300] + "..." if len(context) > 300 else context
+                ),
                 "model_used_for_keys": "gpt-4o-mini",
-                "model_used_for_response": getattr(self.llm, 'model_name', 'Unknown'),
+                "model_used_for_response": getattr(self.llm, "model_name", "Unknown"),
                 "enhancement_status": "Enhanced flow active with GPT-4o-mini key generation",
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
             }
         except Exception as e:
             return {
                 "error": str(e),
                 "enhancement_status": "Enhanced flow failed, using fallback",
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
             }
 
     def _fallback_web_search(self, query: str, site: str) -> str:
         try:
-            from backend.search_client import search_site
-            from crawler.scraper import scrape_url
+            from app.core.search_client import search_site
+            from core_services.crawler.scraper import scrape_url
+
             search_results = search_site(query, site)
             scraped_texts = []
             with ThreadPoolExecutor(max_workers=3) as executor:
@@ -1088,5 +1209,6 @@ I apologize, but I'm experiencing technical difficulties. Based on the available
 Please try rephrasing your question or contact support for more detailed assistance.
 Would you like me to try a different approach to answer your question?
 """
+
 
 # Follow-ups are now handled internally by the OptimizedChatbot class
