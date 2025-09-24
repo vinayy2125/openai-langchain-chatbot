@@ -13,6 +13,7 @@ def generate_llm_response(prompt):
         # Convert input into LangChain message objects
         if isinstance(prompt, list):
             messages = []
+            has_system_message = False
             for message in prompt:
                 if not isinstance(message, dict):
                     logger.error(f"Invalid message format (not a dict): {message}")
@@ -23,6 +24,8 @@ def generate_llm_response(prompt):
                 
                 role = message["role"]
                 content = message["content"]
+                if role == "system":
+                    has_system_message = True
                 
                 if role == "system":
                     messages.append(SystemMessage(content=content))
@@ -33,10 +36,14 @@ def generate_llm_response(prompt):
                 else:
                     logger.error(f"Invalid role type: {role}")
                     return "Invalid role type."
+            
+            # Only add default system message if none was provided
+            if not has_system_message:
+                messages.insert(0, SystemMessage(content="You are an AI assistant that provides direct, concise responses."))
         else:
-            # Handle single string prompt
+            # Handle single string prompt with default system message
             messages = [
-                SystemMessage(content="You are a helpful assistant."),
+                SystemMessage(content="You are an AI assistant that provides direct, concise responses."),
                 HumanMessage(content=prompt.strip())
             ]
 

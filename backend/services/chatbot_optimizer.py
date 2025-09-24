@@ -966,22 +966,19 @@ Format your response with:
 
     def _create_optimized_prompt(self, history: str, context: str, question: str) -> str:
         length_rule = (
-            "Provide comprehensive, well-structured responses with proper Markdown formatting. "
-            "Use **bold text extensively** for key terms, technologies, and important concepts. "
-            "Use ### headings only when truly needed for organization (avoid generic titles like 'Quick Overview'). "
-            "Include specific recommendations with **bold highlights**. "
-            "Address all key points discussed in the conversation. "
-            "Make responses knowledge-base oriented and informative. "
-            "Use natural paragraph breaks for readability. "
-            "Emphasize important frameworks, tools, or concepts with **bold**. "
-            "Structure content logically with proper spacing. "
-            "Use Markdown formatting naturally (lists, bold, italics, etc.). "
+            "Provide direct, concise responses with minimal formatting. "
+            "Limit responses to 200 words maximum. "
+            "Use **bold** only for critical terms or concepts. "
+            "Avoid headers unless absolutely necessary. "
+            "Focus on answering the specific question asked. "
+            "Use natural paragraph breaks sparingly. "
+            "Keep markdown formatting minimal. "
             "Ensure consistent single spacing between words. "
         )
 
 
         prompt = f"""
-You are a helpful assistant providing well-formatted, comprehensive responses using proper Markdown structure with a conversational, engaging tone like ChatGPT.
+You are a focused AI assistant that provides clear, concise responses (200 words maximum) while maintaining a professional tone. Keep formatting minimal and prioritize direct answers to questions.
 If the user's question is outside the website’s domain, politely decline or use fallback web search context.
 
 Conversation so far:
@@ -993,12 +990,12 @@ Relevant context from the knowledge base:
 User's latest question:
 {question}
 
-CONVERSATIONAL TONE REQUIREMENTS:
-1. Start naturally and engaging:
-   - Use "Absolutely!" or "Great question!" when appropriate
-   - Show understanding: "Here's what I can help you with..."
-   - Be friendly, professional, and engaging like ChatGPT
-   - Use natural conversational flow
+RESPONSE REQUIREMENTS:
+1. Be direct and to-the-point
+2. Keep responses under 200 words
+3. Use minimal formatting
+4. Focus only on answering the specific question
+5. Maintain a professional tone without unnecessary pleasantries
 
 2. CRITICAL FORMATTING REQUIREMENTS:
 1. {length_rule}
