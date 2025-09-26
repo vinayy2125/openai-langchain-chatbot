@@ -23,8 +23,7 @@ import numpy as np
 from redis.commands.search.field import TextField, NumericField, VectorField
 from redis.commands.search.index_definition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
-from core_services.generate_embeddings import get_embedding, generate_and_store_embedding
-
+from core_services.generate_embeddings import get_embedding
 
 # local config & helpers (must exist in your project)
 from app.config import settings, get_redis_client

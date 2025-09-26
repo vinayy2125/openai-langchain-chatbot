@@ -18,7 +18,8 @@ from . import helpers
 from app.db.base import get_db_conn
 from app.api.deps import get_follow_up_manager
 from app.db import redis_operations as redis_crud
-from core_services.generate_embeddings import get_embedding, generate_and_store_embedding
+from app.db.redis_operations import generate_and_store_embedding
+from core_services.generate_embeddings import get_embedding
 
 # Get logger
 logger = logging.getLogger(__name__)

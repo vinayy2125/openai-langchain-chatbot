@@ -24,7 +24,6 @@ from app.api.v1.models import (
     SentMessage,
 )
 from app.db import redis_operations as redis_crud
-from core_services.generate_embeddings import generate_and_store_embedding
 
 
 logger = logging.getLogger(__name__)
@@ -254,94 +253,94 @@ async def generate_follow_up(
 
 
 # -------------------- Extracted streaming handlers from router --------------------
-async def handle_follow_up_phase(
-    session_id: str,
-    query: str,
-    state: SessionState,
-    llm,
-    follow_up_manager,
-) -> StreamingResponse:
-    """Handle the follow-up conversation phase."""
+# async def handle_follow_up_phase(
+#     session_id: str,
+#     query: str,
+#     state: SessionState,
+#     llm,
+#     follow_up_manager,
+# ) -> StreamingResponse:
+#     """Handle the follow-up conversation phase."""
 
-    if query:
-        await save_message(
-            MessageCreate(content=query.strip(), role="user", session_id=session_id)
-        )
-        follow_up_manager.add_to_conversation_history(session_id, "user", query.strip())
-        state.follow_up_count += 1
+#     if query:
+#         await save_message(
+#             MessageCreate(content=query.strip(), role="user", session_id=session_id)
+#         )
+#         follow_up_manager.add_to_conversation_history(session_id, "user", query.strip())
+#         state.follow_up_count += 1
 
-        if state.follow_up_count >= 10:
-            state.requirements_met = True
-            return await handle_completion_phase(
-                session_id, state, llm, follow_up_manager
-            )
+#         if state.follow_up_count >= 10:
+#             state.requirements_met = True
+#             return await handle_completion_phase(
+#                 session_id, state, llm, follow_up_manager
+#             )
 
-    # Generate next follow-up
-    follow_up = await generate_follow_up(
-        prompt_text=state.prompt_text,
-        conversation_history=state.conversation_history,
-        llm=llm,
-    )
+#     # Generate next follow-up
+#     follow_up = await generate_follow_up(
+#         prompt_text=state.prompt_text,
+#         conversation_history=state.conversation_history,
+#         llm=llm,
+#     )
 
-    # Save system's follow-up
-    await save_message(
-        MessageCreate(
-            content=follow_up.question, role="assistant", session_id=session_id
-        )
-    )
+#     # Save system's follow-up
+#     await save_message(
+#         MessageCreate(
+#             content=follow_up.question, role="assistant", session_id=session_id
+#         )
+#     )
 
-    # Update session state
-    state.current_follow_up = follow_up
-    follow_up_manager.get_session_data(session_id)["state"] = state.model_dump()
+#     # Update session state
+#     state.current_follow_up = follow_up
+#     follow_up_manager.get_session_data(session_id)["state"] = state.model_dump()
 
-    response = StreamingChatResponse(
-        status="follow_up",
-        message="Gathering requirements",
-        follow_up=follow_up,
-        conversation_history=state.conversation_history,
-    )
+#     response = StreamingChatResponse(
+#         status="follow_up",
+#         message="Gathering requirements",
+#         follow_up=follow_up,
+#         conversation_history=state.conversation_history,
+#     )
 
-    return StreamingResponse(
-        iter([f"data: {json.dumps(response.model_dump())}\n\n"]),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "*",
-        },
-    )
+#     return StreamingResponse(
+#         iter([f"data: {json.dumps(response.model_dump())}\n\n"]),
+#         media_type="text/event-stream",
+#         headers={
+#             "Cache-Control": "no-cache",
+#             "Connection": "keep-alive",
+#             "Access-Control-Allow-Origin": "*",
+#             "Access-Control-Allow-Headers": "*",
+#         },
+#     )
 
 
-async def handle_completion_phase(
-    session_id: str,
-    state: SessionState,
-    llm,
-    follow_up_manager,
-) -> StreamingResponse:
-    """Handle the completion phase with detailed response."""
-    state.requirements_met = True
-    follow_up_manager.get_session_data(session_id)["state"] = state.model_dump()
+# async def handle_completion_phase(
+#     session_id: str,
+#     state: SessionState,
+#     llm,
+#     follow_up_manager,
+# ) -> StreamingResponse:
+#     """Handle the completion phase with detailed response."""
+#     state.requirements_met = True
+#     follow_up_manager.get_session_data(session_id)["state"] = state.model_dump()
 
-    conversation_history = state.conversation_history
-    messages = [
-        {
-            "role": "system",
-            "content": f"""Generate a detailed response based on:
+#     conversation_history = state.conversation_history
+#     messages = [
+#         {
+#             "role": "system",
+#             "content": f"""Generate a detailed response based on:
 
-            Original Prompt: {state.prompt_text}
+#             Original Prompt: {state.prompt_text}
 
-            Conversation History:
-            {follow_up_manager.format_conversation_history(conversation_history)}
+#             Conversation History:
+#             {follow_up_manager.format_conversation_history(conversation_history)}
 
-            Provide:
-            1. Summary of requirements
-            2. Detailed recommendations
-            3. Next steps or suggestions
-            4. Any relevant knowledge base references
-            """,
-        }
-    ]
+#             Provide:
+#             1. Summary of requirements
+#             2. Detailed recommendations
+#             3. Next steps or suggestions
+#             4. Any relevant knowledge base references
+#             """,
+#         }
+#     ]
 
     async def response_generator():
         completion_message = {
@@ -395,10 +394,6 @@ async def send_message_stream(
         logger.info("========== send_message_stream called ==========")
         session_id = (req.session_id)
         qwry = (req.query or "").strip()
-        
-        # r = redis_crud.get_redis_client()
-        # redis_crud.ensure_index_exists(r)
-        # res = redis_crud.generate_and_store_embedding(r, session_id, qwry )
     
         chunk_list = []
         
@@ -516,10 +511,24 @@ async def send_message_stream(
 
                         if status == "complete_chunk":
                             logger.info(f"========== chunk ========== {chunk}")
-                            # r = redis_crud.get_redis_client()
-                            # redis_crud.ensure_index_exists(r)
-                            # res = redis_crud.generate_and_store_embedding(r, session_id, qwry, chunk)
-                            # Main response content - keep as chunks for streaming
+                            logger.info(f"========== chunk ========== {chunk}")
+                            logger.info(f"========== chunk ========== {chunk}")
+                            logger.info(f"========== chunk ========== {chunk}")
+                            logger.info(f"========== chunk ========== {chunk}")
+                            logger.info(f"========== chunk ========== {chunk}")
+                            logger.info(f"========== chunk ========== {chunk}")
+                            logger.info(f"========== chunk ========== {chunk}")
+                            logger.info(f"========== chunk ========== {chunk}")
+                            logger.info(f"========== chunk ========== {chunk}")
+                            logger.info(f"========== chunk ========== {chunk}")
+                            logger.info(f"========== chunk ========== {chunk}")
+                            logger.info(f"========== chunk ========== {chunk}")
+                            logger.info(f"========== chunk ========== {chunk}")
+                            r = redis_crud.get_redis_client()
+                            redis_crud.ensure_index_exists(r)
+                            res = redis_crud.generate_and_store_embedding(r, session_id, qwry, chunk)
+
+                            #Main response content - keep as chunks for streaming
                             yield "data: " + json.dumps(
                                 {"status": "complete_chunk", "chunk": chunk}
                             ) + "\n\n"
@@ -563,11 +572,6 @@ async def send_message_stream(
             return StreamingResponse(
                 stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS
             )
-
-
-        r = redis_crud.get_redis_client()
-        redis_crud.ensure_index_exists(r)
-        res = redis_crud.generate_and_store_embedding(r, session_id, qwry )
         
         # --- Requirements captured: full response streaming ---
         async def generate_full_response_stream():
