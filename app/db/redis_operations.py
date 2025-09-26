@@ -23,7 +23,7 @@ import numpy as np
 from redis.commands.search.field import TextField, NumericField, VectorField
 from redis.commands.search.index_definition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
-from core_services.generate_embeddings import get_embedding
+from core_services.generate_embeddings import get_embedding, generate_and_store_embedding
 
 
 # local config & helpers (must exist in your project)
@@ -36,7 +36,7 @@ logger = logging.getLogger("redis_service")
 # Configuration (override via settings)
 # -------------------------
 INDEX_NAME = getattr(settings, "redis_vector_index_name", "dits_chat_idx")
-PREFIX = getattr(settings, "redis_prefix", "voicechat:")
+PREFIX = getattr(settings, "redis_prefix", "dits_chatbot:")
 EMBED_DIM = int(getattr(settings, "embed_dim", 786))
 DISTANCE = getattr(settings, "distance_metric", "COSINE").upper()
 EMBEDDING_MODEL = getattr(settings, "embedding_model", "intfloat/e5-large-v2")
@@ -54,6 +54,7 @@ def ensure_index_exists(r):
     """
     try:
         r.ft(INDEX_NAME).info()
+        print("INDEX_NAME-----> ", INDEX_NAME)
         logger.debug("Redis index '%s' already exists", INDEX_NAME)
         return
     except Exception:
@@ -311,3 +312,34 @@ def list_user_chunks(user_id: int, limit: int = 100) -> List[str]:
         if cursor == 0:
             break
     return out
+
+# def generate_and_store_embedding(r, text: str, metadata: dict = None) -> str:
+def generate_and_store_embedding(r, session_id: int, query: str, response: str) -> str:
+    """Generate embedding for the given text and store it in Redis with optional metadata.
+
+    Args:
+        r: Redis client instance.
+        text: The text to generate an embedding for.
+        metadata: Optional dictionary of metadata to store alongside the embedding.
+
+    Returns:
+        The Redis key under which the document is stored.
+    """
+    query_embedding = get_embedding(query)
+    import uuid
+    doc_id = str(uuid.uuid4())
+    key = f"{PREFIX}{doc_id}"
+    # doc = {
+    #     "text": text,
+    #     "embedding": embedding,
+    #     "metadata": metadata or {}
+    # }
+    
+    doc = {
+        "session_id": session_id,
+        "query_embedding": query_embedding,
+        "query": query,
+        "response": response
+    }
+    r.json().set(key, '$', doc)
+    return doc_id

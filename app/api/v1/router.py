@@ -18,6 +18,7 @@ from . import helpers
 from app.db.base import get_db_conn
 from app.api.deps import get_follow_up_manager
 from app.db import redis_operations as redis_crud
+from core_services.generate_embeddings import get_embedding, generate_and_store_embedding
 
 # Get logger
 logger = logging.getLogger(__name__)
@@ -203,7 +204,7 @@ async def init_embeddings():
 
     # Try loading embedding model
     try:
-        model = redis_crud.get_embedding_model()
+        model = redis_crud.get_embedding(text="text")
     except Exception as e:
         logger.error("Embedding model load failed: %s", e)
         raise HTTPException(status_code=500, detail=f"Embedding model load failed: {e}")
@@ -265,8 +266,8 @@ async def create_redis_doc(payload: dict):
         r = redis_crud.get_redis_client()
         # Ensure index exists
         redis_crud.ensure_index_exists(r)
-
-        msg_id = redis_crud.generate_and_store_embedding(r, message, metadata)
+        res = "response"
+        msg_id = redis_crud.generate_and_store_embedding(r, message, metadata, res)
         return {"status": "created", "id": msg_id}
     except HTTPException:
         raise
