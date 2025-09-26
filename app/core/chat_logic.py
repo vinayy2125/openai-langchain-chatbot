@@ -100,14 +100,14 @@ async def build_chatbot_response(
                     # If we have accumulated content, send it
                     if current_section:
                         yield {
-                            "status": "complete_chunk",
+                            "status": "chunk",
                             "chunk": "\n".join(current_section),
                         }
                         current_section = []
 
                     # Format header and send
                     header = re.sub(r"^#{1,6}\s*", "###### ", line)
-                    yield {"status": "complete_chunk", "chunk": "\n\n" + header + "\n"}
+                    yield {"status": "chunk", "chunk": "\n\n" + header + "\n"}
                 else:
                     # Process regular content
                     # Ensure proper bold formatting
@@ -251,6 +251,18 @@ USER QUERY:
 {latest_query}
 
 """
+                # Add explicit mandatory formatting safety rules to avoid local contradictions
+                enhanced_query += """
+
+    MANDATORY FORMATTING SAFETY RULES (ENFORCE THESE):
+    1. Do NOT insert spaces inside words or identifiers. Example: use "Ditstek" not "Dit stek".
+    2. Do NOT add spaces around hyphens. Example: use "AI-powered" not "AI - powered".
+    3. Do NOT insert spaces inside markdown delimiters. Use "**bold**" not "** bold **" and "`code`" not "` code `".
+    4. Preserve URLs and markdown links without introducing spaces: write `[text](https://example.com)`.
+    5. Avoid duplicated punctuation or excessive question marks; end sentences with a single punctuation mark.
+
+    Please follow these SAFETY RULES STRICTLY and do not contradict them in your response.
+    """
             else:
                 # For follow-up responses, continue conversation naturally with proper formatting
                 # Retrieve context text from the chatbot service
@@ -304,7 +316,15 @@ USER QUERY:
                 if not chunk:
                     continue
 
-                text_chunk = str(chunk).strip()
+                # Accept either raw text or dict events from the stream
+                if isinstance(chunk, dict) and chunk.get("status") == "chunk":
+                    text_chunk = str(chunk.get("chunk", ""))
+                else:
+                    text_chunk = str(chunk).strip()
+
+                if not text_chunk:
+                    continue
+
                 main_response += text_chunk
 
                 # Split into lines to process sections
@@ -315,7 +335,7 @@ USER QUERY:
                         if current_section:
                             # Join and send accumulated section
                             section_text = " ".join(current_section)
-                            yield {"status": "complete_chunk", "chunk": section_text}
+                            yield {"status": "chunk", "chunk": section_text}
                             current_section = []
                         continue
 
@@ -323,28 +343,22 @@ USER QUERY:
                     if line.startswith("#"):
                         if current_section:
                             section_text = " ".join(current_section)
-                            yield {"status": "complete_chunk", "chunk": section_text}
+                            yield {"status": "chunk", "chunk": section_text}
                             current_section = []
 
                         # Format header consistently
                         header = re.sub(r"^#{1,6}\s*", "###### ", line)
-                        yield {
-                            "status": "complete_chunk",
-                            "chunk": "\n\n" + header + "\n",
-                        }
+                        yield {"status": "chunk", "chunk": "\n\n" + header + "\n"}
                     else:
                         # Process regular content
                         # Ensure bullet points are properly formatted
                         if line.lstrip().startswith("- "):
                             if current_section:
                                 section_text = " ".join(current_section)
-                                yield {
-                                    "status": "complete_chunk",
-                                    "chunk": section_text,
-                                }
+                                yield {"status": "chunk", "chunk": section_text}
                                 current_section = []
-                            # Send bullet points as complete chunks
-                            yield {"status": "complete_chunk", "chunk": line}
+                            # Send bullet points as chunk events
+                            yield {"status": "chunk", "chunk": line}
                         else:
                             current_section.append(line)
 

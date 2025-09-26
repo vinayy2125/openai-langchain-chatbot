@@ -23,6 +23,9 @@ from app.api.v1.models import (
     StreamingChatResponse,
     SentMessage,
 )
+from app.db import redis_operations as redis_crud
+from core_services.generate_embeddings import generate_and_store_embedding
+
 
 logger = logging.getLogger(__name__)
 SSE_HEADERS = {
@@ -389,7 +392,16 @@ async def send_message_stream(
     - Context-switch detection with suggestions
     """
     try:
-        session_id = (req.session_id or "").strip()
+        logger.info("========== send_message_stream called ==========")
+        session_id = (req.session_id)
+        qwry = (req.query or "").strip()
+        
+        # r = redis_crud.get_redis_client()
+        # redis_crud.ensure_index_exists(r)
+        # res = redis_crud.generate_and_store_embedding(r, session_id, qwry )
+    
+        chunk_list = []
+        
         if not session_id:
             raise HTTPException(status_code=422, detail="Invalid session_id provided")
 
@@ -465,17 +477,17 @@ async def send_message_stream(
         prompt_context = session_data.get("prompt_context")
 
         # --- Company intent override ---
-        if req.query and detect_company_intent(req.query):
+        # if req.query and detect_company_intent(req.query):
 
-            async def company_stream():
-                yield f"data: {json.dumps({'status': 'processing', 'message': 'Fetching company info...'})}\n\n"
-                answer_and_suggestions = handle_company_query(req.query)
-                for msg in answer_and_suggestions:
-                    yield f"data: {json.dumps({'status': 'company', 'message': msg})}\n\n"
+        #     async def company_stream():
+        #         yield f"data: {json.dumps({'status': 'processing', 'message': 'Fetching company info...'})}\n\n"
+        #         answer_and_suggestions = handle_company_query(req.query)
+        #         for msg in answer_and_suggestions:
+        #             yield f"data: {json.dumps({'status': 'company', 'message': msg})}\n\n"
 
-            return StreamingResponse(
-                company_stream(), media_type="text/event-stream", headers=SSE_HEADERS
-            )
+        #     return StreamingResponse(
+        #         company_stream(), media_type="text/event-stream", headers=SSE_HEADERS
+        #     )
 
         # --- Decide if more follow-ups are needed ---
         if not follow_up_manager.check_requirements(session_id):
@@ -483,6 +495,7 @@ async def send_message_stream(
             async def stream_follow_up():
                 from app.core.chat_logic import build_chatbot_response
 
+                
                 # Add the `data:` prefix to the JSON-encoded string
                 yield "data: " + json.dumps(
                     {"status": "processing", "message": "Preparing response..."}
@@ -502,6 +515,10 @@ async def send_message_stream(
                         chunk = evt.get("chunk", "")
 
                         if status == "complete_chunk":
+                            logger.info(f"========== chunk ========== {chunk}")
+                            # r = redis_crud.get_redis_client()
+                            # redis_crud.ensure_index_exists(r)
+                            # res = redis_crud.generate_and_store_embedding(r, session_id, qwry, chunk)
                             # Main response content - keep as chunks for streaming
                             yield "data: " + json.dumps(
                                 {"status": "complete_chunk", "chunk": chunk}
@@ -547,6 +564,11 @@ async def send_message_stream(
                 stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS
             )
 
+
+        r = redis_crud.get_redis_client()
+        redis_crud.ensure_index_exists(r)
+        res = redis_crud.generate_and_store_embedding(r, session_id, qwry )
+        
         # --- Requirements captured: full response streaming ---
         async def generate_full_response_stream():
             from app.core.chat_logic import build_chatbot_response
@@ -564,11 +586,21 @@ async def send_message_stream(
                 conversation_history=conversation_history,
                 prompt_context=prompt_context,
                 mode="complete",
-            ):
+            ):  
                 # Handle comprehensive response events
                 if isinstance(evt, dict):
+                    logger.info(f"- isinstance -------------->>>>:")
+                    logger.info(f"- isinstance -------------->>>>:")
+                    logger.info(f"- isinstance -------------->>>>:")
+                    logger.info(f"- isinstance -------------->>>>:")
+                    logger.info(f"- isinstance -------------->>>>:")
+                    
                     status = evt.get("status", "unknown")
                     chunk = evt.get("chunk", "")
+                    
+                    logger.info(f"- chunk1-------------->>>>: {chunk}")
+                    chunk_list.append(chunk)
+                    logger.info(f"- chunk_list-------------->>>>: {chunk_list}")
 
                     if status == "complete_chunk":
                         # Main comprehensive response content - keep as chunks for consistent streaming
@@ -611,7 +643,8 @@ async def send_message_stream(
                     yield "data: " + json.dumps(
                         {"status": "complete_chunk", "chunk": str(evt)}
                     ) + "\n\n"
-
+        
+        
         return StreamingResponse(
             generate_full_response_stream(),
             media_type="text/event-stream",
