@@ -511,19 +511,6 @@ async def send_message_stream(
 
                         if status == "complete_chunk":
                             logger.info(f"========== chunk ========== {chunk}")
-                            logger.info(f"========== chunk ========== {chunk}")
-                            logger.info(f"========== chunk ========== {chunk}")
-                            logger.info(f"========== chunk ========== {chunk}")
-                            logger.info(f"========== chunk ========== {chunk}")
-                            logger.info(f"========== chunk ========== {chunk}")
-                            logger.info(f"========== chunk ========== {chunk}")
-                            logger.info(f"========== chunk ========== {chunk}")
-                            logger.info(f"========== chunk ========== {chunk}")
-                            logger.info(f"========== chunk ========== {chunk}")
-                            logger.info(f"========== chunk ========== {chunk}")
-                            logger.info(f"========== chunk ========== {chunk}")
-                            logger.info(f"========== chunk ========== {chunk}")
-                            logger.info(f"========== chunk ========== {chunk}")
                             r = redis_crud.get_redis_client()
                             redis_crud.ensure_index_exists(r)
                             res = redis_crud.generate_and_store_embedding(r, session_id, qwry, chunk)
@@ -593,12 +580,7 @@ async def send_message_stream(
             ):  
                 # Handle comprehensive response events
                 if isinstance(evt, dict):
-                    logger.info(f"- isinstance -------------->>>>:")
-                    logger.info(f"- isinstance -------------->>>>:")
-                    logger.info(f"- isinstance -------------->>>>:")
-                    logger.info(f"- isinstance -------------->>>>:")
-                    logger.info(f"- isinstance -------------->>>>:")
-                    
+                    logger.info(f"- isinstance -------------->>>>:")                    
                     status = evt.get("status", "unknown")
                     chunk = evt.get("chunk", "")
                     
