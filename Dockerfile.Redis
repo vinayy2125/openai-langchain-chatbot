@@ -1,0 +1,15 @@
+# Use the official Redis Stack image as the base
+FROM redis/redis-stack:latest
+
+# Set the working directory inside the container
+WORKDIR /data
+
+# Copy your local redis-stack.conf file into the container
+COPY redis-stack.conf /usr/local/etc/redis/redis.conf
+
+# Start the Redis server using the custom configuration
+CMD ["redis-stack-server", "/usr/local/etc/redis/redis.conf"]
+
+
+# docker build -t my-redis-stack -f Dockerfile.Redis .
+# docker run -d --name custom-redis-stack -p 6379:6379 -p 8001:8001 my-redis-stack
