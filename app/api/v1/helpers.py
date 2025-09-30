@@ -6,12 +6,13 @@ from uuid import UUID
 import logging
 import psycopg2
 from fastapi import HTTPException, Depends
+from app.api.deps import get_follow_up_manager
 from app.core.services.thread_router import (
     ChatRouter,
     detect_company_intent,
     handle_company_query,
 )
-from app.api.deps import get_follow_up_manager
+from app.core.prompts import follow_up_prompt
 from app.core.nested_follow_up_manager import FollowUpManager
 
 from app.api.v1.models import (
@@ -216,23 +217,7 @@ async def generate_follow_up(
 ) -> FollowUp:
     """Generate a follow-up question using LLM."""
     messages = [
-        {
-            "role": "system",
-            "content": f"""You are an AI assistant helping to gather requirements through follow-up questions.
-            Original Prompt: {prompt_text}
-            
-            Generate a follow-up question that:
-            1. Is relevant to the original prompt
-            2. Builds on previous responses
-            3. Helps gather complete requirements
-            
-            Return a JSON object with:
-            - type: "yes_no", "nested", "expansion", or "clarification"
-            - question: The follow-up question
-            - context: Why you're asking this
-            - options: Array of choices (for nested type only)
-            """,
-        }
+        follow_up_prompt(prompt_text=prompt_text)
     ]
 
     follow_up_response = ""
@@ -250,134 +235,6 @@ async def generate_follow_up(
             question="Could you provide more details about your requirements?",
             context="Ensuring we understand your needs correctly",
         )
-
-
-# -------------------- Extracted streaming handlers from router --------------------
-# async def handle_follow_up_phase(
-#     session_id: str,
-#     query: str,
-#     state: SessionState,
-#     llm,
-#     follow_up_manager,
-# ) -> StreamingResponse:
-#     """Handle the follow-up conversation phase."""
-
-#     if query:
-#         await save_message(
-#             MessageCreate(content=query.strip(), role="user", session_id=session_id)
-#         )
-#         follow_up_manager.add_to_conversation_history(session_id, "user", query.strip())
-#         state.follow_up_count += 1
-
-#         if state.follow_up_count >= 10:
-#             state.requirements_met = True
-#             return await handle_completion_phase(
-#                 session_id, state, llm, follow_up_manager
-#             )
-
-#     # Generate next follow-up
-#     follow_up = await generate_follow_up(
-#         prompt_text=state.prompt_text,
-#         conversation_history=state.conversation_history,
-#         llm=llm,
-#     )
-
-#     # Save system's follow-up
-#     await save_message(
-#         MessageCreate(
-#             content=follow_up.question, role="assistant", session_id=session_id
-#         )
-#     )
-
-#     # Update session state
-#     state.current_follow_up = follow_up
-#     follow_up_manager.get_session_data(session_id)["state"] = state.model_dump()
-
-#     response = StreamingChatResponse(
-#         status="follow_up",
-#         message="Gathering requirements",
-#         follow_up=follow_up,
-#         conversation_history=state.conversation_history,
-#     )
-
-#     return StreamingResponse(
-#         iter([f"data: {json.dumps(response.model_dump())}\n\n"]),
-#         media_type="text/event-stream",
-#         headers={
-#             "Cache-Control": "no-cache",
-#             "Connection": "keep-alive",
-#             "Access-Control-Allow-Origin": "*",
-#             "Access-Control-Allow-Headers": "*",
-#         },
-#     )
-
-
-# async def handle_completion_phase(
-#     session_id: str,
-#     state: SessionState,
-#     llm,
-#     follow_up_manager,
-# ) -> StreamingResponse:
-#     """Handle the completion phase with detailed response."""
-#     state.requirements_met = True
-#     follow_up_manager.get_session_data(session_id)["state"] = state.model_dump()
-
-#     conversation_history = state.conversation_history
-#     messages = [
-#         {
-#             "role": "system",
-#             "content": f"""Generate a detailed response based on:
-
-#             Original Prompt: {state.prompt_text}
-
-#             Conversation History:
-#             {follow_up_manager.format_conversation_history(conversation_history)}
-
-#             Provide:
-#             1. Summary of requirements
-#             2. Detailed recommendations
-#             3. Next steps or suggestions
-#             4. Any relevant knowledge base references
-#             """,
-#         }
-#     ]
-
-    async def response_generator():
-        completion_message = {
-            "status": "complete",
-            "message": "Generating detailed response...",
-            "conversation_history": conversation_history,
-        }
-        yield f"data: {json.dumps(completion_message)}\n\n"
-
-        detailed_response = ""
-        async for chunk in llm.stream(messages):
-            if chunk:
-                detailed_response += chunk
-                yield f"data: {json.dumps({'status': 'complete', 'content': chunk})}\n\n"
-
-        suggestions_prompt = """Based on the detailed response and conversation,
-        suggest 3-5 next steps or follow-up actions."""
-
-        suggestions = await llm.invoke(suggestions_prompt)
-        final_message = {
-            "status": "complete",
-            "content": detailed_response,
-            "suggestions": suggestions.split("\n"),
-            "conversation_history": conversation_history,
-        }
-        yield f"data: {json.dumps(final_message)}\n\n"
-
-    return StreamingResponse(
-        response_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "*",
-        },
-    )
 
 
 async def send_message_stream(
@@ -418,7 +275,7 @@ async def send_message_stream(
                     # Validate UUID format; ignore invalid prompt IDs gracefully
                     _ = UUID(str(req.prompt_id))
                     prompt_db = await initialize_session_with_prompt(
-                        session_id, req.prompt_id
+                        session_id, UUID(str(req.prompt_id))
                     )
                     prompt_context = prompt_db["prompt_text"]
                     prompt_id_str = str(req.prompt_id)
@@ -444,7 +301,11 @@ async def send_message_stream(
             if req.query:
                 await save_message(
                     MessageCreate(
-                        content=req.query.strip(), role="user", session_id=session_id
+                        content=req.query.strip(),
+                        role="user",
+                        session_id=session_id,
+                        reply_to=None,
+                        follow_up_to=None,
                     )
                 )
                 follow_up_manager.add_to_conversation_history(
@@ -461,7 +322,11 @@ async def send_message_stream(
             if req.query:
                 await save_message(
                     MessageCreate(
-                        content=req.query.strip(), role="user", session_id=session_id
+                        content=req.query.strip(),
+                        role="user",
+                        session_id=session_id,
+                        reply_to=None,
+                        follow_up_to=None,
                     )
                 )
                 follow_up_manager.add_to_conversation_history(
@@ -471,18 +336,7 @@ async def send_message_stream(
         conversation_history = follow_up_manager.get_conversation_history(session_id)
         prompt_context = session_data.get("prompt_context")
 
-        # --- Company intent override ---
-        # if req.query and detect_company_intent(req.query):
 
-        #     async def company_stream():
-        #         yield f"data: {json.dumps({'status': 'processing', 'message': 'Fetching company info...'})}\n\n"
-        #         answer_and_suggestions = handle_company_query(req.query)
-        #         for msg in answer_and_suggestions:
-        #             yield f"data: {json.dumps({'status': 'company', 'message': msg})}\n\n"
-
-        #     return StreamingResponse(
-        #         company_stream(), media_type="text/event-stream", headers=SSE_HEADERS
-        #     )
 
         # --- Decide if more follow-ups are needed ---
         if not follow_up_manager.check_requirements(session_id):

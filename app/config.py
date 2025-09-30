@@ -1,4 +1,4 @@
-# config.py
+# app\config.py
 import os
 import redis
 from dotenv import load_dotenv

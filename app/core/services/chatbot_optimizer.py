@@ -22,6 +22,7 @@ import time
 from langchain.schema import AIMessage
 import random
 from datetime import datetime
+from app.core.prompts import key_generate_prompt, stream_follow_up_generation_prompt, stream_follow_up_only_prompt, optimized_prompt, count_tokens_template, Requirements, fallback_response_prompt
 
 # Configure the logger
 logging.basicConfig(
@@ -175,148 +176,12 @@ class OptimizedChatbot:
             "Initialized OptimizedChatbot with GPT-4o-mini for query processing"
         )
         # Ordered discovery categories for requirement elicitation (10 criteria)
-        self.requirement_categories = [
-            {
-                "key": "goal",
-                "name": "Project Goal / Primary Objective",
-                "question": "What is the primary goal or outcome you want to achieve?",
-                "patterns": ["goal", "objective", "aim", "purpose"],
-            },
-            {
-                "key": "users",
-                "name": "Target Users / Audience",
-                "question": "Who are the primary users or audience for this solution?",
-                "patterns": ["user", "audience", "customer", "client", "end user"],
-            },
-            {
-                "key": "pain_points",
-                "name": "Pain Points / Challenges",
-                "question": "What key pain points or challenges are you trying to solve?",
-                "patterns": ["pain", "challenge", "problem", "issue", "bottleneck"],
-            },
-            {
-                "key": "features",
-                "name": "Desired Features / Functionality",
-                "question": "What core features or functionality do you definitely need?",
-                "patterns": ["feature", "functionality", "module", "capability"],
-            },
-            {
-                "key": "success_metrics",
-                "name": "Success Metrics / KPIs",
-                "question": "How will success be measured (KPIs or outcomes)?",
-                "patterns": ["kpi", "success", "metric", "measure", "roi"],
-            },
-            {
-                "key": "constraints",
-                "name": "Budget / Resource Constraints",
-                "question": "Do you have budget or resource constraints we should respect?",
-                "patterns": ["budget", "cost", "constraint", "resource", "limit"],
-            },
-            {
-                "key": "timeline",
-                "name": "Timeline / Urgency",
-                "question": "What is the desired timeline or deadline?",
-                "patterns": ["timeline", "deadline", "schedule", "date", "milestone"],
-            },
-            {
-                "key": "tech_stack",
-                "name": "Technology / Platform Preferences",
-                "question": "Any preferred technologies, platforms, or tools?",
-                "patterns": ["tech", "technology", "stack", "platform", "framework"],
-            },
-            {
-                "key": "integrations",
-                "name": "Data / Integrations",
-                "question": "What external systems or data sources need integration?",
-                "patterns": ["integration", "api", "data source", "crm", "erp"],
-            },
-            {
-                "key": "compliance",
-                "name": "Security / Compliance / Privacy",
-                "question": "Are there security, compliance, or privacy requirements?",
-                "patterns": [
-                    "security",
-                    "privacy",
-                    "compliance",
-                    "gdpr",
-                    "hipaa",
-                    "pci",
-                ],
-            },
-        ]
+        self.requirement_categories = Requirements.requirement_categories
         # Track collected category answers per session
         self.collected_requirements: dict[str, dict] = {}
 
         # Keep requirement_categories as reference topics but don't rigidly follow them
-        self.requirement_categories = [
-            {
-                "key": "goal",
-                "name": "Project Goal / Primary Objective",
-                "question": "What is the primary goal or outcome you want to achieve?",
-                "patterns": ["goal", "objective", "aim", "purpose"],
-            },
-            {
-                "key": "users",
-                "name": "Target Users / Audience",
-                "question": "Who are the primary users or audience for this solution?",
-                "patterns": ["user", "audience", "customer", "client", "end user"],
-            },
-            {
-                "key": "pain_points",
-                "name": "Pain Points / Challenges",
-                "question": "What key pain points or challenges are you trying to solve?",
-                "patterns": ["pain", "challenge", "problem", "issue", "bottleneck"],
-            },
-            {
-                "key": "features",
-                "name": "Desired Features / Functionality",
-                "question": "What core features or functionality do you definitely need?",
-                "patterns": ["feature", "functionality", "module", "capability"],
-            },
-            {
-                "key": "success_metrics",
-                "name": "Success Metrics / KPIs",
-                "question": "How will success be measured (KPIs or outcomes)?",
-                "patterns": ["kpi", "success", "metric", "measure", "roi"],
-            },
-            {
-                "key": "constraints",
-                "name": "Budget / Resource Constraints",
-                "question": "Do you have budget or resource constraints we should respect?",
-                "patterns": ["budget", "cost", "constraint", "resource", "limit"],
-            },
-            {
-                "key": "timeline",
-                "name": "Timeline / Urgency",
-                "question": "What is the desired timeline or deadline?",
-                "patterns": ["timeline", "deadline", "schedule", "date", "milestone"],
-            },
-            {
-                "key": "tech_stack",
-                "name": "Technology / Platform Preferences",
-                "question": "Any preferred technologies, platforms, or tools?",
-                "patterns": ["tech", "technology", "stack", "platform", "framework"],
-            },
-            {
-                "key": "integrations",
-                "name": "Data / Integrations",
-                "question": "What external systems or data sources need integration?",
-                "patterns": ["integration", "api", "data source", "crm", "erp"],
-            },
-            {
-                "key": "compliance",
-                "name": "Security / Compliance / Privacy",
-                "question": "Are there security, compliance, or privacy requirements?",
-                "patterns": [
-                    "security",
-                    "privacy",
-                    "compliance",
-                    "gdpr",
-                    "hipaa",
-                    "pci",
-                ],
-            },
-        ]
+        self.requirement_categories = Requirements.requirement_categories
 
         # Track conversation state differently - more flexible
         self.conversation_state = {}  # session_id -> state object
@@ -474,76 +339,18 @@ class OptimizedChatbot:
 
         if combined:
             # Prompt for answer + follow-ups + suggestions
-            prompt = f"""
-    You are an expert requirements consultant having a conversation with a client.
-
-    ### Transcript so far:
-    {transcript}
-
-    ### Initial context:
-    {prompt_context}
-
-    ### Latest user message:
-    {latest_query}
-
-    ### Your task:
-    1. **Consider the entire conversation context, not just the latest message:**
-       - Provide a helpful response (around 100 words) that addresses the latest message while maintaining continuity.
-       - Generate {followup_count} natural follow-up questions that help explore different aspects of the topic.
-       - If the conversation has shifted, acknowledge the shift and provide options that either:
-         a) Connect the new direction back to the original context.
-         b) Continue exploring the new direction if it seems more relevant to the user.
-
-    2. **Follow-up questions:**
-       - Each follow-up should include 1-2 suggested answers to help guide the conversation.
-
-    3. **Suggestions:**
-       - Include a "suggestions" field with practical next steps that consider the full conversation history.
-
-    4. **Exploration areas:**
-       - When appropriate, explore these areas: {category_names}
-
-    ### STRICT OUTPUT FORMAT (JSON only):
-    {{
-    "answer": "<helpful response that maintains conversation continuity>",
-    "follow_ups": [
-        {{
-        "question": "<thoughtful follow-up question based on conversation context>",
-        "options": ["<option1>", "<option2>"]
-        }}
-    ],
-    "suggestions": ["<suggestion1 based on full context>", "<suggestion2 based on full context>"]
-    }}
-    """
+            prompt = stream_follow_up_generation_prompt(prompt_context=prompt_context, transcript=transcript,
+            latest_query=latest_query,
+            category_names=category_names,
+            followup_count=followup_count
+        )
         else:
             # Prompt for follow-ups only
-            prompt = f"""
-    You are an expert requirements consultant having a conversation with a client.
-
-    ### Recent conversation transcript:
-    {transcript}
-
-    ### Initial context:
-    {prompt_context}
-
-    ### Latest user message:
-    {latest_query}
-
-    ### Your task:
-    1. **Consider the entire conversation history, not just the latest message:**
-       - Generate ONE natural follow-up question that helps advance the conversation toward a more complete understanding.
-       - Focus on exploring details that haven't been discussed yet but are relevant to the overall project/topic.
-       - If the conversation seems to have changed topic, offer a question that either:
-         a) Bridges the new topic back to the original context in a natural way.
-         b) Acknowledges the new direction and helps explore it properly.
-
-    2. **Follow-up question:**
-       - Each follow-up may include 1-2 suggested answer options (using hyphens `-`) to help guide the user.
-
-    3. **Question requirements:**
-       - Keep the question concise and engaging. No intros or explanations.
-       - Ensure your question feels like a natural continuation of the conversation, not an abrupt change.
-    """
+            prompt = stream_follow_up_only_prompt(
+                prompt_context=prompt_context,
+                latest_query=latest_query,
+                transcript=transcript,
+            )
 
         # Track generation state
         state["follow_up_count"] += 1
@@ -761,7 +568,7 @@ class OptimizedChatbot:
 
     def _generate_response_stream(
         self, question: str, context: str, history: str
-    ) -> Generator[str, None, None]:
+    ) -> Generator[Any, None, None]:
         logger.debug("Entered _generate_response_stream")
 
         # Format context with separators and metadata
@@ -937,25 +744,7 @@ class OptimizedChatbot:
     def _generate_search_keys(self, query: str) -> List[str]:
         """Generate search keys using GPT-4o-mini for better vector DB retrieval"""
 
-        key_generation_prompt = f"""Break down this user query into 3-5 specific search keys/terms that would help find relevant information in a knowledge base about software development, web development, and technology services.
-
-User Query: {query}
-
-Instructions:
-1. Extract the main technical concepts, technologies, or services mentioned
-2. Include related/synonym terms that might be used in documentation
-3. Focus on actionable keywords that would match knowledge base content
-4. Avoid overly broad terms like "help" or "information"
-5. Include both specific and general terms related to the query
-
-Return ONLY the search keys, one per line, without numbers or bullets.
-
-Example for "How to build a React app with authentication":
-React application development
-authentication implementation
-user login system
-frontend security
-React authentication libraries"""
+        key_generation_prompt = key_generate_prompt(query=query)
 
         try:
             # Use GPT-4o-mini for key generation
@@ -1055,30 +844,7 @@ React authentication libraries"""
 
     @lru_cache(maxsize=1)
     def _count_template_tokens(self) -> int:
-        template = """
-You are a knowledgeable and thorough assistant providing comprehensive information.
-Your goal is to give detailed, well-structured answers that fully address the user's question.
-Conversation so far:
-{history}
-Relevant context from the knowledge base:
-{context}
-User's latest question:
-{question}
-Instructions:
-1. Provide a comprehensive answer that thoroughly addresses all aspects of the question
-2. Include specific details, examples, and explanations where appropriate
-3. Structure your response with clear sections using markdown formatting
-4. Use **bold** for key terms and concepts
-5. When relevant, include bullet points or numbered lists to organize information
-6. If the context contains multiple relevant pieces of information, synthesize them into a cohesive response
-7. If context is limited or partial, still provide the most complete answer possible using your general knowledge
-8. Do NOT be overly brief - aim for thoroughness and completeness
-9. Include relevant background information that helps understand the topic
-Format your response with:
-- A clear introductory paragraph
-- Well-organized body sections with appropriate headings
-- A brief conclusion when appropriate
-"""
+        template = count_tokens_template()
         return self.context_optimizer.count_tokens_cached(template)
 
     def _create_optimized_prompt(
@@ -1087,87 +853,16 @@ Format your response with:
         length_rule = (
             "Provide direct, concise responses with minimal formatting. "
             "Limit responses to 200 words maximum. "
-            "Use **bold** only for critical terms or concepts. "
+            "Use bold only for critical terms or concepts. "
             "Avoid headers unless absolutely necessary. "
             "Focus on answering the specific question asked. "
             "Use natural paragraph breaks sparingly. "
-            "Keep markdown formatting minimal. "
             "Ensure consistent single spacing between words. "
         )
 
-        prompt = f"""
-You are a focused AI assistant that provides clear, concise responses (200 words maximum) while maintaining a professional tone. Keep formatting minimal and prioritize direct answers to questions.
-If the user's question is outside the website’s domain, politely decline or use fallback web search context.
-
-Conversation so far:
-{history}
-
-Relevant context from the knowledge base:
-{context}
-
-User's latest question:
-{question}
-
-RESPONSE REQUIREMENTS:
-1. Be direct and to-the-point
-2. Keep responses under 200 words
-3. Use minimal formatting
-4. Focus only on answering the specific question
-5. Maintain a professional tone without unnecessary pleasantries
-
-2. CRITICAL FORMATTING REQUIREMENTS:
-1. {length_rule}
-2. Use proper Markdown structure:
-   - Use **bold text extensively** for key terms, names, technologies, and important concepts
-   - Use ### headings only when truly needed for organization (avoid generic titles like "Quick Overview")
-   - Ensure proper single spacing between words - no multiple spaces
-   - Use bullet points with **bold** key terms for clarity
-   - Proper line breaks between sections
-    3. FORMATTING SAFETY RULES (MANDATORY):
-        - Do NOT insert spaces inside words or between letters. For example, always use "Ditstek", not "Dit stek".
-        - Do NOT add spaces around hyphens; use "AI-powered" not "AI - powered" or "AI -powered".
-        - Do NOT add spaces between markdown delimiters and text. Use "**bold**" not "** bold **"; use "`code`" not "` code `".
-        - Preserve URLs and markdown links without spaces: write `[text](https://example.com)` not `[ text ]( https :// example .com )`.
-        - Avoid duplicated punctuation and excessive question marks. End sentences with a single punctuation mark.
-        - Ensure there are no spaces inserted inside tokens that represent identifiers, product names, or technical terms.
-        - If you must abbreviate or hyphenate, do so without surrounding spaces (e.g., "cross-platform").
-
-3. Content Guidelines:
-   - Use the knowledge base context as your primary information source
-   - Be comprehensive but focused (50-150 words)
-   - Include specific details and examples with **bold formatting**
-   - Maintain professional, conversational tone
-   - Address the user's question directly and thoroughly
-
-4. Structure Requirements:
-   - Start with the most relevant information immediately
-   - Organize content logically with proper spacing
-   - Use natural paragraph breaks for readability
-   - Include actionable information when relevant to the question
-
-5. Professional Standards:
-   - Use engaging, professional tone while staying informative
-   - Include relevant context and background from the knowledge base
-   - Ensure consistent spacing and formatting throughout
-   - Do not fabricate information outside the knowledge base scope
-
-Important: Provide direct, informative responses based on the knowledge base context. Avoid generic introductory headers and focus on delivering valuable information with extensive **bold formatting** for key concepts.
-"""
+        prompt = optimized_prompt(history=history, context=context, question=question, length_rule=length_rule)
         # Append an explicit mandatory formatting safety block to avoid LLM introducing spacing/markdown corruption
-        mandatory_safety = """
-
-    MANDATORY FORMATTING SAFETY RULES (ENFORCE THESE):
-    1. Do NOT insert spaces inside words or identifiers. Example: use "Ditstek" not "Dit stek".
-    2. Do NOT add spaces around hyphens. Example: use "AI-powered" not "AI - powered".
-    3. Do NOT insert spaces inside markdown delimiters. Use "**bold**" not "** bold **" and "`code`" not "` code `".
-    4. Preserve URLs and markdown links without introducing spaces: write `[text](https://example.com)`.
-    5. Avoid duplicated punctuation or excessive question marks; end sentences with a single punctuation mark.
-    6. If you must break lines, prefer breaking at paragraph boundaries or after punctuation to avoid splitting words or markdown tokens.
-
-    Please follow these SAFETY RULES STRICTLY and do not contradict them in your response.
-    """
-
-        full_prompt = (prompt.strip() + "\n\n" + mandatory_safety).strip()
+        full_prompt = (prompt.strip() + "\n\n").strip()
         return full_prompt
 
     def get_flow_debug_info(
@@ -1226,14 +921,7 @@ Important: Provide direct, informative responses based on the knowledge base con
             return "No additional context available from web search."
 
     def _generate_fallback_response(self, question: str, context: str) -> str:
-        return f"""
-I apologize, but I'm experiencing technical difficulties. Based on the available information, here's what I can tell you about your question "{question}":
-**Available Context:**
-{context[:100]}...
-**Recommendation:**
-Please try rephrasing your question or contact support for more detailed assistance.
-Would you like me to try a different approach to answer your question?
-"""
+        return fallback_response_prompt(question=question, context=context)
 
 
 # Follow-ups are now handled internally by the OptimizedChatbot class
