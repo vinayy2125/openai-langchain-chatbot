@@ -1,3 +1,4 @@
+# core_services\generate_embeddings.py
 from sentence_transformers import SentenceTransformer
 from app.db import redis_operations as redis_crud
 
@@ -14,11 +15,11 @@ documents = [
 ]
 query_embeddings = model.encode_query(query)
 document_embeddings = model.encode_document(documents)
-print(query_embeddings.shape, document_embeddings.shape)
+print(query_embeddings.shape, document_embeddings.shape) # type: ignore
 # (768,) (4, 768)
 
 # Compute similarities to determine a ranking
-similarities = model.similarity(query_embeddings, document_embeddings)
+similarities = model.similarity(query_embeddings, document_embeddings) # type: ignore
 print(similarities)
 # tensor([[0.3011, 0.6359, 0.4930, 0.4889]])
 
@@ -28,25 +29,25 @@ def get_embedding(text: str) -> list[float]:
     emb = model.encode_query(text)
     return emb.tolist()
 
-# def generate_and_store_embedding(r, text: str, metadata: dict = None) -> str:
-#     """Generate embedding for the given text and store it in Redis with optional metadata.
+def generate_and_store_embedding(r, text: str, metadata: dict = None) -> str:
+    """Generate embedding for the given text and store it in Redis with optional metadata.
 
-#     Args:
-#         r: Redis client instance.
-#         text: The text to generate an embedding for.
-#         metadata: Optional dictionary of metadata to store alongside the embedding.
+    Args:
+        r: Redis client instance.
+        text: The text to generate an embedding for.
+        metadata: Optional dictionary of metadata to store alongside the embedding.
 
-#     Returns:
-#         The Redis key under which the document is stored.
-#     """
-#     embedding = get_embedding(text)
-#     import uuid
-#     doc_id = str(uuid.uuid4())
-#     key = f"{redis_crud.PREFIX}{doc_id}"
-#     doc = {
-#         "text": text,
-#         "embedding": embedding,
-#         "metadata": metadata or {}
-#     }
-#     r.json().set(key, '$', doc)
-#     return doc_id
+    Returns:
+        The Redis key under which the document is stored.
+    """
+    embedding = get_embedding(text)
+    import uuid
+    doc_id = str(uuid.uuid4())
+    key = f"{redis_crud.PREFIX}{doc_id}"
+    doc = {
+        "text": text,
+        "embedding": embedding,
+        "metadata": metadata or {}
+    }
+    r.json().set(key, '$', doc)
+    return doc_id

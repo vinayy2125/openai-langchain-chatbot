@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from typing import List, Optional
+import pdfplumber
 
 import numpy as np
 
@@ -23,7 +24,6 @@ import numpy as np
 from redis.commands.search.field import TextField, NumericField, VectorField
 from redis.commands.search.index_definition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
-from core_services.generate_embeddings import get_embedding
 
 # local config & helpers (must exist in your project)
 from app.config import settings, get_redis_client
@@ -123,6 +123,8 @@ def retrieve_context(query: str, user_id: int, top_k: int = 3) -> str:
         logger.warning("ensure_index_exists failed (continuing): %s", e)
 
     # get query embedding
+    from core_services.generate_embeddings import get_embedding
+
     q_emb = get_embedding(query)
     vec = np.array(q_emb, dtype=np.float32)
 
@@ -180,6 +182,8 @@ def index_transcript(user_id: int, transcript: str, chat_id: Optional[int] = Non
       voicechat:user:{user_id}:chunk:{n}
     Each JSON contains user_id, chat_id, chunk_index, text, created_at, embedding.
     """
+    from core_services.generate_embeddings import get_embedding
+
     logger.info("index_transcript user=%s chat_id=%s len=%d", user_id, chat_id, len(transcript or ""))
     if not transcript:
         return
@@ -232,13 +236,9 @@ def index_document(file_path: str, document_id: int, user_id: int, db=None):
     Index a PDF document (page-level chunks) into Redis JSON docs grouped by user counter.
     If db (SQLAlchemy session) is provided, tries to mark DB document as indexed similarly to previous behavior.
     """
-    logger.info("index_document file=%s user=%s document_id=%s", file_path, user_id, document_id)
-    try:
-        import pdfplumber
-    except Exception:
-        logger.exception("pdfplumber not available; skipping document indexing")
-        return
+    from core_services.generate_embeddings import get_embedding
 
+    logger.info("index_document file=%s user=%s document_id=%s", file_path, user_id, document_id)
     r = get_redis_client()
     ensure_index_exists(r)
 
@@ -326,6 +326,8 @@ def generate_and_store_embedding(r, session_id: int, query: str, response: str) 
     Returns:
         The Redis key under which the document is stored.
     """
+    from core_services.generate_embeddings import get_embedding
+
     # Generate embedding for the new query
     query_embedding = get_embedding(query)
     

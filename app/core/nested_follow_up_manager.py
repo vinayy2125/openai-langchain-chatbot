@@ -1,11 +1,8 @@
-from datetime import datetime
-from typing import List, Dict, Any, Optional
-import json
+from typing import Any, List, Dict, Optional
 import logging
-import re
 from app.core.services.chatbot_optimizer import OptimizedChatbot
 from app.core.utils import generate_llm_response  # Import from utils package
-from app.core.prompts import SHARED_SYSTEM_PROMPT
+from app.core.prompts import SHARED_SYSTEM_PROMPT, assesment_prompt, dynamic_follow_up, final_response_prompt, suggestion_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -80,26 +77,7 @@ class FollowUpManager:
 				conversation_history[-6:]
 			)
 
-			assessment_prompt = f"""Analyze this conversation to determine if we have sufficient information to provide a useful response.
-
-Original Context: {prompt_context}
-
-Recent Conversation:
-{recent_conversation}
-
-Evaluation Criteria:
-1. Can we understand the main points of what the user wants?
-2. Do we have enough context to provide a helpful response?
-3. Can we offer actionable guidance based on what we know?
-
-Rules:
-- Mark COMPLETE if we can provide a meaningful, focused response
-- Mark COMPLETE if we have 2-3 clear points to address
-- Mark COMPLETE if the user has expressed their core needs
-- Mark CONTINUE only if we're missing critical information
-- When in doubt and we have sufficient context, mark COMPLETE
-
-Respond with ONLY: COMPLETE or CONTINUE"""
+			assessment_prompt = assesment_prompt(recent_conversation=recent_conversation, prompt_context=prompt_context)
 
 			from app.core.prompts import SHARED_SYSTEM_PROMPT
 
@@ -128,7 +106,7 @@ Respond with ONLY: COMPLETE or CONTINUE"""
 
 		return False
 
-	def generate_comprehensive_response(self, session_id: str) -> str:
+	def generate_comprehensive_response(self, session_id: str) -> Any:
 		"""Generate a comprehensive final response when requirements are complete"""
 		session_data = self.get_session_data(session_id)
 		prompt_context = session_data.get("prompt_context", "")
@@ -137,28 +115,7 @@ Respond with ONLY: COMPLETE or CONTINUE"""
 		# Build a comprehensive prompt for final response
 		conversation_summary = self.format_conversation_history(conversation_history)
 
-		comprehensive_prompt = f"""Based on our conversation, provide a precise, well-structured response (~200 words) that directly addresses the user’s needs, incorporates all relevant context, and references available knowledge base data.
-
-Original Context: {prompt_context}  
-Full Conversation: {conversation_summary}  
-
-FORMATTING INSTRUCTIONS:  
-1. Limit the response to around **300 words**, concise, informative, and focused.  
-2. Use **bold text** to highlight important terms, technologies, and key concepts.  
-3. Organize content with ### headings (e.g., “### Summary”, “### Key Points”, “### Recommendations”, “### Next Steps”).  
-4. Use short paragraphs (2–3 lines) for readability.  
-5. Include **bullet points or numbered lists** where helpful to highlight key information.  
-6. Maintain a natural, conversational flow similar to ChatGPT responses.  
-7. Conclude with a **friendly closing/thank you message**, such as:  
-   “Hope you are satisfied with the provided inputs and solutions. Feel free to ask further questions if needed.”  
-8. Use Markdown formatting naturally (bold, lists, headings) for clarity.  
-
-CONTENT REQUIREMENTS:  
-- Provide a clear summary addressing the original question.  
-- Include relevant insights from the chat context and knowledge base.  
-- Offer actionable recommendations or next steps.  
-- Keep the response practical, concise, and easy to follow.
-"""
+		comprehensive_prompt = final_response_prompt(conversation_summary= conversation_summary, prompt_context= prompt_context)
 
 		messages = [{"role": "system", "content": SHARED_SYSTEM_PROMPT}, {"role": "user", "content": comprehensive_prompt}]
 
@@ -185,24 +142,7 @@ CONTENT REQUIREMENTS:
 			conversation_history[-4:]
 		)  # Last 4 messages for context
 
-		suggestion_prompt = f"""Based on this conversation, generate a single concise and actionable suggestion or recommendation.
-
-Original Context: {prompt_context}  
-Additional Context: {context}  
-
-Recent Conversation:  
-{conversation_summary}  
-
-FORMATTING INSTRUCTIONS:  
-1. Provide exactly **one suggestion** in 1–2 sentences.  
-2. Use **bold text** for key terms and technologies.  
-3. Keep it practical, relevant, and easy to apply.  
-4. Avoid numbering or excessive formatting.  
-
-Examples:  
-- **Improve performance** by implementing lazy loading for heavy assets.  
-- **Strengthen security** with role-based access control and regular audits.  
-"""
+		suggestion_prompt = suggestion_prompts(prompt_context = prompt_context, context = context, conversation_summary = conversation_summary)
 
 
 		messages = [
@@ -257,30 +197,13 @@ Examples:
 			conversation_history[-4:]
 		)  # Last 4 messages for context
 
-		follow_up_prompt = f"""Based on this conversation, generate a single dynamic follow-up to guide the user and gather more information.
+		follow_up_prompt = dynamic_follow_up(
+			prompt_context=prompt_context,
+			latest_query=latest_query,
+			context=context,
+			conversation_summary=conversation_summary
+		)
 
-Original Context: {prompt_context}  
-Latest Query: {latest_query if latest_query else 'N/A'}  
-Additional Context: {context if context else 'N/A'}  
-
-Recent Conversation:  
-{conversation_summary}  
-
-FORMATTING INSTRUCTIONS:  
-1. Generate exactly **one follow-up** that feels natural and conversational.  
-2. Keep it precise, context-aware, and helpful — like ChatGPT’s follow-up style.  
-3. The follow-up can be:  
-   - A clarifying question to better understand user needs, OR  
-   - A helpful prompt suggesting the most logical next step.  
-4. Ensure it moves the conversation forward and avoids redundancy.  
-
-Examples:  
-- Could you share more details about your integration setup?  
-- Would you like me to walk you through optimizing the deployment process?  
-- Should I suggest best practices for your current approach?  
-"""
-
-		from app.core.prompts import SHARED_SYSTEM_PROMPT
 
 		messages = [
 			{"role": "system", "content": SHARED_SYSTEM_PROMPT},

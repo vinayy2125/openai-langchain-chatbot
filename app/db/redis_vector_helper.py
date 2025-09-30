@@ -1,15 +1,10 @@
+# app\db\redis_vector_helper.py
 from app.config import get_redis
 from datetime import datetime
+from core_services.generate_embeddings import get_embedding as vectorize_text
 
 # Use the Redis client from the config
 r = get_redis
-
-
-def vectorize_text(text: str) -> list:
-    """Convert text to a dummy vector representation using ASCII values."""
-    # This is a naive implementation. Replace with an actual vectorization method if available.
-    return [float(ord(c)) for c in text]
-
 
 def store_text(session_id: str, text: str) -> bool:
     """Store the text along with its vectorized representation in Redis under the session_id in a structured JSON format."""

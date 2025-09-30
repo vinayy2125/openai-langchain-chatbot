@@ -2,6 +2,7 @@ import json
 import re
 import logging
 from typing import List, Dict, Any, Optional, AsyncGenerator
+from app.core.prompts import enhanced_query_prompt, enhanced_query_prompt_no_context
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ async def build_chatbot_response(
     conversation_history: Optional[List[Dict[str, Any]]] = None,
     prompt_context: Optional[str] = None,
     mode: str = "complete",
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[Any, None]:
     """
     Build a streaming response from the chatbot that handles both direct responses and follow-up suggestions.
 
@@ -231,38 +232,8 @@ async def build_chatbot_response(
                     latest_query, "ditstek.com"
                 )
 
-                enhanced_query = f"""
-You are "Ditstek Assistant", answering on behalf of the Ditstek team. 
-Your response must primarily use the provided Knowledge Base context (≈80%) 
-and may include a short supplemental note (≈20%) if needed.
-
-SMART RESPONSE GUIDELINES:
-
-FORMATTING INSTRUCTIONS:  
-1. Limit the response to **around 200 words** — concise, informative, and focused.  
-2. Use **bold text** to highlight important terms, technologies, and key concepts.  
-3. Maintain a natural, conversational flow similar to ChatGPT responses.  
-4. Use Markdown formatting naturally (bold, lists, headings) for readability. 
-
-CONTEXT (use this for main part of the answer):
-{context_text}
-
-USER QUERY:
-{latest_query}
-
-"""
+                enhanced_query = enhanced_query_prompt(context_text = context_text, latest_query = latest_query)
                 # Add explicit mandatory formatting safety rules to avoid local contradictions
-                enhanced_query += """
-
-    MANDATORY FORMATTING SAFETY RULES (ENFORCE THESE):
-    1. Do NOT insert spaces inside words or identifiers. Example: use "Ditstek" not "Dit stek".
-    2. Do NOT add spaces around hyphens. Example: use "AI-powered" not "AI - powered".
-    3. Do NOT insert spaces inside markdown delimiters. Use "**bold**" not "** bold **" and "`code`" not "` code `".
-    4. Preserve URLs and markdown links without introducing spaces: write `[text](https://example.com)`.
-    5. Avoid duplicated punctuation or excessive question marks; end sentences with a single punctuation mark.
-
-    Please follow these SAFETY RULES STRICTLY and do not contradict them in your response.
-    """
             else:
                 # For follow-up responses, continue conversation naturally with proper formatting
                 # Retrieve context text from the chatbot service
@@ -270,35 +241,7 @@ USER QUERY:
                     latest_query, "ditstek.com"
                 )
 
-                enhanced_query = f"""
-Continue this conversation as "Ditstek Assistant", always answering on behalf of the Ditstek team. 
-Base your answer primarily on the Knowledge Base context (≈80%), with an optional short supplement (≈20%) if needed.
-
-CRITICAL FORMATTING REQUIREMENTS:
-1. Use **bold text** for key terms and technologies
-2. Use ONLY ###### headings when sections are needed:
-   - ###### Key Points
-   - ###### Recommendations
-3. Use bullet points for clarity
-4. Maintain natural paragraph breaks
-5. End with actionable takeaways
-
-CONTENT GUIDELINES:
-- Ground answers in KB context whenever possible
-- Keep supplement minimal and clearly labeled: 
-  **Ditstek note — supplemental:**
-- Always speak as Ditstek team
-- Provide sources for KB material at the end
-
-Previous conversation context: {conversation_history[-2:] if len(conversation_history) >= 2 else 'None'}
-
-CONTEXT:
-{context_text}
-
-USER QUERY:
-{latest_query}
-"""
-
+                enhanced_query = enhanced_query_prompt_no_context(context_text=context_text, latest_query=latest_query, conversation_history=conversation_history)
             # Generate and format the main response
             main_response = ""
             response_stream = follow_up_manager.chatbot.get_detailed_response(
