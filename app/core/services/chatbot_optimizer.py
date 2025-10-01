@@ -22,6 +22,7 @@ import time
 from langchain.schema import AIMessage
 import random
 from datetime import datetime
+from app.core.prompts import key_generate_prompt, stream_follow_up_generation_prompt, stream_follow_up_only_prompt, optimized_prompt, count_tokens_template, Requirements, fallback_response_prompt
 
 # Configure the logger
 logging.basicConfig(
@@ -96,7 +97,8 @@ class ContextOptimizer:
             - response_reservation
             - safety_buffer
         )
-        logger.debug(f"Available tokens for context: {available_for_context}")
+        # logger.debug(f"Available tokens for context: {available_for_context}")
+        logger.debug(f"Available tokens for context:")
         if isinstance(context, list):
             context = "\n\n---\n\n".join(context)
         chunks = context.split("\n\n---\n\n")
@@ -133,7 +135,8 @@ class ContextOptimizer:
             "tokens_saved": self.count_tokens_cached(context)
             - self.count_tokens_cached(final_context),
         }
-        logger.debug(f"Context optimization stats: {optimization_stats}")
+        # logger.debug(f"Context optimization stats: {optimization_stats}")
+        logger.debug(f"Context optimization stats:")
         return final_context, optimization_stats
 
     def truncate_to_tokens(self, text: str, max_tokens: int) -> str:
@@ -173,148 +176,12 @@ class OptimizedChatbot:
             "Initialized OptimizedChatbot with GPT-4o-mini for query processing"
         )
         # Ordered discovery categories for requirement elicitation (10 criteria)
-        self.requirement_categories = [
-            {
-                "key": "goal",
-                "name": "Project Goal / Primary Objective",
-                "question": "What is the primary goal or outcome you want to achieve?",
-                "patterns": ["goal", "objective", "aim", "purpose"],
-            },
-            {
-                "key": "users",
-                "name": "Target Users / Audience",
-                "question": "Who are the primary users or audience for this solution?",
-                "patterns": ["user", "audience", "customer", "client", "end user"],
-            },
-            {
-                "key": "pain_points",
-                "name": "Pain Points / Challenges",
-                "question": "What key pain points or challenges are you trying to solve?",
-                "patterns": ["pain", "challenge", "problem", "issue", "bottleneck"],
-            },
-            {
-                "key": "features",
-                "name": "Desired Features / Functionality",
-                "question": "What core features or functionality do you definitely need?",
-                "patterns": ["feature", "functionality", "module", "capability"],
-            },
-            {
-                "key": "success_metrics",
-                "name": "Success Metrics / KPIs",
-                "question": "How will success be measured (KPIs or outcomes)?",
-                "patterns": ["kpi", "success", "metric", "measure", "roi"],
-            },
-            {
-                "key": "constraints",
-                "name": "Budget / Resource Constraints",
-                "question": "Do you have budget or resource constraints we should respect?",
-                "patterns": ["budget", "cost", "constraint", "resource", "limit"],
-            },
-            {
-                "key": "timeline",
-                "name": "Timeline / Urgency",
-                "question": "What is the desired timeline or deadline?",
-                "patterns": ["timeline", "deadline", "schedule", "date", "milestone"],
-            },
-            {
-                "key": "tech_stack",
-                "name": "Technology / Platform Preferences",
-                "question": "Any preferred technologies, platforms, or tools?",
-                "patterns": ["tech", "technology", "stack", "platform", "framework"],
-            },
-            {
-                "key": "integrations",
-                "name": "Data / Integrations",
-                "question": "What external systems or data sources need integration?",
-                "patterns": ["integration", "api", "data source", "crm", "erp"],
-            },
-            {
-                "key": "compliance",
-                "name": "Security / Compliance / Privacy",
-                "question": "Are there security, compliance, or privacy requirements?",
-                "patterns": [
-                    "security",
-                    "privacy",
-                    "compliance",
-                    "gdpr",
-                    "hipaa",
-                    "pci",
-                ],
-            },
-        ]
+        self.requirement_categories = Requirements.requirement_categories
         # Track collected category answers per session
         self.collected_requirements: dict[str, dict] = {}
 
         # Keep requirement_categories as reference topics but don't rigidly follow them
-        self.requirement_categories = [
-            {
-                "key": "goal",
-                "name": "Project Goal / Primary Objective",
-                "question": "What is the primary goal or outcome you want to achieve?",
-                "patterns": ["goal", "objective", "aim", "purpose"],
-            },
-            {
-                "key": "users",
-                "name": "Target Users / Audience",
-                "question": "Who are the primary users or audience for this solution?",
-                "patterns": ["user", "audience", "customer", "client", "end user"],
-            },
-            {
-                "key": "pain_points",
-                "name": "Pain Points / Challenges",
-                "question": "What key pain points or challenges are you trying to solve?",
-                "patterns": ["pain", "challenge", "problem", "issue", "bottleneck"],
-            },
-            {
-                "key": "features",
-                "name": "Desired Features / Functionality",
-                "question": "What core features or functionality do you definitely need?",
-                "patterns": ["feature", "functionality", "module", "capability"],
-            },
-            {
-                "key": "success_metrics",
-                "name": "Success Metrics / KPIs",
-                "question": "How will success be measured (KPIs or outcomes)?",
-                "patterns": ["kpi", "success", "metric", "measure", "roi"],
-            },
-            {
-                "key": "constraints",
-                "name": "Budget / Resource Constraints",
-                "question": "Do you have budget or resource constraints we should respect?",
-                "patterns": ["budget", "cost", "constraint", "resource", "limit"],
-            },
-            {
-                "key": "timeline",
-                "name": "Timeline / Urgency",
-                "question": "What is the desired timeline or deadline?",
-                "patterns": ["timeline", "deadline", "schedule", "date", "milestone"],
-            },
-            {
-                "key": "tech_stack",
-                "name": "Technology / Platform Preferences",
-                "question": "Any preferred technologies, platforms, or tools?",
-                "patterns": ["tech", "technology", "stack", "platform", "framework"],
-            },
-            {
-                "key": "integrations",
-                "name": "Data / Integrations",
-                "question": "What external systems or data sources need integration?",
-                "patterns": ["integration", "api", "data source", "crm", "erp"],
-            },
-            {
-                "key": "compliance",
-                "name": "Security / Compliance / Privacy",
-                "question": "Are there security, compliance, or privacy requirements?",
-                "patterns": [
-                    "security",
-                    "privacy",
-                    "compliance",
-                    "gdpr",
-                    "hipaa",
-                    "pci",
-                ],
-            },
-        ]
+        self.requirement_categories = Requirements.requirement_categories
 
         # Track conversation state differently - more flexible
         self.conversation_state = {}  # session_id -> state object
@@ -472,76 +339,18 @@ class OptimizedChatbot:
 
         if combined:
             # Prompt for answer + follow-ups + suggestions
-            prompt = f"""
-    You are an expert requirements consultant having a conversation with a client.
-
-    ### Transcript so far:
-    {transcript}
-
-    ### Initial context:
-    {prompt_context}
-
-    ### Latest user message:
-    {latest_query}
-
-    ### Your task:
-    1. **Consider the entire conversation context, not just the latest message:**
-       - Provide a helpful response (around 100 words) that addresses the latest message while maintaining continuity.
-       - Generate {followup_count} natural follow-up questions that help explore different aspects of the topic.
-       - If the conversation has shifted, acknowledge the shift and provide options that either:
-         a) Connect the new direction back to the original context.
-         b) Continue exploring the new direction if it seems more relevant to the user.
-
-    2. **Follow-up questions:**
-       - Each follow-up should include 1-2 suggested answers to help guide the conversation.
-
-    3. **Suggestions:**
-       - Include a "suggestions" field with practical next steps that consider the full conversation history.
-
-    4. **Exploration areas:**
-       - When appropriate, explore these areas: {category_names}
-
-    ### STRICT OUTPUT FORMAT (JSON only):
-    {{
-    "answer": "<helpful response that maintains conversation continuity>",
-    "follow_ups": [
-        {{
-        "question": "<thoughtful follow-up question based on conversation context>",
-        "options": ["<option1>", "<option2>"]
-        }}
-    ],
-    "suggestions": ["<suggestion1 based on full context>", "<suggestion2 based on full context>"]
-    }}
-    """
+            prompt = stream_follow_up_generation_prompt(prompt_context=prompt_context, transcript=transcript,
+            latest_query=latest_query,
+            category_names=category_names,
+            followup_count=followup_count
+        )
         else:
             # Prompt for follow-ups only
-            prompt = f"""
-    You are an expert requirements consultant having a conversation with a client.
-
-    ### Recent conversation transcript:
-    {transcript}
-
-    ### Initial context:
-    {prompt_context}
-
-    ### Latest user message:
-    {latest_query}
-
-    ### Your task:
-    1. **Consider the entire conversation history, not just the latest message:**
-       - Generate ONE natural follow-up question that helps advance the conversation toward a more complete understanding.
-       - Focus on exploring details that haven't been discussed yet but are relevant to the overall project/topic.
-       - If the conversation seems to have changed topic, offer a question that either:
-         a) Bridges the new topic back to the original context in a natural way.
-         b) Acknowledges the new direction and helps explore it properly.
-
-    2. **Follow-up question:**
-       - Each follow-up may include 1-2 suggested answer options (using hyphens `-`) to help guide the user.
-
-    3. **Question requirements:**
-       - Keep the question concise and engaging. No intros or explanations.
-       - Ensure your question feels like a natural continuation of the conversation, not an abrupt change.
-    """
+            prompt = stream_follow_up_only_prompt(
+                prompt_context=prompt_context,
+                latest_query=latest_query,
+                transcript=transcript,
+            )
 
         # Track generation state
         state["follow_up_count"] += 1
@@ -622,7 +431,7 @@ class OptimizedChatbot:
         try:
             # STEP 1: Log the enhanced flow start
             logger.info(
-                f"Starting enhanced response generation for query: {query[:100]}..."
+                f"Starting enhanced response generation for query:..."
             )
 
             # STEP 2: Retrieve context using enhanced key generation
@@ -633,21 +442,19 @@ class OptimizedChatbot:
 
             # STEP 4: Log the complete flow for debugging
             logger.info(f"Enhanced Flow Summary:")
-            logger.info(f"- Original Query: {query[:100]}")
+            # logger.info(f"- Original Query: {query[:10]}")
             logger.info(f"- Context Retrieved: {len(context)} characters")
             logger.info(f"- Chat History: {len(chat_history)} messages")
             logger.info(f"- Model for keys: gpt-4o-mini")
-            logger.info(
-                f"- Model for response: {getattr(self.llm, 'model_name', 'Unknown')}"
-            )
+            # logger.info(f"- Model for response: {getattr(self.llm, 'model_name', 'Unknown')}")
 
             # Debug logs for verification
-            logger.debug(">>> Enhanced Query Processing: %s", query)
-            logger.debug(
-                ">>> Enhanced Context Retrieved: %s",
-                context[:500] + "..." if len(context) > 500 else context,
-            )
-            logger.debug(">>> Enhanced Chat History: %s", history)
+            logger.debug(">>> Enhanced Query Processing:")
+            # logger.debug(
+            #     ">>> Enhanced Context Retrieved: %s",
+            #     context[:10] + "..." if len(context) > 10 else context,
+            # )
+            logger.debug(">>> Enhanced Chat History:")
 
             # STEP 5: Generate response using enhanced context
             return self._generate_response_stream(query, context, history)
@@ -662,11 +469,22 @@ class OptimizedChatbot:
         yield fallback_message
 
     def _clean_response_formatting(self, text: str) -> str:
-        """Clean response formatting to ensure consistency and remove unwanted elements"""
+        """Clean response formatting to ensure consistency and remove unwanted elements.
+
+        This function applies conservative, deterministic regex fixes to common issues:
+        - collapses accidental spaced letters (heuristic)
+        - normalizes bold and inline code markers
+        - fixes spaces around hyphens and in URLs/markdown links
+        - preserves list structure and avoids aggressive transformations that may break Markdown
+        """
+
         if not text:
             return ""
 
-        # Remove unwanted headers that appear at the beginning
+        # Normalize newlines
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Remove unwanted leading headers
         unwanted_headers = [
             r"^#{1,6}\s*Quick Overview.*?\n",
             r"^#{1,6}\s*Overview of.*?\n",
@@ -675,50 +493,82 @@ class OptimizedChatbot:
             r"^#{1,6}\s*Implementation\s+Approach.*?\n",
             r"^#{1,6}\s*Next\s+Steps.*?\n",
         ]
-
         for pattern in unwanted_headers:
             text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.MULTILINE)
 
-        # Fix spacing issues while preserving markdown formatting
-        # Remove multiple spaces but preserve markdown formatting
-        text = re.sub(
-            r"(?<!\*) {2,}(?!\*)", " ", text
-        )  # Multiple spaces to single, preserve **bold**
-        text = re.sub(r" +\n", "\n", text)  # Remove spaces before newlines
-        text = re.sub(
-            r"\n +(?![#*-])", "\n", text
-        )  # Remove spaces after newlines (except markdown)
+        # Collapse excessive internal spaces but preserve markdown delimiters
+        text = re.sub(r"(?<!\*) {2,}(?!\*)", " ", text)
+        text = re.sub(r" +\n", "\n", text)
+        text = re.sub(r"\n +(?![#*-])", "\n", text)
 
-        # Ensure single space after punctuation
-        text = re.sub(r"([.!?:;,])\s+", r"\1 ", text)
+        # Ensure single space after punctuation but don't collapse newlines into spaces
+        # (use spaces/tabs only in the match so newlines are preserved)
+        text = re.sub(r"([.!?:;,])([ \t]+)", r"\1 ", text)
 
-        # Clean up header formatting
-        text = re.sub(
-            r"(\n)(#{1,3})\s+", r"\1\2 ", text
-        )  # Ensure single space after headers
+        # Normalize headers, bullets and numbered lists spacing
+        text = re.sub(r"(\n)(#{1,3})\s+", r"\1\2 ", text)
+        text = re.sub(r"(\n)([-*•])\s+", r"\1\2 ", text)
+        text = re.sub(r"(\n)(\d+\.)\s+", r"\1\2 ", text)
 
-        # Clean up bullet points
-        text = re.sub(
-            r"(\n)([-*•])\s+", r"\1\2 ", text
-        )  # Ensure single space after bullets
-
-        # Clean up numbered lists
-        text = re.sub(
-            r"(\n)(\d+\.)\s+", r"\1\2 ", text
-        )  # Ensure single space after numbers
-
-        # Remove multiple newlines (max 2)
+        # Limit repeated blank lines
         text = re.sub(r"\n{3,}", "\n\n", text)
 
-        # Ensure proper spacing around bold text
-        text = re.sub(r"\*\*\s+", "**", text)  # Remove space after opening **
-        text = re.sub(r"\s+\*\*", "**", text)  # Remove space before closing **
+        # Normalize bold (**bold**)
+        text = re.sub(r"\*\*\s*(.*?)\s*\*\*", r"**\1**", text, flags=re.DOTALL)
+
+        # Normalize inline code ticks: ` code ` -> `code`
+        text = re.sub(r"`\s*(.*?)\s*`", r"`\1`", text)
+
+        # Collapse spaced letters heuristic: 'D i t s t e k' -> 'Ditstek'
+        text = re.sub(r"\b(?:[A-Za-z]\s+){2,}[A-Za-z]\b", lambda m: re.sub(r"\s+", "", m.group(0)), text)
+
+        # Remove spaces around hyphens between non-newline non-space characters: 'AI - powered' -> 'AI-powered'
+        # Use [ \t] instead of \s so we don't match newlines (which would collapse list markers)
+        text = re.sub(r"(?<=\S)[ \t]*-[ \t]*(?=\S)", "-", text)
+
+        # Normalize protocols/URLs that may have been split across spaces, be conservative:
+        # Only remove spaces that appear directly around :// or within domain/path tokens, but
+        # avoid touching natural language that may contain spaced words.
+        def _fix_protocol(m):
+            scheme = m.group(1)
+            rest = m.group(2)
+            # remove internal whitespace in the URL-like segment
+            cleaned = re.sub(r"\s+", "", rest)
+            return f"{scheme}://{cleaned}"
+
+        text = re.sub(r"(https?)\s*:\s*/\s*/\s*([^\s)]+)", _fix_protocol, text, flags=re.IGNORECASE)
+
+        # Clean up markdown links where URL parts have spaces (conservative)
+        def _fix_link(m):
+            label = m.group(1).strip()
+            url = re.sub(r"\s+", "", m.group(2))
+            return f"[{label}]({url})"
+
+        text = re.sub(r"\[\s*(.*?)\s*\]\s*\(\s*([^\)]+)\s*\)", _fix_link, text)
+
+        # Post-process common URL-space artifacts: remove spaces around dots and slashes in URLs
+        # e.g., 'example .com' -> 'example.com', 'example / path' -> 'example/path'
+        text = re.sub(r"([A-Za-z0-9])\s+\.\s+([A-Za-z]{2,})", r"\1.\2", text)
+        text = re.sub(r"([A-Za-z0-9/._-])\s+/\s+([A-Za-z0-9/._-])", r"\1/\2", text)
+
+        # Ensure a space before an immediately following bold or code token if missing
+        text = re.sub(r"(\S)(\*\*[^\*]+\*\*)", r"\1 \2", text)
+        text = re.sub(r"(\S)(`[^`]+`)", r"\1 \2", text)
+
+        # If colon is immediately followed by a bullet, put the bullet on a new line
+        text = re.sub(r":\s*([-*•]\s+)", r":\n\1", text)
+
+        # Final pass: normalize bullets to have a single space after hyphen on their own lines
+        # Normalize start-of-line hyphens and preserve existing newlines. We intentionally
+        # avoid inserting newlines before bullets (except when a colon explicitly precedes them)
+        # to reduce the risk of merging or deleting lines.
+        text = re.sub(r"(?m)^[ \t]*([-*•])\s*", r"\1 ", text)
 
         return text.strip()
 
     def _generate_response_stream(
         self, question: str, context: str, history: str
-    ) -> Generator[str, None, None]:
+    ) -> Generator[Any, None, None]:
         logger.debug("Entered _generate_response_stream")
 
         # Format context with separators and metadata
@@ -734,21 +584,23 @@ class OptimizedChatbot:
             context = "\n\n---\n\n".join(context_chunks)
 
         # Log the formatted context
-        logger.debug("Formatted Context: %s", context)
+        logger.debug("Formatted Context:")
 
         template_tokens = self._count_template_tokens()
         optimized_context, stats = self.context_optimizer.optimize_context(
             context, question, history, template_tokens
         )
-        logger.debug("Optimization stats: %s", stats)
+        logger.debug("Optimization stats: ")
 
         prompt = self._create_optimized_prompt(history, optimized_context, question)
-        logger.debug("Final Prompt: %s", prompt)
+        # logger.debug("Final Prompt: %s", prompt)
 
         cache_key = f"{question[:50]}_{hash(optimized_context[:100])}"
         if cache_key in self.response_cache:
             cached_response = self.response_cache[cache_key]
-            yield cached_response
+            logger.info("Returning cached response for question (source=cached)")
+            # Ensure callers can see the source and receive chunk events
+            yield {"status": "chunk", "chunk": cached_response, "source": "cache"}
             return
 
         try:
@@ -765,101 +617,77 @@ class OptimizedChatbot:
                     full_response += content
                     buffer += content
 
-                    # Process buffer for word-level streaming with proper formatting preservation
+                    # Process buffer for paragraph/header/bullet-level chunking
                     while True:
-                        # Check for complete words to stream
-                        # Look for word boundaries while preserving markdown formatting
-                        word_match = re.search(r"(\S+(?:\s+|$))", buffer)
-                        if word_match:
-                            word = word_match.group(1)
-                            buffer = buffer[word_match.end() :]
+                        # Paragraph boundary
+                        if "\n\n" in buffer:
+                            idx = buffer.find("\n\n") + 2
+                            piece = buffer[:idx]
+                            buffer = buffer[idx:]
+                            cleaned = self._clean_response_formatting(piece)
+                            if cleaned:
+                                yield {"status": "chunk", "chunk": cleaned, "source": "stream"}
+                            continue
 
-                            # Clean up spacing but preserve markdown formatting
-                            if word.strip():
-                                # Handle newlines and paragraph breaks properly
-                                if "\n\n" in word:
-                                    # This is a paragraph break
-                                    parts = word.split("\n\n")
-                                    for i, part in enumerate(parts):
-                                        if part.strip():
-                                            yield part.strip() + " "
-                                        if i < len(parts) - 1:  # Not the last part
-                                            yield "\n\n"
-                                elif "\n" in word and not word.strip().startswith("#"):
-                                    # This is a line break (not a header)
-                                    parts = word.split("\n")
-                                    for i, part in enumerate(parts):
-                                        if part.strip():
-                                            yield part.strip() + " "
-                                        if i < len(parts) - 1:  # Not the last part
-                                            yield "\n"
-                                else:
-                                    # Regular word handling
-                                    if (
-                                        word.endswith(".")
-                                        or word.endswith("!")
-                                        or word.endswith("?")
-                                    ):
-                                        cleaned_word = word.strip() + " "
-                                    elif word.endswith("\n"):
-                                        cleaned_word = word.strip() + "\n"
-                                    else:
-                                        cleaned_word = word.strip() + " "
+                        # Header at the very start
+                        m = re.match(r'^(#{1,6} [^\n]+\n)', buffer)
+                        if m:
+                            piece = m.group(1)
+                            buffer = buffer[len(piece):]
+                            cleaned = self._clean_response_formatting(piece)
+                            if cleaned:
+                                yield {"status": "chunk", "chunk": cleaned, "source": "stream"}
+                            continue
 
-                                    # Handle special markdown cases
-                                    if (
-                                        "**" in cleaned_word
-                                        or "###" in cleaned_word
-                                        or cleaned_word.startswith("-")
-                                        or cleaned_word.startswith("*")
-                                    ):
-                                        # Preserve formatting for markdown elements
-                                        yield cleaned_word
-                                    else:
-                                        # Regular word with proper spacing
-                                        yield cleaned_word
-                        else:
-                            # No more complete words in buffer
-                            break
+                        # Header later in buffer
+                        idx_header = buffer.find('\n#')
+                        if idx_header != -1 and idx_header > 0:
+                            piece = buffer[: idx_header + 1]
+                            buffer = buffer[idx_header + 1 :]
+                            cleaned = self._clean_response_formatting(piece)
+                            if cleaned:
+                                yield {"status": "chunk", "chunk": cleaned, "source": "stream"}
+                            continue
 
-                # Send remaining content word by word with proper cleanup
+                        # Bullet/list break
+                        idx_bullet = buffer.find('\n- ')
+                        if idx_bullet != -1 and idx_bullet > 0:
+                            piece = buffer[: idx_bullet + 1]
+                            buffer = buffer[idx_bullet + 1 :]
+                            cleaned = self._clean_response_formatting(piece)
+                            if cleaned:
+                                yield {"status": "chunk", "chunk": cleaned, "source": "stream"}
+                            continue
+
+                        # Safety flush for long buffers (avoid excessive latency)
+                        if len(buffer) > 300:
+                            piece = buffer[:300]
+                            buffer = buffer[300:]
+                            cleaned = self._clean_response_formatting(piece)
+                            if cleaned:
+                                yield {"status": "chunk", "chunk": cleaned, "source": "stream"}
+                            continue
+
+                        # No complete chunk ready yet
+                        break
+
+
+                # Send remaining content as cleaned paragraph/header chunks
                 if buffer.strip():
-                    # Apply comprehensive response cleaning first
-                    buffer = self._clean_response_formatting(buffer)
-
-                    # Handle remaining content with proper line break preservation
-                    # Split by double newlines first (paragraph breaks)
-                    paragraphs = buffer.split("\n\n")
-                    for p_idx, paragraph in enumerate(paragraphs):
-                        if paragraph.strip():
-                            # Split paragraph into lines
-                            lines = paragraph.split("\n")
-                            for l_idx, line in enumerate(lines):
-                                if line.strip():
-                                    # Split line into words
-                                    words = line.split()
-                                    for word in words:
-                                        if word.strip():
-                                            # Add proper spacing after each word
-                                            if (
-                                                word.endswith(".")
-                                                or word.endswith("!")
-                                                or word.endswith("?")
-                                            ):
-                                                yield word + " "
-                                            else:
-                                                yield word + " "
-                                # Add line break after each line (except last)
-                                if l_idx < len(lines) - 1:
-                                    yield "\n"
-                        # Add paragraph break after each paragraph (except last)
-                        if p_idx < len(paragraphs) - 1:
-                            yield "\n\n"
+                    cleaned = self._clean_response_formatting(buffer)
+                    if cleaned:
+                        paragraphs = cleaned.split("\n\n")
+                        for p_idx, paragraph in enumerate(paragraphs):
+                            if paragraph.strip():
+                                yield {"status": "chunk", "chunk": paragraph, "source": "stream"}
+                            if p_idx < len(paragraphs) - 1:
+                                # preserve paragraph separation as an empty chunk separator
+                                yield {"status": "chunk", "chunk": "\n\n", "source": "stream"}
 
                 # Cache the cleaned response
-                self.response_cache[cache_key] = self._clean_response_formatting(
-                    full_response
-                )
+                cleaned_full = self._clean_response_formatting(full_response)
+                self.response_cache[cache_key] = cleaned_full
+                logger.info("Completed streaming response (source=stream). Caching cleaned response.")
             else:
                 raw_answer = self.llm.invoke(prompt)
                 response = (
@@ -867,35 +695,17 @@ class OptimizedChatbot:
                     if isinstance(raw_answer, AIMessage)
                     else str(raw_answer)
                 )
-                # Apply response cleaning
+                # Apply response cleaning and cache
                 response = self._clean_response_formatting(response)
                 self.response_cache[cache_key] = response
 
-                # Stream the response word by word with proper line break handling
+                # Emit cleaned paragraphs as chunk events and tag source
                 paragraphs = response.split("\n\n")
                 for p_idx, paragraph in enumerate(paragraphs):
                     if paragraph.strip():
-                        lines = paragraph.split("\n")
-                        for l_idx, line in enumerate(lines):
-                            if line.strip():
-                                words = line.split()
-                                for word in words:
-                                    if word.strip():
-                                        # Add proper spacing after each word
-                                        if (
-                                            word.endswith(".")
-                                            or word.endswith("!")
-                                            or word.endswith("?")
-                                        ):
-                                            yield word + " "
-                                        else:
-                                            yield word + " "
-                            # Add line break after each line (except last)
-                            if l_idx < len(lines) - 1:
-                                yield "\n"
-                    # Add paragraph break after each paragraph (except last)
+                        yield {"status": "chunk", "chunk": paragraph, "source": "non-stream"}
                     if p_idx < len(paragraphs) - 1:
-                        yield "\n\n"
+                        yield {"status": "chunk", "chunk": "\n\n", "source": "non-stream"}
         except Exception:
             logger.error("LLM streaming call failed", exc_info=True)
             fallback_response = self._generate_fallback_response(question, context)
@@ -934,33 +744,14 @@ class OptimizedChatbot:
     def _generate_search_keys(self, query: str) -> List[str]:
         """Generate search keys using GPT-4o-mini for better vector DB retrieval"""
 
-        key_generation_prompt = f"""Break down this user query into 3-5 specific search keys/terms that would help find relevant information in a knowledge base about software development, web development, and technology services.
-
-User Query: {query}
-
-Instructions:
-1. Extract the main technical concepts, technologies, or services mentioned
-2. Include related/synonym terms that might be used in documentation
-3. Focus on actionable keywords that would match knowledge base content
-4. Avoid overly broad terms like "help" or "information"
-5. Include both specific and general terms related to the query
-
-Return ONLY the search keys, one per line, without numbers or bullets.
-
-Example for "How to build a React app with authentication":
-React application development
-authentication implementation
-user login system
-frontend security
-React authentication libraries"""
+        key_generation_prompt = key_generate_prompt(query=query)
 
         try:
             # Use GPT-4o-mini for key generation
+            from app.core.prompts import SHARED_SYSTEM_PROMPT
+
             messages = [
-                {
-                    "role": "system",
-                    "content": "You are an expert at extracting search keywords from user queries for knowledge base retrieval.",
-                },
+                {"role": "system", "content": SHARED_SYSTEM_PROMPT},
                 {"role": "user", "content": key_generation_prompt},
             ]
 
@@ -973,7 +764,7 @@ React authentication libraries"""
             if not search_keys:
                 search_keys = [query]
 
-            logger.info(f"Generated {len(search_keys)} search keys from query: {query}")
+            logger.info(f"Generated {len(search_keys)} search keys from query")
             return search_keys
 
         except Exception as e:
@@ -1053,30 +844,7 @@ React authentication libraries"""
 
     @lru_cache(maxsize=1)
     def _count_template_tokens(self) -> int:
-        template = """
-You are a knowledgeable and thorough assistant providing comprehensive information.
-Your goal is to give detailed, well-structured answers that fully address the user's question.
-Conversation so far:
-{history}
-Relevant context from the knowledge base:
-{context}
-User's latest question:
-{question}
-Instructions:
-1. Provide a comprehensive answer that thoroughly addresses all aspects of the question
-2. Include specific details, examples, and explanations where appropriate
-3. Structure your response with clear sections using markdown formatting
-4. Use **bold** for key terms and concepts
-5. When relevant, include bullet points or numbered lists to organize information
-6. If the context contains multiple relevant pieces of information, synthesize them into a cohesive response
-7. If context is limited or partial, still provide the most complete answer possible using your general knowledge
-8. Do NOT be overly brief - aim for thoroughness and completeness
-9. Include relevant background information that helps understand the topic
-Format your response with:
-- A clear introductory paragraph
-- Well-organized body sections with appropriate headings
-- A brief conclusion when appropriate
-"""
+        template = count_tokens_template()
         return self.context_optimizer.count_tokens_cached(template)
 
     def _create_optimized_prompt(
@@ -1085,65 +853,17 @@ Format your response with:
         length_rule = (
             "Provide direct, concise responses with minimal formatting. "
             "Limit responses to 200 words maximum. "
-            "Use **bold** only for critical terms or concepts. "
+            "Use bold only for critical terms or concepts. "
             "Avoid headers unless absolutely necessary. "
             "Focus on answering the specific question asked. "
             "Use natural paragraph breaks sparingly. "
-            "Keep markdown formatting minimal. "
             "Ensure consistent single spacing between words. "
         )
 
-        prompt = f"""
-You are a focused AI assistant that provides clear, concise responses (200 words maximum) while maintaining a professional tone. Keep formatting minimal and prioritize direct answers to questions.
-If the user's question is outside the website’s domain, politely decline or use fallback web search context.
-
-Conversation so far:
-{history}
-
-Relevant context from the knowledge base:
-{context}
-
-User's latest question:
-{question}
-
-RESPONSE REQUIREMENTS:
-1. Be direct and to-the-point
-2. Keep responses under 200 words
-3. Use minimal formatting
-4. Focus only on answering the specific question
-5. Maintain a professional tone without unnecessary pleasantries
-
-2. CRITICAL FORMATTING REQUIREMENTS:
-1. {length_rule}
-2. Use proper Markdown structure:
-   - Use **bold text extensively** for key terms, names, technologies, and important concepts
-   - Use ### headings only when truly needed for organization (avoid generic titles like "Quick Overview")
-   - Ensure proper single spacing between words - no multiple spaces
-   - Use bullet points with **bold** key terms for clarity
-   - Proper line breaks between sections
-
-3. Content Guidelines:
-   - Use the knowledge base context as your primary information source
-   - Be comprehensive but focused (50-150 words)
-   - Include specific details and examples with **bold formatting**
-   - Maintain professional, conversational tone
-   - Address the user's question directly and thoroughly
-
-4. Structure Requirements:
-   - Start with the most relevant information immediately
-   - Organize content logically with proper spacing
-   - Use natural paragraph breaks for readability
-   - Include actionable information when relevant to the question
-
-5. Professional Standards:
-   - Use engaging, professional tone while staying informative
-   - Include relevant context and background from the knowledge base
-   - Ensure consistent spacing and formatting throughout
-   - Do not fabricate information outside the knowledge base scope
-
-Important: Provide direct, informative responses based on the knowledge base context. Avoid generic introductory headers and focus on delivering valuable information with extensive **bold formatting** for key concepts.
-"""
-        return prompt.strip()
+        prompt = optimized_prompt(history=history, context=context, question=question, length_rule=length_rule)
+        # Append an explicit mandatory formatting safety block to avoid LLM introducing spacing/markdown corruption
+        full_prompt = (prompt.strip() + "\n\n").strip()
+        return full_prompt
 
     def get_flow_debug_info(
         self, query: str, site: str = "ditstek.com"
@@ -1201,14 +921,7 @@ Important: Provide direct, informative responses based on the knowledge base con
             return "No additional context available from web search."
 
     def _generate_fallback_response(self, question: str, context: str) -> str:
-        return f"""
-I apologize, but I'm experiencing technical difficulties. Based on the available information, here's what I can tell you about your question "{question}":
-**Available Context:**
-{context[:500]}...
-**Recommendation:**
-Please try rephrasing your question or contact support for more detailed assistance.
-Would you like me to try a different approach to answer your question?
-"""
+        return fallback_response_prompt(question=question, context=context)
 
 
 # Follow-ups are now handled internally by the OptimizedChatbot class

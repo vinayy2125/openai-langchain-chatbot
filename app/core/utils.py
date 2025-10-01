@@ -1,4 +1,5 @@
 from app.core.llm_client import llm
+from app.core.prompts import SHARED_SYSTEM_PROMPT
 import logging
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
@@ -40,22 +41,19 @@ def generate_llm_response(prompt):
 
             # Only add default system message if none was provided
             if not has_system_message:
-                messages.insert(
-                    0,
-                    SystemMessage(
-                        content="You are an AI assistant that provides direct, concise responses."
-                    ),
-                )
+                messages.insert(0, SystemMessage(content=SHARED_SYSTEM_PROMPT))
         else:
             # Handle single string prompt with default system message
-            messages = [
-                SystemMessage(
-                    content="You are an AI assistant that provides direct, concise responses."
-                ),
-                HumanMessage(content=prompt.strip()),
-            ]
+            messages = [SystemMessage(content=SHARED_SYSTEM_PROMPT), HumanMessage(content=prompt.strip())]
 
-        logger.debug(f"Messages sent to LLM: {messages}")
+        # Log the origin of the system message for diagnostics
+        system_msgs = [m for m in messages if hasattr(m, 'content') and isinstance(m, type(messages[0])) and 'SystemMessage' in type(m).__name__]
+        try:
+            sys_content = system_msgs[0].content if system_msgs else '<<none>>'
+        except Exception:
+            sys_content = '<<unavailable>>'
+        logger.info(f"Invoking LLM with system prompt preview:")
+        logger.debug(f"Full messages sent to LLM:")
 
         # Use invoke instead of generate for ChatOpenAI
         response = llm.invoke(messages)
