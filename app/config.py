@@ -28,7 +28,7 @@ def get_redis_client(connect_timeout: int = 5):
             port=REDIS_PORT,
             password=REDIS_PASSWORD,
             socket_connect_timeout=connect_timeout,
-            decode_responses=True,
+            decode_responses=False, # We want bytes for embeddings
         )
         client.ping()
         return client
