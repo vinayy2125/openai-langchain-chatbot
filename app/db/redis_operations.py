@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from typing import List, Optional
+import pdfplumber
 
 import numpy as np
 
@@ -23,8 +24,6 @@ import numpy as np
 from redis.commands.search.field import TextField, NumericField, VectorField
 from redis.commands.search.index_definition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
-from core_services.generate_embeddings import get_embedding
-
 
 # local config & helpers (must exist in your project)
 from app.config import settings, get_redis_client
@@ -36,7 +35,7 @@ logger = logging.getLogger("redis_service")
 # Configuration (override via settings)
 # -------------------------
 INDEX_NAME = getattr(settings, "redis_vector_index_name", "dits_chat_idx")
-PREFIX = getattr(settings, "redis_prefix", "voicechat:")
+PREFIX = getattr(settings, "redis_prefix", "dits_chatbot:")
 EMBED_DIM = int(getattr(settings, "embed_dim", 786))
 DISTANCE = getattr(settings, "distance_metric", "COSINE").upper()
 EMBEDDING_MODEL = getattr(settings, "embedding_model", "intfloat/e5-large-v2")
@@ -54,6 +53,7 @@ def ensure_index_exists(r):
     """
     try:
         r.ft(INDEX_NAME).info()
+        print("INDEX_NAME-----> ", INDEX_NAME)
         logger.debug("Redis index '%s' already exists", INDEX_NAME)
         return
     except Exception:
@@ -123,6 +123,8 @@ def retrieve_context(query: str, user_id: int, top_k: int = 3) -> str:
         logger.warning("ensure_index_exists failed (continuing): %s", e)
 
     # get query embedding
+    from core_services.generate_embeddings import get_embedding
+
     q_emb = get_embedding(query)
     vec = np.array(q_emb, dtype=np.float32)
 
@@ -180,6 +182,8 @@ def index_transcript(user_id: int, transcript: str, chat_id: Optional[int] = Non
       voicechat:user:{user_id}:chunk:{n}
     Each JSON contains user_id, chat_id, chunk_index, text, created_at, embedding.
     """
+    from core_services.generate_embeddings import get_embedding
+
     logger.info("index_transcript user=%s chat_id=%s len=%d", user_id, chat_id, len(transcript or ""))
     if not transcript:
         return
@@ -232,13 +236,9 @@ def index_document(file_path: str, document_id: int, user_id: int, db=None):
     Index a PDF document (page-level chunks) into Redis JSON docs grouped by user counter.
     If db (SQLAlchemy session) is provided, tries to mark DB document as indexed similarly to previous behavior.
     """
-    logger.info("index_document file=%s user=%s document_id=%s", file_path, user_id, document_id)
-    try:
-        import pdfplumber
-    except Exception:
-        logger.exception("pdfplumber not available; skipping document indexing")
-        return
+    from core_services.generate_embeddings import get_embedding
 
+    logger.info("index_document file=%s user=%s document_id=%s", file_path, user_id, document_id)
     r = get_redis_client()
     ensure_index_exists(r)
 
@@ -311,3 +311,59 @@ def list_user_chunks(user_id: int, limit: int = 100) -> List[str]:
         if cursor == 0:
             break
     return out
+
+# def generate_and_store_embedding(r, text: str, metadata: dict = None) -> str:
+def generate_and_store_embedding(r, session_id: int, query: str, response: str) -> str:
+    """Generate embedding for the given text and store it in Redis.
+    Groups queries and embeddings by session_id.
+
+    Args:
+        r: Redis client instance.
+        session_id: The session ID to group queries under.
+        query: The query text to generate an embedding for.
+        response: The response text associated with the query.
+
+    Returns:
+        The Redis key under which the document is stored.
+    """
+    from core_services.generate_embeddings import get_embedding
+
+    # Generate embedding for the new query
+    query_embedding = get_embedding(query)
+    
+    # Create a session-based key
+    session_key = f"{PREFIX}session:{session_id}"
+    
+    try:
+        # Try to get existing session data
+        existing_data = r.json().get(session_key)
+        
+        if existing_data:
+            # Session exists, append new query data
+            existing_data["queries"].append({
+                "query": query,
+                "query_embedding": query_embedding,
+                "response": response,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            # Update the existing session
+            r.json().set(session_key, '$', existing_data)
+        else:
+            # Create new session entry
+            new_session_data = {
+                "session_id": session_id,
+                "created_at": datetime.utcnow().isoformat(),
+                "queries": [{
+                    "query": query,
+                    "query_embedding": query_embedding,
+                    "response": response,
+                    "timestamp": datetime.utcnow().isoformat()
+                }]
+            }
+            r.json().set(session_key, '$', new_session_data)
+    
+    except Exception as e:
+        logger.error(f"Error storing embeddings for session {session_id}: {str(e)}")
+        raise
+    
+    return session_key

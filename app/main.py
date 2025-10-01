@@ -5,6 +5,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from dotenv import load_dotenv
+# Initialize FollowUpManager
+from app.core.nested_follow_up_manager import FollowUpManager
+# Initialize LLM
+from app.core.llm_client import llm
+from app.api.v1 import router as api_v1_router
+from app.api.v1 import redis_endpoint as redis_router
 
 # Load environment variables
 load_dotenv()
@@ -52,22 +58,20 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Initialize LLM
-    from app.core.llm_client import llm
+
 
     logger.info("LLM client initialized successfully")
 
-    # Initialize FollowUpManager
-    from app.core.nested_follow_up_manager import FollowUpManager
 
     app.state.follow_up_manager = FollowUpManager(llm)
     logger.info("FollowUpManager initialized successfully")
 
     # Include API routers
-    from app.api.v1 import router as api_v1_router
 
     app.include_router(api_v1_router)
     logger.info("API v1 routes registered")
+    app.include_router(redis_router.router, prefix="/api/v1")
+    logger.info("Redis endpoints registered")
 
     return app
 

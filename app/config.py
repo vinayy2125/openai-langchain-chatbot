@@ -1,6 +1,8 @@
-# config.py
+# app\config.py
 import os
+import redis
 from dotenv import load_dotenv
+
 load_dotenv()
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -21,17 +23,12 @@ def get_redis_client(connect_timeout: int = 5):
     Returns None if the redis package is not installed or connection fails.
     """
     try:
-        import redis
-    except Exception:
-        raise RuntimeError("redis package not installed; install with pip install redis")
- 
-    try:
         client = redis.Redis(
             host=REDIS_HOST,
             port=REDIS_PORT,
             password=REDIS_PASSWORD,
             socket_connect_timeout=connect_timeout,
-            decode_responses=True,
+            decode_responses=False, # We want bytes for embeddings
         )
         client.ping()
         return client

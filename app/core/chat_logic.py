@@ -2,6 +2,7 @@ import json
 import re
 import logging
 from typing import List, Dict, Any, Optional, AsyncGenerator
+from app.core.prompts import enhanced_query_prompt, enhanced_query_prompt_no_context
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ async def build_chatbot_response(
     conversation_history: Optional[List[Dict[str, Any]]] = None,
     prompt_context: Optional[str] = None,
     mode: str = "complete",
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[Any, None]:
     """
     Build a streaming response from the chatbot that handles both direct responses and follow-up suggestions.
 
@@ -100,14 +101,14 @@ async def build_chatbot_response(
                     # If we have accumulated content, send it
                     if current_section:
                         yield {
-                            "status": "complete_chunk",
+                            "status": "chunk",
                             "chunk": "\n".join(current_section),
                         }
                         current_section = []
 
                     # Format header and send
                     header = re.sub(r"^#{1,6}\s*", "###### ", line)
-                    yield {"status": "complete_chunk", "chunk": "\n\n" + header + "\n"}
+                    yield {"status": "chunk", "chunk": "\n\n" + header + "\n"}
                 else:
                     # Process regular content
                     # Ensure proper bold formatting
@@ -231,26 +232,8 @@ async def build_chatbot_response(
                     latest_query, "ditstek.com"
                 )
 
-                enhanced_query = f"""
-You are "Ditstek Assistant", answering on behalf of the Ditstek team. 
-Your response must primarily use the provided Knowledge Base context (≈80%) 
-and may include a short supplemental note (≈20%) if needed.
-
-SMART RESPONSE GUIDELINES:
-
-FORMATTING INSTRUCTIONS:  
-1. Limit the response to **around 200 words** — concise, informative, and focused.  
-2. Use **bold text** to highlight important terms, technologies, and key concepts.  
-3. Maintain a natural, conversational flow similar to ChatGPT responses.  
-4. Use Markdown formatting naturally (bold, lists, headings) for readability. 
-
-CONTEXT (use this for main part of the answer):
-{context_text}
-
-USER QUERY:
-{latest_query}
-
-"""
+                enhanced_query = enhanced_query_prompt(context_text = context_text, latest_query = latest_query)
+                # Add explicit mandatory formatting safety rules to avoid local contradictions
             else:
                 # For follow-up responses, continue conversation naturally with proper formatting
                 # Retrieve context text from the chatbot service
@@ -258,35 +241,7 @@ USER QUERY:
                     latest_query, "ditstek.com"
                 )
 
-                enhanced_query = f"""
-Continue this conversation as "Ditstek Assistant", always answering on behalf of the Ditstek team. 
-Base your answer primarily on the Knowledge Base context (≈80%), with an optional short supplement (≈20%) if needed.
-
-CRITICAL FORMATTING REQUIREMENTS:
-1. Use **bold text** for key terms and technologies
-2. Use ONLY ###### headings when sections are needed:
-   - ###### Key Points
-   - ###### Recommendations
-3. Use bullet points for clarity
-4. Maintain natural paragraph breaks
-5. End with actionable takeaways
-
-CONTENT GUIDELINES:
-- Ground answers in KB context whenever possible
-- Keep supplement minimal and clearly labeled: 
-  **Ditstek note — supplemental:**
-- Always speak as Ditstek team
-- Provide sources for KB material at the end
-
-Previous conversation context: {conversation_history[-2:] if len(conversation_history) >= 2 else 'None'}
-
-CONTEXT:
-{context_text}
-
-USER QUERY:
-{latest_query}
-"""
-
+                enhanced_query = enhanced_query_prompt_no_context(context_text=context_text, latest_query=latest_query, conversation_history=conversation_history)
             # Generate and format the main response
             main_response = ""
             response_stream = follow_up_manager.chatbot.get_detailed_response(
@@ -304,7 +259,15 @@ USER QUERY:
                 if not chunk:
                     continue
 
-                text_chunk = str(chunk).strip()
+                # Accept either raw text or dict events from the stream
+                if isinstance(chunk, dict) and chunk.get("status") == "chunk":
+                    text_chunk = str(chunk.get("chunk", ""))
+                else:
+                    text_chunk = str(chunk).strip()
+
+                if not text_chunk:
+                    continue
+
                 main_response += text_chunk
 
                 # Split into lines to process sections
@@ -315,7 +278,7 @@ USER QUERY:
                         if current_section:
                             # Join and send accumulated section
                             section_text = " ".join(current_section)
-                            yield {"status": "complete_chunk", "chunk": section_text}
+                            yield {"status": "chunk", "chunk": section_text}
                             current_section = []
                         continue
 
@@ -323,28 +286,22 @@ USER QUERY:
                     if line.startswith("#"):
                         if current_section:
                             section_text = " ".join(current_section)
-                            yield {"status": "complete_chunk", "chunk": section_text}
+                            yield {"status": "chunk", "chunk": section_text}
                             current_section = []
 
                         # Format header consistently
                         header = re.sub(r"^#{1,6}\s*", "###### ", line)
-                        yield {
-                            "status": "complete_chunk",
-                            "chunk": "\n\n" + header + "\n",
-                        }
+                        yield {"status": "chunk", "chunk": "\n\n" + header + "\n"}
                     else:
                         # Process regular content
                         # Ensure bullet points are properly formatted
                         if line.lstrip().startswith("- "):
                             if current_section:
                                 section_text = " ".join(current_section)
-                                yield {
-                                    "status": "complete_chunk",
-                                    "chunk": section_text,
-                                }
+                                yield {"status": "chunk", "chunk": section_text}
                                 current_section = []
-                            # Send bullet points as complete chunks
-                            yield {"status": "complete_chunk", "chunk": line}
+                            # Send bullet points as chunk events
+                            yield {"status": "chunk", "chunk": line}
                         else:
                             current_section.append(line)
 
