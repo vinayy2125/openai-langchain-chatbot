@@ -66,21 +66,41 @@ def similarity_search(session_id: str, query: str, top_n: int = 5) -> list:
 
     formatted_results = []
     for doc in results.docs:
-        distance = float(getattr(doc, "vector_score", 0.0))
-        similarity = 1.0 - (distance / 2.0)  # Normalize cosine distance [0,2] → [0,1]
-
-        embedding = getattr(doc, "embedding", "[]")
         try:
-            embedding_list = json.loads(embedding) if isinstance(embedding, str) else []
-        except Exception:
+            # Ensure numeric distance -> similarity mapping is safe
+            distance_raw = getattr(doc, "vector_score", 0.0)
+            try:
+                distance = float(distance_raw)
+            except Exception:
+                distance = 0.0
+            similarity = 1.0 - (distance / 2.0)
+
+            embedding = getattr(doc, "embedding", None)
             embedding_list = []
+            if isinstance(embedding, str):
+                try:
+                    embedding_list = json.loads(embedding)
+                except Exception:
+                    embedding_list = []
+            elif isinstance(embedding, (list, tuple)):
+                embedding_list = list(embedding)
 
-        formatted_results.append({
-            "query": getattr(doc, "chunk_id", "unknown"),
-            "query_embedding": embedding_list,
-            "response": getattr(doc, "text", ""),
-            "timestamp": getattr(doc, "timestamp", ""),
-            "similarity": similarity
-        })
+            response_text = getattr(doc, "text", None) or getattr(doc, "response", None) or ""
+            chunk_id = getattr(doc, "chunk_id", None) or getattr(doc, "id", None) or "unknown"
+            timestamp = getattr(doc, "timestamp", "")
 
+            formatted_results.append({
+                "query": chunk_id,
+                "query_embedding": embedding_list,
+                "response": str(response_text) if response_text is not None else "",
+                "timestamp": str(timestamp),
+                "similarity": float(similarity)
+            })
+        except Exception as e:
+            logger.debug(f"Skipping doc in similarity_search due to error: {e}")
+
+    # Small smoke preview log so callers can rely on the shape
+    if formatted_results:
+        sample_types = [type(x).__name__ for x in formatted_results[:3]]
+        logger.info(f"[redis_vector_helper] similarity_search returning {len(formatted_results)} items (sample types: {sample_types})")
     return formatted_results

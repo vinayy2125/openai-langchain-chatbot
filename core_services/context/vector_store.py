@@ -12,7 +12,6 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # -------------------------------
 # Dynamic imports for project layout
-# -------------------------------
 # scraper.py (should expose: async def scrape_website_recursive(start_url, ...))
 scraper_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'crawler', 'scraper.py'))
 spec = importlib.util.spec_from_file_location("scraper", scraper_path)
@@ -75,45 +74,12 @@ def build_vectorstore(auto_urls: List[str]) -> None:
     print("\n🔎 Seeds to crawl (auto + urls.txt):")
     for u in all_seeds:
         print(f"   - {u}")
-
-    # Crawl
-    pages_collected: Dict[str, str] = {}
-    for seed in all_seeds:
         print(f"\n🚀 Crawling seed: {seed}")
-        result = crawl_start_url(seed, max_pages=300, max_depth=5)
-        print(f"✅ Collected {len(result)} pages from {seed}")
-        pages_collected.update(result)  # later seeds overwrite duplicates
 
-    print(f"\n🧾 Total unique pages collected: {len(pages_collected)}")
-
-    if not pages_collected:
-        print("⚠️ No pages collected — aborting index build.")
-        return
-
-    # Chunking (use LC’s Recursive splitter for consistent granularity)
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    documents: List[Document] = []
     for page_url, page_text in pages_collected.items():
-        if not page_text:
-            continue
-        chunks = splitter.split_text(page_text)
         for i, chunk in enumerate(chunks):
-            documents.append(
-                Document(
-                    page_content=chunk,
-                    metadata={"source": page_url, "chunk_index": i}
-                )
-            )
-
-    if not documents:
-        print("⚠️ No chunks produced — aborting index build.")
-        return
-
-    print(f"📦 Prepared {len(documents)} chunks for embedding.")
-    vectorstore = FAISS.from_documents(documents, embedding_model)
-    vectorstore.save_local(INDEX_DIR)
     print(f"✅ FAISS index saved to: {INDEX_DIR}")
-
-
-if __name__ == "__main__":
     build_vectorstore(URLS)
+    pass  # Placeholder for removed FAISS code
+        pages_collected.update(result)  # later seeds overwrite duplicates
