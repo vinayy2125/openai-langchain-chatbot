@@ -16,10 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from langchain.schema import AIMessage
 import re
-from langchain.schema import AIMessage
-import re
 import time
-from langchain.schema import AIMessage
 import random
 from datetime import datetime
 from app.core.prompts import key_generate_prompt, stream_follow_up_generation_prompt, stream_follow_up_only_prompt, optimized_prompt, count_tokens_template, Requirements, fallback_response_prompt
@@ -50,12 +47,12 @@ class ContextOptimizer:
         return len(self.encoding.encode(text))
 
     def score_chunk_relevance(self, chunk: str, question: str) -> float:
-        question_words = set(question.lower())
-        chunk_words = set(chunk.lower())
-        overlap = len(question_words.intersection(chunk_words))
-        total_question_words = len(question_words)
-        if total_question_words == 0:
+        if not question:
             return 0.0
+        question_words = set(question.lower().split())
+        chunk_words = set(chunk.lower().split())
+        overlap = len(question_words.intersection(chunk_words))
+        total_question_words = max(len(question_words), 1)
         relevance_score = overlap / total_question_words
         key_terms = ["what", "how", "why", "when", "where", "who", "which"]
         for term in key_terms:
@@ -63,87 +60,80 @@ class ContextOptimizer:
                 relevance_score += 0.1
         return min(relevance_score, 1.0)
 
-    def prioritize_chunks(
-        self, chunks: List[str], question: str, max_chunks: int = 8
-    ) -> List[str]:
+    def prioritize_chunks(self, chunks: List[str], question: str, max_chunks: int = 8) -> List[str]:
+        """Deterministically score and return top chunks by relevance and length."""
         if not chunks:
             return []
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            scores = list(
-                executor.map(
-                    lambda chunk: self.score_chunk_relevance(chunk, question), chunks
-                )
-            )
-        chunk_scores = list(zip(chunks, scores))
-        chunk_scores.sort(key=lambda x: x[1], reverse=True)
-        prioritized_chunks = [chunk for chunk, score in chunk_scores[:max_chunks]]
-        logger.debug(
-            f"Prioritized {len(chunks)} chunks to {len(prioritized_chunks)} most relevant"
-        )
-        return prioritized_chunks
 
-    def optimize_context(
-        self, context: str, question: str, history: str, template_tokens: int
-    ) -> Tuple[str, Dict]:
-        question_tokens = self.count_tokens_cached(question)
-        history_tokens = self.count_tokens_cached(history)
-        response_reservation = 1000
-        safety_buffer = 500
-        available_for_context = (
-            self.context_limit
-            - template_tokens
-            - question_tokens
-            - history_tokens
-            - response_reservation
-            - safety_buffer
-        )
-        # logger.debug(f"Available tokens for context: {available_for_context}")
-        logger.debug(f"Available tokens for context:")
-        if isinstance(context, list):
-            context = "\n\n---\n\n".join(context)
-        chunks = context.split("\n\n---\n\n")
-        prioritized_chunks = self.prioritize_chunks(chunks, question)
-        optimized_context = []
-        current_tokens = 0
-        for chunk in prioritized_chunks:
-            chunk_tokens = self.count_tokens_cached(chunk)
-            separator_tokens = self.count_tokens_cached("\n\n---\n\n")
-            if (
-                current_tokens + chunk_tokens + separator_tokens
-                <= available_for_context
-            ):
-                optimized_context.append(chunk)
-                current_tokens += chunk_tokens + separator_tokens
-            else:
-                remaining_tokens = available_for_context - current_tokens
-                if remaining_tokens > 100:
-                    partial_chunk = self.truncate_to_tokens(
-                        chunk, remaining_tokens - separator_tokens
-                    )
-                    optimized_context.append(partial_chunk)
-                    current_tokens += (
-                        self.count_tokens_cached(partial_chunk) + separator_tokens
-                    )
-                break
-        final_context = "\n\n---\n\n".join(optimized_context)
-        optimization_stats = {
-            "original_chunks": len(chunks),
-            "prioritized_chunks": len(prioritized_chunks),
-            "final_chunks": len(optimized_context),
-            "original_tokens": self.count_tokens_cached(context),
-            "final_tokens": self.count_tokens_cached(final_context),
-            "tokens_saved": self.count_tokens_cached(context)
-            - self.count_tokens_cached(final_context),
-        }
-        # logger.debug(f"Context optimization stats: {optimization_stats}")
-        logger.debug(f"Context optimization stats:")
-        return final_context, optimization_stats
+        scored: List[Tuple[float, int, str]] = []
+        for idx, chunk in enumerate(chunks):
+            try:
+                score = self.score_chunk_relevance(chunk, question)
+            except Exception:
+                score = 0.0
+            # Prefer longer chunks when relevance is equal
+            scored.append((score, len(chunk), chunk))
+
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        prioritized = [c for _, _, c in scored[:max_chunks]]
+        return prioritized
 
     def truncate_to_tokens(self, text: str, max_tokens: int) -> str:
         tokens = self.encoding.encode(text)
         if len(tokens) <= max_tokens:
             return text
         return self.encoding.decode(tokens[:max_tokens])
+
+    def optimize_context(self, context: Union[str, List[str]], question: str, history: str, template_tokens: int, response_reservation: int = 512, safety_buffer: int = 64) -> Tuple[str, Dict[str, int]]:
+        """Create an optimized context string that fits within token limits."""
+        # Normalize context into list of chunks
+        if isinstance(context, str):
+            if "\n\n---\n\n" in context:
+                chunks = [c for c in context.split("\n\n---\n\n") if c.strip()]
+            else:
+                chunks = [p for p in context.split("\n\n") if p.strip()]
+        else:
+            chunks = [str(c) for c in context or []]
+
+        question_tokens = self.count_tokens_cached(question or "")
+        history_tokens = self.count_tokens_cached(history or "")
+
+        available_for_context = max(
+            self.context_limit - template_tokens - question_tokens - history_tokens - response_reservation - safety_buffer,
+            0,
+        )
+
+        prioritized = self.prioritize_chunks(chunks, question, max_chunks=32)
+
+        final_chunks: List[str] = []
+        current_tokens = 0
+        sep = "\n\n---\n\n"
+        sep_tokens = self.count_tokens_cached(sep)
+
+        for chunk in prioritized:
+            ctokens = self.count_tokens_cached(chunk)
+            if current_tokens + ctokens + sep_tokens <= available_for_context:
+                final_chunks.append(chunk)
+                current_tokens += ctokens + sep_tokens
+            else:
+                remaining = available_for_context - current_tokens - sep_tokens
+                if remaining > 50:
+                    truncated = self.truncate_to_tokens(chunk, max(0, remaining))
+                    final_chunks.append(truncated)
+                    current_tokens += self.count_tokens_cached(truncated) + sep_tokens
+                break
+
+        final_context = sep.join(final_chunks)
+        stats = {
+            "original_chunks": len(chunks),
+            "prioritized_chunks": len(prioritized),
+            "final_chunks": len(final_chunks),
+            "original_tokens": self.count_tokens_cached(sep.join(chunks)) if chunks else 0,
+            "final_tokens": current_tokens,
+            "available_for_context": available_for_context,
+        }
+        logger.debug(f"Context optimization stats: {stats}")
+        return final_context, stats
 
 
 class OptimizedChatbot:
@@ -166,11 +156,13 @@ class OptimizedChatbot:
         import os
         from langchain_openai import ChatOpenAI
 
+        # Ensure api_key is None if not set, to match expected type
+        from pydantic import SecretStr
+        api_key = os.getenv("OPENAI_API_KEY")
         self.query_llm = ChatOpenAI(
-            model_name="gpt-4o-mini",  # Dedicated model for query processing
-            temperature=0.3,  # Lower temperature for more focused key generation
-            max_tokens=150,  # Limit tokens for key generation
-            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            model="gpt-4o-mini",
+            temperature=0.3,
+            api_key=SecretStr(api_key) if api_key else None,
         )
         logger.info(
             "Initialized OptimizedChatbot with GPT-4o-mini for query processing"
@@ -214,93 +206,6 @@ class OptimizedChatbot:
                 "asked": set(),  # keys already asked
             }
 
-    def record_user_message(self, session_id: str, content: str):
-        """Attempt to associate latest user reply with the most recently asked unanswered category."""
-        self._init_requirement_state(session_id)
-        state = self.collected_requirements[session_id]
-        # Find last assistant category question not yet answered
-        history = self.get_conversation_history(session_id)
-        last_category_key = None
-        for msg in reversed(history):
-            if msg["role"] == "assistant" and msg.get("meta_category_key"):
-                key = msg["meta_category_key"]
-                if key not in state["answers"]:
-                    last_category_key = key
-                    break
-        if last_category_key:
-            state["answers"][last_category_key] = {
-                "question": next(
-                    c["question"]
-                    for c in self.requirement_categories
-                    if c["key"] == last_category_key
-                ),
-                "answer": content.strip(),
-            }
-
-    def _next_missing_category(self, session_id: str) -> dict | None:
-        self._init_requirement_state(session_id)
-        state = self.collected_requirements[session_id]
-        for cat in self.requirement_categories:
-            if cat["key"] not in state["answers"] and cat["key"] not in state["asked"]:
-                return cat
-        # If all asked but some unanswered (user skipped), re-ask first unanswered
-        for cat in self.requirement_categories:
-            if cat["key"] not in state["answers"]:
-                return cat
-        return None
-
-    def _synthesize_requirement_summary(self, session_id: str) -> tuple[str, list[str]]:
-        """Return (markdown_summary, missing_keys)."""
-        self._init_requirement_state(session_id)
-        state = self.collected_requirements[session_id]
-        lines = []
-        missing = []
-        for cat in self.requirement_categories:
-            key = cat["key"]
-            if key in state["answers"]:
-                ans = state["answers"][key]["answer"] or "Not provided"
-                lines.append(f"- **{cat['name']}:** {ans}")
-            else:
-                lines.append(f"- **{cat['name']}:** _pending_")
-                missing.append(key)
-        return "\n".join(lines), missing
-
-    def add_follow_up(self, session_id: str, follow_up: str) -> None:
-        """Add a follow-up question for a session."""
-        if session_id not in self.follow_ups:
-            self.follow_ups[session_id] = []
-        self.follow_ups[session_id].append(follow_up)
-
-    # --- Follow-up Streaming Support -------------------------------------------------
-    def _extract_requirement_answers_from_history(self, history: list[dict]) -> dict:
-        """Reconstruct requirement answers from conversation history without relying on stored state.
-        Strategy:
-          For each assistant message matching a requirement question, take the next user message (before next assistant) as the answer.
-        Returns: key -> {'question': str, 'answer': str}
-        """
-        q_lookup = {c["question"]: c for c in self.requirement_categories}
-        answers: dict[str, dict] = {}
-        for i, msg in enumerate(history):
-            if msg.get("role") == "assistant":
-                content = (msg.get("content") or "").strip()
-                if content in q_lookup:
-                    cat = q_lookup[content]
-                    # find next user response
-                    answer_text = ""
-                    for j in range(i + 1, len(history)):
-                        nm = history[j]
-                        if nm.get("role") == "assistant":
-                            break  # unanswered / skipped
-                        if nm.get("role") == "user":
-                            answer_text = (nm.get("content") or "").strip()
-                            break
-                    if answer_text:
-                        answers[cat["key"]] = {
-                            "question": content,
-                            "answer": answer_text,
-                        }
-        return answers
-
     def stream_follow_up_generation(
         self,
         conversation_history: list[dict],
@@ -317,7 +222,6 @@ class OptimizedChatbot:
         - Follow-ups + suggestions handled via prompt.
         - Context-switch options included when unrelated query detected.
         """
-
         history = conversation_history or []
         session_id = next(
             (msg.get("session_id") for msg in history if msg.get("session_id")),
@@ -325,7 +229,9 @@ class OptimizedChatbot:
         )
 
         # Initialize or get conversation state
-        state = self._init_conversation_state(session_id)
+        state = self._init_conversation_state(
+            str(session_id) if session_id is not None else "generic"
+        )
 
         # Build transcript (last 10 messages)
         transcript = "\n".join(
@@ -339,11 +245,13 @@ class OptimizedChatbot:
 
         if combined:
             # Prompt for answer + follow-ups + suggestions
-            prompt = stream_follow_up_generation_prompt(prompt_context=prompt_context, transcript=transcript,
-            latest_query=latest_query,
-            category_names=category_names,
-            followup_count=followup_count
-        )
+            prompt = stream_follow_up_generation_prompt(
+                prompt_context=prompt_context,
+                transcript=transcript,
+                latest_query=latest_query,
+                category_names=category_names,
+                followup_count=followup_count,
+            )
         else:
             # Prompt for follow-ups only
             prompt = stream_follow_up_only_prompt(
@@ -362,7 +270,6 @@ class OptimizedChatbot:
                 for chunk in self.llm.stream(prompt):
                     content = getattr(chunk, "content", str(chunk))
                     if content:
-                        # YIELD RAW CHUNK ONLY
                         yield content
             else:
                 # Fallback for non-streaming LLMs
@@ -374,7 +281,11 @@ class OptimizedChatbot:
         except Exception as e:
             logger.error(f"Follow-up generation failed: {e}", exc_info=True)
             # Simple fallback
-            fallback = "Could you tell me more about your goals for this project?\n- Business growth\n- Process improvement"
+            fallback = (
+                "Could you tell me more about your goals for this project?\n"
+                "- Business growth\n"
+                "- Process improvement"
+            )
             for line in fallback.split("\n"):
                 yield line
 
@@ -419,49 +330,92 @@ class OptimizedChatbot:
         self,
         query: str,
         chat_history: list,
-        site: str = "ditstek.com",
+        session_id: str = "default",
         stream: bool = True,
     ) -> Generator:
         """
-        Enhanced response generation with explicit flow:
-        1. Query → GPT-4o-mini → Search Keys
-        2. Search Keys → Vector DB → Retrieved Context
-        3. Query + Context + History + Instructions → Main LLM → Response
+        Enhanced response generation with Redis context retrieval:
+        1. Query + chat_history → Redis context chunks
+        2. Query + Context + History + Instructions → Main LLM → Response
         """
         try:
-            # STEP 1: Log the enhanced flow start
-            logger.info(
-                f"Starting enhanced response generation for query:..."
-            )
+            from app.core.redis_context import get_redis_context_chunks
+            logger.info(f"[Chatbot] Starting response generation; query length={len(query)}")
 
-            # STEP 2: Retrieve context using enhanced key generation
-            context = self._retrieve_context(query, site)
+            # Detect if `query` already looks like a full prompt constructed upstream
+            is_full_prompt = False
+            prompt_markers = ["CONTEXT:", "USER QUERY:", "You are", "You are Ditstek"]
+            for m in prompt_markers:
+                if m in (query or ""):
+                    is_full_prompt = True
+                    break
 
-            # STEP 3: Format chat history
-            history = self._format_history(chat_history)
+            if is_full_prompt:
+                # If upstream already built the enhanced prompt, use it directly
+                prompt = query
+                logger.info("[Chatbot] Detected incoming full prompt from caller; skipping Redis lookup.")
+            else:
+                # Normal flow: fetch context from Redis and build prompt
+                context_chunks = get_redis_context_chunks(session_id, query, chat_history, top_n=8)
+                if not context_chunks:
+                    logger.warning("[Chatbot] No context found in Redis for query; using fallback stream.")
+                    yield from self._fallback_response_stream(query if len(query) < 200 else query[:200] + "...")
+                    return
+                context = "\n\n---\n\n".join([str(chunk) for chunk in context_chunks])
+                history = self._format_history(chat_history)
+                logger.info(f"[Chatbot] Redis Context Retrieved: {len(context)} characters, {len(context_chunks)} chunks")
+                logger.info(f"[Chatbot] Chat History: {len(chat_history)} messages")
+                prompt = (
+                    f"You are Ditstek Assistant. Use the following context to answer the user's question as helpfully as possible.\n"
+                    f"CONTEXT:\n{context}\n\nUSER QUERY: {query}\n"
+                )
 
-            # STEP 4: Log the complete flow for debugging
-            logger.info(f"Enhanced Flow Summary:")
-            # logger.info(f"- Original Query: {query[:10]}")
-            logger.info(f"- Context Retrieved: {len(context)} characters")
-            logger.info(f"- Chat History: {len(chat_history)} messages")
-            logger.info(f"- Model for keys: gpt-4o-mini")
-            # logger.info(f"- Model for response: {getattr(self.llm, 'model_name', 'Unknown')}")
+            # At this point we have `prompt` ready to send to the LLM
+            logger.info(f"[Chatbot] Prompt prepared (first 300 chars): {str(prompt)[:300]}")
+            try:
+                # Use the centralized helper which creates proper message objects
+                from app.core.utils import generate_llm_response
 
-            # Debug logs for verification
-            logger.debug(">>> Enhanced Query Processing:")
-            # logger.debug(
-            #     ">>> Enhanced Context Retrieved: %s",
-            #     context[:10] + "..." if len(context) > 10 else context,
-            # )
-            logger.debug(">>> Enhanced Chat History:")
+                final_text = generate_llm_response(prompt)
 
-            # STEP 5: Generate response using enhanced context
-            return self._generate_response_stream(query, context, history)
+                # If helper returned None or empty, treat as LLM failure and fallback
+                if not final_text:
+                    logger.warning("[Chatbot] LLM produced no content (None/empty). Falling back.")
+                    # Log the prompt that caused the fallback (truncated)
+                    logger.debug("[Chatbot] Prompt that caused fallback (first 800 chars): %s", str(prompt)[:800])
+                    # Write a small diagnostic file with the exact returned value repr to aid debugging
+                    try:
+                        with open(r"d:\Chatbot\logs\llm_server_diag.log", "a", encoding="utf-8") as f:
+                            f.write(f"{datetime.utcnow().isoformat()} - generate_llm_response returned falsy for session={session_id} repr={repr(final_text)[:200]}\n")
+                    except Exception:
+                        logger.debug("Failed to write llm_server_diag.log")
+                    yield from self._fallback_response_stream("I couldn't generate a response right now.")
+                    return
 
+                logger.info(f"[Chatbot] Final LLM output length={len(final_text)}; preview: {final_text[:300]}")
+
+                # Stream paragraph-level chunks to callers (cleaned)
+                paragraphs = [p for p in final_text.split("\n\n") if p.strip()]
+                for p_idx, paragraph in enumerate(paragraphs):
+                    cleaned = self._clean_response_formatting(paragraph)
+                    if cleaned:
+                        yield {"status": "chunk", "chunk": cleaned}
+                    # Preserve paragraph separation as an explicit small chunk
+                    if p_idx < len(paragraphs) - 1:
+                        yield {"status": "chunk", "chunk": "\n\n"}
+
+                # Final completion event: don't re-emit the full cleaned text (it was
+                # already streamed paragraph-by-paragraph). Emit an empty completion
+                # chunk as a completion signal to avoid duplicate content on the client.
+                yield {"status": "complete_chunk", "chunk": ""}
+
+            except Exception as llm_exc:
+                logger.exception(f"[Chatbot] LLM call failed with exception: {llm_exc}")
+                # Use a safer, shorter fallback message instead of echoing entire prompt
+                yield from self._fallback_response_stream("I couldn't generate a response right now.")
         except Exception as e:
-            logger.error(f"Enhanced response generation failed: {e}")
-            return self._fallback_response_stream(query)
+            logger.exception("[Chatbot] Redis-based response generation failed")
+            yield from self._fallback_response_stream("I couldn't generate a response right now.")
 
     def _fallback_response_stream(self, query: str) -> Generator[str, None, None]:
         """Fallback response when enhanced flow fails"""
@@ -575,11 +529,36 @@ class OptimizedChatbot:
         if isinstance(context, list):
             context_chunks = []
             for i, chunk in enumerate(context):
-                if isinstance(chunk, tuple):
-                    text, meta = chunk
-                    source_info = meta.get("source", meta.get("url", "N/A"))
-                    context_chunks.append(f"Source {i+1} ({source_info}):\n{text}")
-                else:
+                try:
+                    if isinstance(chunk, tuple) or isinstance(chunk, list):
+                        # Defensive unpack: find the first string-like element as text
+                        text = None
+                        meta = None
+                        for el in chunk:
+                            if isinstance(el, str) and el.strip():
+                                text = el
+                                break
+                        # If not found, try first element as fallback
+                        if text is None and len(chunk) > 0:
+                            text = str(chunk[0])
+
+                        # Find dict-like metadata if present
+                        for el in chunk:
+                            if isinstance(el, dict):
+                                meta = el
+                                break
+
+                        source_info = None
+                        if isinstance(meta, dict):
+                            source_info = meta.get("source") or meta.get("url")
+                        if not source_info:
+                            source_info = "N/A"
+
+                        context_chunks.append(f"Source {i+1} ({source_info}):\n{text}")
+                    else:
+                        context_chunks.append(str(chunk))
+                except Exception:
+                    # Best-effort: fall back to stringified chunk
                     context_chunks.append(str(chunk))
             context = "\n\n---\n\n".join(context_chunks)
 
@@ -626,6 +605,12 @@ class OptimizedChatbot:
                             buffer = buffer[idx:]
                             cleaned = self._clean_response_formatting(piece)
                             if cleaned:
+                                # fingerprint for debugging
+                                try:
+                                    fp = f"{hash(cleaned)}|{cleaned[:60].replace('\n',' ')}"
+                                except Exception:
+                                    fp = cleaned[:60]
+                                logger.debug(f"[Optimizer] Yielding stream chunk fp={fp}")
                                 yield {"status": "chunk", "chunk": cleaned, "source": "stream"}
                             continue
 
@@ -636,6 +621,11 @@ class OptimizedChatbot:
                             buffer = buffer[len(piece):]
                             cleaned = self._clean_response_formatting(piece)
                             if cleaned:
+                                try:
+                                    fp = f"{hash(cleaned)}|{cleaned[:60].replace('\n',' ')}"
+                                except Exception:
+                                    fp = cleaned[:60]
+                                logger.debug(f"[Optimizer] Yielding tail chunk fp={fp}")
                                 yield {"status": "chunk", "chunk": cleaned, "source": "stream"}
                             continue
 
@@ -679,6 +669,11 @@ class OptimizedChatbot:
                         paragraphs = cleaned.split("\n\n")
                         for p_idx, paragraph in enumerate(paragraphs):
                             if paragraph.strip():
+                                try:
+                                    fp = f"{hash(paragraph)}|{paragraph[:60].replace('\n',' ')}"
+                                except Exception:
+                                    fp = paragraph[:60]
+                                logger.debug(f"[Optimizer] Yielding buffered paragraph fp={fp}")
                                 yield {"status": "chunk", "chunk": paragraph, "source": "stream"}
                             if p_idx < len(paragraphs) - 1:
                                 # preserve paragraph separation as an empty chunk separator
@@ -696,11 +691,14 @@ class OptimizedChatbot:
                     else str(raw_answer)
                 )
                 # Apply response cleaning and cache
-                response = self._clean_response_formatting(response)
-                self.response_cache[cache_key] = response
+                if isinstance(response, str):
+                    cleaned_response = self._clean_response_formatting(response)
+                else:
+                    cleaned_response = self._clean_response_formatting(str(response))
+                self.response_cache[cache_key] = cleaned_response
 
                 # Emit cleaned paragraphs as chunk events and tag source
-                paragraphs = response.split("\n\n")
+                paragraphs = cleaned_response.split("\n\n")
                 for p_idx, paragraph in enumerate(paragraphs):
                     if paragraph.strip():
                         yield {"status": "chunk", "chunk": paragraph, "source": "non-stream"}
@@ -756,9 +754,10 @@ class OptimizedChatbot:
             ]
 
             response = self.query_llm.invoke(messages)
-            search_keys = [
-                key.strip() for key in response.content.split("\n") if key.strip()
-            ]
+            if isinstance(response.content, str):
+                search_keys = [key.strip() for key in response.content.split("\n") if key.strip()]
+            else:
+                search_keys = [str(key).strip() for key in response.content if str(key).strip()]
 
             # Fallback to original query if no keys generated
             if not search_keys:
@@ -771,70 +770,7 @@ class OptimizedChatbot:
             logger.error(f"Key generation failed: {e}")
             return [query]  # Fallback to original query
 
-    def _retrieve_context(self, query: str, site: str) -> str:
-        """Enhanced context retrieval with dedicated key generation"""
-        from app.core.chat_logic import _maybe_expand_queries, _dedupe_chunks
-        from app.core.retriever import retriever
-
-        try:
-            # STEP 1: Use GPT-4o-mini to generate search keys from query context
-            search_keys = self._generate_search_keys(query)
-            logger.info(f"Using {len(search_keys)} search keys for context retrieval")
-
-            # STEP 2: Perform vector search with generated keys
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                all_docs = []
-                for key in search_keys:
-                    docs = list(executor.map(retriever.get_relevant_documents, [key]))[
-                        0
-                    ]
-                    all_docs.extend(docs)
-
-                # Also search with original query for completeness
-                original_docs = list(
-                    executor.map(retriever.get_relevant_documents, [query])
-                )[0]
-                all_docs.extend(original_docs)
-
-            # STEP 3: Deduplicate and limit context
-            unique_texts = _dedupe_chunks(all_docs)
-            MAX_CHUNKS = 8  # Increased from 4 for better context
-            context_chunks = []
-
-            for i, (text, meta) in enumerate(unique_texts[:MAX_CHUNKS]):
-                source = meta.get("source", "Unknown") if meta else "Unknown"
-                context_chunks.append(f"Source: {source}\n{text}")
-
-            context_text = "\n\n---\n\n".join(context_chunks)
-
-            # STEP 4: Fallback if no context found
-            if not context_text.strip():
-                logger.warning("No context found from vector search, using fallback")
-                context_text = self._fallback_web_search(query, site)
-
-            logger.info(
-                f"Retrieved context from {len(context_chunks)} documents using enhanced key generation"
-            )
-            return context_text
-
-        except Exception as e:
-            logger.error(f"Enhanced context retrieval failed: {e}")
-            # Fallback to original method
-            variant_queries = _maybe_expand_queries(query)
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                all_docs = []
-                for q in variant_queries:
-                    docs = list(executor.map(retriever.get_relevant_documents, [q]))[0]
-                    all_docs.extend(docs)
-            unique_texts = _dedupe_chunks(all_docs)
-            MAX_CHUNKS = 4
-            context_chunks = []
-            for i, (text, meta) in enumerate(unique_texts[:MAX_CHUNKS]):
-                context_chunks.append(text)
-            context_text = "\n\n---\n\n".join(context_chunks)
-            if not context_text.strip():
-                context_text = self._fallback_web_search(query, site)
-            return context_text
+    # _retrieve_context is obsolete and removed: all context now comes from Redis
 
     def _format_history(self, chat_history: list) -> str:
         return "\n".join(
@@ -866,15 +802,17 @@ class OptimizedChatbot:
         return full_prompt
 
     def get_flow_debug_info(
-        self, query: str, site: str = "ditstek.com"
+        self, query: str, session_id: str = "default"
     ) -> Dict[str, Any]:
-        """Get detailed flow information for debugging the enhanced process"""
+        """Get detailed flow information for debugging the Redis-based process"""
         try:
-            # Generate search keys
+            # Generate search keys (for reference)
             search_keys = self._generate_search_keys(query)
 
-            # Get context
-            context = self._retrieve_context(query, site)
+            # Get context from Redis
+            from app.core.redis_context import get_redis_context_chunks
+            context_chunks = get_redis_context_chunks(session_id, query, [], top_n=8)
+            context = "\n\n---\n\n".join([str(chunk) for chunk in context_chunks])
 
             return {
                 "original_query": query,
@@ -885,13 +823,13 @@ class OptimizedChatbot:
                 ),
                 "model_used_for_keys": "gpt-4o-mini",
                 "model_used_for_response": getattr(self.llm, "model_name", "Unknown"),
-                "enhancement_status": "Enhanced flow active with GPT-4o-mini key generation",
+                "enhancement_status": "Redis context flow active",
                 "timestamp": datetime.now().isoformat(),
             }
         except Exception as e:
             return {
                 "error": str(e),
-                "enhancement_status": "Enhanced flow failed, using fallback",
+                "enhancement_status": "Redis context flow failed, using fallback",
                 "timestamp": datetime.now().isoformat(),
             }
 

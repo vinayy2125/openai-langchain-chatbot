@@ -1,32 +1,25 @@
- # app\db\user_message.yaml
-
+# D:\Chatbot\app\db\user_message.yaml
 version: "0.1.0"
 
 index:
-  name: dits_chat_idx
-  prefix: "user_message:"
+  name: chunk_index
+  prefix: "chunk:"
   storage_type: json
 
 fields:
-  - name: user_id
+  - name: text
     type: text
 
-  - name: message
-    type: text
-
-  - name: datetime
-    type: text
-
-  - name: user_type
+  - name: session_id
     type: tag
+
+  - name: timestamp
+    type: text
 
   - name: embedding
     type: vector
     attrs:
-      algorithm: hnsw
+      algorithm: flat
       distance_metric: cosine
       dtype: float32
       dims: 768
-      initial_cap: 128
-      M: 32
-      ef_construction: 200
