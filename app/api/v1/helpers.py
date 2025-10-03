@@ -351,6 +351,7 @@ async def send_message_stream(
                 ) + "\n\n"
 
                 # Reuse streaming follow-up generator with context switch & suggestions
+                sent_chunks = set()
                 async for evt in build_chatbot_response(
                     session_id=session_id,
                     follow_up_manager=follow_up_manager,
@@ -358,57 +359,29 @@ async def send_message_stream(
                     prompt_context=prompt_context,
                     mode="follow_up",
                 ):
-                    # Handle different event types with proper formatting
+                    # Normalize to a textual chunk when possible
                     if isinstance(evt, dict):
                         status = evt.get("status", "unknown")
                         chunk = evt.get("chunk", "")
-
-                        if status == "complete_chunk":
-                            logger.info(f"========== chunk ========== {chunk}")
-                            r = redis_crud.get_redis_client()
-                            redis_crud.ensure_index_exists(r)
-                            res = redis_crud.generate_and_store_embedding(r, session_id, qwry, chunk)
-
-                            #Main response content - keep as chunks for streaming
-                            yield "data: " + json.dumps(
-                                {"status": "complete_chunk", "chunk": chunk}
-                            ) + "\n\n"
-                        elif status == "separator":
-                            # Separator before final suggestions
-                            yield "data: " + json.dumps(
-                                {"status": "separator", "chunk": chunk}
-                            ) + "\n\n"
-                        elif status == "followup_header":
-                            # Header for follow-up section
-                            yield "data: " + json.dumps(
-                                {"status": "followup_header", "chunk": chunk}
-                            ) + "\n\n"
-                        elif status == "followup_question":
-                            # Individual follow-up question
-                            yield "data: " + json.dumps(
-                                {"status": "followup", "chunk": chunk}
-                            ) + "\n\n"
-                        elif status == "suggestion":
-                            # Suggestion
-                            yield "data: " + json.dumps(
-                                {"status": "suggestion", "chunk": chunk}
-                            ) + "\n\n"
-                        elif status == "error":
-                            # Error handling
-                            yield "data: " + json.dumps(
-                                {
-                                    "status": "error",
-                                    "message": evt.get("message", "Unknown error"),
-                                }
-                            ) + "\n\n"
-                        else:
-                            # Default handling - preserve original structure
-                            yield "data: " + json.dumps(evt) + "\n\n"
                     else:
-                        # Fallback for non-dict events
-                        yield "data: " + json.dumps(
-                            {"status": "complete_chunk", "chunk": str(evt)}
-                        ) + "\n\n"
+                        status = "complete_chunk"
+                        chunk = str(evt)
+
+                    # Normalize and skip empty chunks; dedupe any repeats in this response
+                    chunk_norm = "" if chunk is None else str(chunk).strip()
+                    if not chunk_norm:
+                        continue
+                    if chunk_norm in sent_chunks:
+                        logger.debug(f"[SSE] Skipping duplicate chunk (normalized)='{chunk_norm[:80]}'")
+                        continue
+                    sent_chunks.add(chunk_norm)
+
+                    # Persist embeddings for completed chunks if applicable
+                    if status == "complete_chunk":
+                        logger.info(f"========== chunk ========== {chunk_norm}")
+
+                    # Send the normalized chunk
+                    yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
 
             return StreamingResponse(
                 stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS
@@ -425,6 +398,7 @@ async def send_message_stream(
                 }
             ) + "\n\n"
 
+            sent_chunks = set()
             async for evt in build_chatbot_response(
                 session_id=session_id,
                 follow_up_manager=follow_up_manager,
@@ -432,57 +406,24 @@ async def send_message_stream(
                 prompt_context=prompt_context,
                 mode="complete",
             ):  
-                # Handle comprehensive response events
+                # Normalize to a textual chunk when possible
                 if isinstance(evt, dict):
-                    logger.info(f"- isinstance -------------->>>>:")                    
                     status = evt.get("status", "unknown")
                     chunk = evt.get("chunk", "")
-                    
-                    logger.info(f"- chunk1-------------->>>>: {chunk}")
-                    chunk_list.append(chunk)
-                    logger.info(f"- chunk_list-------------->>>>: {chunk_list}")
-
-                    if status == "complete_chunk":
-                        # Main comprehensive response content - keep as chunks for consistent streaming
-                        yield "data: " + json.dumps(
-                            {"status": "complete_chunk", "chunk": chunk}
-                        ) + "\n\n"
-                    elif status == "separator":
-                        # Separator before final suggestions
-                        yield "data: " + json.dumps(
-                            {"status": "separator", "chunk": chunk}
-                        ) + "\n\n"
-                    elif status == "followup_header":
-                        # Header for exploration suggestions (keeping for compatibility)
-                        yield "data: " + json.dumps(
-                            {"status": "followup_header", "chunk": chunk}
-                        ) + "\n\n"
-                    elif status == "followup_question":
-                        # Follow-up question
-                        yield "data: " + json.dumps(
-                            {"status": "followup", "chunk": chunk}
-                        ) + "\n\n"
-                    elif status == "suggestion":
-                        # Suggestion
-                        yield "data: " + json.dumps(
-                            {"status": "suggestion", "chunk": chunk}
-                        ) + "\n\n"
-                    elif status == "error":
-                        # Error handling
-                        yield "data: " + json.dumps(
-                            {
-                                "status": "error",
-                                "message": evt.get("message", "Unknown error"),
-                            }
-                        ) + "\n\n"
-                    else:
-                        # Default handling - preserve original structure
-                        yield "data: " + json.dumps(evt) + "\n\n"
                 else:
-                    # Fallback for non-dict events
-                    yield "data: " + json.dumps(
-                        {"status": "complete_chunk", "chunk": str(evt)}
-                    ) + "\n\n"
+                    status = "complete_chunk"
+                    chunk = str(evt)
+
+                chunk_norm = "" if chunk is None else str(chunk).strip()
+                if not chunk_norm:
+                    continue
+                if chunk_norm in sent_chunks:
+                    logger.debug(f"[SSE] Skipping duplicate chunk (normalized)='{chunk_norm[:80]}'")
+                    continue
+                sent_chunks.add(chunk_norm)
+
+                logger.debug(f"[SSE] Sending chunk status={status} preview='{chunk_norm[:80]}'")
+                yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
         
         
         return StreamingResponse(

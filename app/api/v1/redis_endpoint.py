@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
@@ -6,6 +7,9 @@ from typing import List, Union, Optional
 from app.db.redis_vector_helper import store_text, similarity_search, r
 
 router = APIRouter()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class RedisContextRequest(BaseModel):
@@ -43,7 +47,8 @@ async def redis_context_endpoint(payload: RedisContextRequest):
             created_at = datetime.utcnow().isoformat()
 
         queries = similarity_search(payload.session_id, payload.text)
-
+        logging.info(f"Similarity search returned {payload.text} results.")
+        logging.info(f"Retrieved {len(queries)} similar queries from Redis.")
         # Remove embeddings from each query dict
         cleaned_queries = []
         for q in queries:
@@ -65,8 +70,11 @@ async def redis_context_endpoint(payload: RedisContextRequest):
 
     else:
         # Store the text after vectorizing
+        strt_time = datetime.utcnow()
         success = store_text(payload.session_id, payload.text)
+        response_time = (datetime.utcnow() - strt_time).total_seconds()       
         if success:
-            return RedisContextStoreResponse(status="success", message="Text stored successfully.")
+            return RedisContextStoreResponse(status="success", message="Text stored successfully.", response_time=response_time)
         else:
+            
             raise HTTPException(status_code=500, detail="Failed to store text.")

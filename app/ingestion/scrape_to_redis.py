@@ -6,7 +6,12 @@ from typing import List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 
+import yaml
+import numpy as np
+from redis.commands.search.field import TextField, VectorField, TagField
+from redis.commands.search.index_definition import IndexDefinition, IndexType
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
+
 from app.config import get_redis
 from core_services.generate_embeddings import get_embedding
 
@@ -15,8 +20,79 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 UNIVERSAL_SESSION_ID = "universal_session_id"
-CHUNK_EMBEDDING_THREADS = 8  # Adjust based on CPU cores
-BATCH_SIZE = 100  # Process and upload in batches to avoid huge Redis ops
+CHUNK_EMBEDDING_THREADS = 20
+BATCH_SIZE = 100
+
+
+def create_index_from_yaml(yaml_path: str):
+    try:
+        with open(yaml_path, 'r') as f:
+            config = yaml.safe_load(f)
+    except Exception as e:
+        logger.error(f"❌ Could not load index config from {yaml_path}: {e}")
+        return
+
+    index_config = config.get("index", {})
+    index_name = index_config.get("name", "chunk_index")
+    prefix = index_config.get("prefix", "chunk:")
+    fields_config = config.get("fields", [])
+
+    if not fields_config:
+        logger.error("❌ No 'fields' found in YAML.")
+        return
+
+    r = get_redis
+
+    # Skip if index exists
+    try:
+        r.ft(index_name).info()
+        logger.info(f"🔍 Index '{index_name}' already exists.")
+        return
+    except:
+        pass
+
+    redis_schema = []
+    for field in fields_config:
+        name = field.get("name")
+        ftype = field.get("type", "").lower()
+        if not name or not ftype:
+            continue
+
+        if ftype == "text":
+            weight = field.get("weight", 1.0)
+            redis_schema.append(TextField(f"$.{name}", as_name=name, weight=weight))
+        elif ftype == "tag":
+            redis_schema.append(TagField(f"$.{name}", as_name=name))
+        elif ftype == "vector":
+            attrs = field.get("attrs", {})
+            vector_params = {
+                "TYPE": attrs.get("dtype", "FLOAT32").upper(),
+                "DIM": attrs["dims"],
+                "DISTANCE_METRIC": attrs.get("distance_metric", "COSINE").upper(),
+            }
+            algorithm = attrs.get("algorithm", "FLAT").upper()
+            if algorithm == "HNSW":
+                if "initial_cap" in attrs:
+                    vector_params["INITIAL_CAP"] = attrs["initial_cap"]
+                if "M" in attrs:
+                    vector_params["M"] = attrs["M"]
+                if "ef_construction" in attrs:
+                    vector_params["EF_CONSTRUCTION"] = attrs["ef_construction"]
+            redis_schema.append(VectorField(f"$.{name}", algorithm, vector_params, as_name=name))
+        else:
+            logger.warning(f"⚠️ Unsupported field type: {ftype}")
+
+    if not redis_schema:
+        logger.error("❌ No valid fields to index.")
+        return
+
+    try:
+        definition = IndexDefinition(prefix=[prefix], index_type=IndexType.JSON)
+        r.ft(index_name).create_index(redis_schema, definition=definition)
+        logger.info(f"✅ Created RediSearch index '{index_name}' on prefix '{prefix}'")
+    except Exception as e:
+        logger.exception(f"❌ Failed to create index: {e}")
+        raise
 
 
 def load_scraped_data(file_path: str | Path) -> Dict[str, Any]:
@@ -34,19 +110,19 @@ def flatten_chunks(scraped_data: Dict[str, Any]) -> List[str]:
 
 
 def generate_chunk_id(index: int) -> str:
-    return f"chunk_{index:06d}"  # Support up to 1M chunks
+    return f"chunk_{index:06d}"
 
 
-def embed_chunk_with_id(index: int, chunk_text: str) -> Dict[str, Any]:
-    """Embed a single chunk (used in thread pool)."""
+def embed_chunk_with_id(index: int, chunk_text: str, session_id: str) -> Dict[str, Any]:
     if not chunk_text or not chunk_text.strip():
         return None
     try:
         embedding = get_embedding(chunk_text)
         return {
-            "query": generate_chunk_id(index),
-            "query_embedding": embedding,
-            "response": chunk_text,
+            "chunk_id": generate_chunk_id(index),
+            "text": chunk_text,
+            "embedding": embedding,
+            "session_id": session_id,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
@@ -54,26 +130,10 @@ def embed_chunk_with_id(index: int, chunk_text: str) -> Dict[str, Any]:
         return None
 
 
-def store_session_batch(session_id: str, batch: List[Dict], is_first: bool, total_chunks: int):
-    """Store or append a batch of chunks to Redis session."""
-    r = get_redis
-    key = f"session:{session_id}"
-
-    try:
-        if is_first:
-            # Initialize session
-            session_obj = {
-                "session_id": session_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "queries": batch
-            }
-            r.json().set(key, '$', session_obj)
-        else:
-            # Append batch
-            r.json().arrappend(key, '$.queries', *batch)
-    except Exception as e:
-        logger.error(f"❌ Redis batch store failed (batch size={len(batch)}): {e}")
-        raise
+def store_chunk_document(chunk_id: str, data: Dict[str, Any]) -> None:
+    """Store a single chunk as a Redis JSON document."""
+    r = get_redis  # ← Not callable
+    r.json().set(f"chunk:{chunk_id}", "$", data)
 
 
 def embed_and_store_chunks_in_session(
@@ -81,10 +141,6 @@ def embed_and_store_chunks_in_session(
     session_id: str = UNIVERSAL_SESSION_ID,
     overwrite: bool = True
 ) -> bool:
-    if overwrite:
-        r = get_redis
-        r.delete(f"session:{session_id}")  # Ensure clean start
-
     total = len(chunks)
     if total == 0:
         logger.warning("⚠️ No chunks to process.")
@@ -92,15 +148,9 @@ def embed_and_store_chunks_in_session(
 
     logger.info(f"🧠 Generating embeddings for {total} chunks using {CHUNK_EMBEDDING_THREADS} threads...")
 
-    all_batches = []
-    # Split into batches for memory & Redis efficiency
-    for i in range(0, total, BATCH_SIZE):
-        all_batches.append(chunks[i:i + BATCH_SIZE])
-
-    batch_index = 0
+    all_batches = [chunks[i:i + BATCH_SIZE] for i in range(0, total, BATCH_SIZE)]
     global_chunk_offset = 0
 
-    # Use Rich progress bar
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -112,11 +162,9 @@ def embed_and_store_chunks_in_session(
         task = progress.add_task("Embedding & storing chunks...", total=total)
 
         for batch in all_batches:
-            # Prepare chunk indices for this batch
             indices = range(global_chunk_offset, global_chunk_offset + len(batch))
-            embed_func = partial(embed_chunk_with_id)
+            embed_func = partial(embed_chunk_with_id, session_id=session_id)
 
-            batch_results = []
             with ThreadPoolExecutor(max_workers=CHUNK_EMBEDDING_THREADS) as executor:
                 futures = {
                     executor.submit(embed_func, idx, text): idx
@@ -126,23 +174,22 @@ def embed_and_store_chunks_in_session(
                 for future in as_completed(futures):
                     result = future.result()
                     if result:
-                        batch_results.append(result)
+                        store_chunk_document(result["chunk_id"], result)
                     progress.advance(task)
 
-            # Store batch in Redis
-            if batch_results:
-                is_first = (batch_index == 0)
-                store_session_batch(session_id, batch_results, is_first, total)
-
             global_chunk_offset += len(batch)
-            batch_index += 1
 
-    logger.info(f"✅ Successfully stored {total} chunks in session '{session_id}'")
+    logger.info(f"✅ Successfully stored {total} chunk documents for session '{session_id}'")
     return True
 
 
 def ingest_website_data(json_file_path: str | Path) -> bool:
     try:
+        # ✅ Correct path to app/db/user_message.yaml
+        yaml_path = Path(__file__).parent.parent / "db" / "user_message.yaml"
+        logger.info(f"📁 Using index config: {yaml_path.resolve()}")
+        create_index_from_yaml(str(yaml_path))
+
         data = load_scraped_data(json_file_path)
         chunks = flatten_chunks(data)
         return embed_and_store_chunks_in_session(chunks)

@@ -3,6 +3,7 @@ import re
 import logging
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from app.core.prompts import enhanced_query_prompt, enhanced_query_prompt_no_context
+from app.core.redis_context import get_redis_context_chunks
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -226,82 +227,93 @@ async def build_chatbot_response(
             is_followup_response = len(assistant_messages) > 0
 
             # FIX: Unified prompt instruction with smart context awareness
+            # Always use Redis for context retrieval
+            context_chunks = get_redis_context_chunks(
+                session_id=session_id,
+                query=latest_query,
+                conversation_history=conversation_history or [],
+                top_n=6
+            )
+            context_text = "\n".join(context_chunks)
             if is_prompt_selection or is_manual_query:
-                # Retrieve context text from the chatbot service for initial queries
-                context_text = follow_up_manager.chatbot._retrieve_context(
-                    latest_query, "ditstek.com"
-                )
-
-                enhanced_query = enhanced_query_prompt(context_text = context_text, latest_query = latest_query)
-                # Add explicit mandatory formatting safety rules to avoid local contradictions
+                enhanced_query = enhanced_query_prompt(context_text=context_text, latest_query=latest_query)
             else:
-                # For follow-up responses, continue conversation naturally with proper formatting
-                # Retrieve context text from the chatbot service
-                context_text = follow_up_manager.chatbot._retrieve_context(
-                    latest_query, "ditstek.com"
-                )
-
                 enhanced_query = enhanced_query_prompt_no_context(context_text=context_text, latest_query=latest_query, conversation_history=conversation_history)
+                # Log the enhanced query (short preview) for debugging
+            logger.info(f"[ChatLogic] Enhanced query prepared (first 300 chars): {str(enhanced_query)[:300]}")
             # Generate and format the main response
             main_response = ""
+            # Call the chatbot with the raw latest_query and session_id so it
+            # performs Redis context retrieval and prompt construction itself.
             response_stream = follow_up_manager.chatbot.get_detailed_response(
-                query=enhanced_query,
-                chat_history=[
-                    (msg["role"], msg["content"])
-                    for msg in (conversation_history or [])
-                ],
+                query=latest_query,
+                chat_history=[(msg["role"], msg["content"]) for msg in (conversation_history or [])],
+                session_id=session_id,
                 stream=True,
             )
 
             # Process and format the response
             current_section = []
+            saw_structured = False
             for chunk in response_stream:
                 if not chunk:
                     continue
 
-                # Accept either raw text or dict events from the stream
-                if isinstance(chunk, dict) and chunk.get("status") == "chunk":
-                    text_chunk = str(chunk.get("chunk", ""))
+                # If upstream already emits structured dict events, prefer those
+                # and avoid reprocessing plain strings which can cause duplicates.
+                if isinstance(chunk, dict):
+                    saw_structured = True
+                    if "chunk" in chunk:
+                        yield chunk
+                        continue
+                    # If dict lacks a 'chunk' field, stringify it as a fallback
+                    text_chunk = str(chunk)
                 else:
-                    text_chunk = str(chunk).strip()
+                    # If we've already observed structured dict events from the
+                    # upstream generator, skip raw string chunks to avoid duplicate
+                    # emission paths (optimizer emits dicts). Otherwise process.
+                    if saw_structured:
+                        continue
+                    text_chunk = str(chunk)
 
                 if not text_chunk:
                     continue
 
                 main_response += text_chunk
 
-                # Split into lines to process sections
+                # Split into lines to process sections while preserving leading markers
                 lines = text_chunk.split("\n")
                 for line in lines:
-                    line = line.strip()
-                    if not line:
+                    # Trim only trailing whitespace to preserve leading '-' or '#'
+                    line = line.rstrip()
+                    if not line.strip():
                         if current_section:
-                            # Join and send accumulated section
-                            section_text = " ".join(current_section)
+                            # Join and send accumulated section preserving newlines
+                            section_text = "\n".join(current_section)
                             yield {"status": "chunk", "chunk": section_text}
                             current_section = []
                         continue
 
-                    # Handle headers
-                    if line.startswith("#"):
+                    # Handle headers (allow leading spaces before '#')
+                    if line.lstrip().startswith("#"):
                         if current_section:
-                            section_text = " ".join(current_section)
+                            section_text = "\n".join(current_section)
                             yield {"status": "chunk", "chunk": section_text}
                             current_section = []
 
-                        # Format header consistently
-                        header = re.sub(r"^#{1,6}\s*", "###### ", line)
+                        # Format header and send (preserve a blank line before)
+                        header = re.sub(r"^#{1,6}\s*", "###### ", line.lstrip())
                         yield {"status": "chunk", "chunk": "\n\n" + header + "\n"}
                     else:
                         # Process regular content
-                        # Ensure bullet points are properly formatted
+                        # Bullet points: send them as their own chunk (preserve leading '-')
                         if line.lstrip().startswith("- "):
                             if current_section:
-                                section_text = " ".join(current_section)
+                                section_text = "\n".join(current_section)
                                 yield {"status": "chunk", "chunk": section_text}
                                 current_section = []
-                            # Send bullet points as chunk events
-                            yield {"status": "chunk", "chunk": line}
+                            # Send bullet points as chunk events (preserve markdown)
+                            yield {"status": "chunk", "chunk": line.lstrip()}
                         else:
                             current_section.append(line)
 
