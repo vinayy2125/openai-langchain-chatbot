@@ -317,9 +317,9 @@ async def build_chatbot_response(
                         else:
                             current_section.append(line)
 
-            # Send any remaining content
+            # Send any remaining content (preserve newlines)
             if current_section:
-                section_text = " ".join(current_section)
+                section_text = "\n".join(current_section)
                 yield {"status": "complete_chunk", "chunk": section_text}
 
             # Add spacing after main response (no separator lines)
