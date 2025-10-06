@@ -342,33 +342,19 @@ class OptimizedChatbot:
             from app.core.redis_context import get_redis_context_chunks
             logger.info(f"[Chatbot] Starting response generation; query length={len(query)}")
 
-            # Detect if `query` already looks like a full prompt constructed upstream
-            is_full_prompt = False
-            prompt_markers = ["CONTEXT:", "USER QUERY:", "You are", "You are Ditstek"]
-            for m in prompt_markers:
-                if m in (query or ""):
-                    is_full_prompt = True
-                    break
+            # Always fetch Redis context for the query (no prompt-detection heuristics)
+            context_chunks = get_redis_context_chunks(session_id, query, chat_history, top_n=8)
+            # Build a joined context string (may be empty)
+            context = "\n\n---\n\n".join([str(chunk) for chunk in (context_chunks or [])])
+            history = self._format_history(chat_history)
+            logger.info(f"[Chatbot] Redis Context Retrieved: {len(context)} characters, {len(context_chunks) if context_chunks else 0} chunks")
+            logger.info(f"[Chatbot] Chat History: {len(chat_history)} messages")
 
-            if is_full_prompt:
-                # If upstream already built the enhanced prompt, use it directly
-                prompt = query
-                logger.info("[Chatbot] Detected incoming full prompt from caller; skipping Redis lookup.")
-            else:
-                # Normal flow: fetch context from Redis and build prompt
-                context_chunks = get_redis_context_chunks(session_id, query, chat_history, top_n=8)
-                if not context_chunks:
-                    logger.warning("[Chatbot] No context found in Redis for query; using fallback stream.")
-                    yield from self._fallback_response_stream(query if len(query) < 200 else query[:200] + "...")
-                    return
-                context = "\n\n---\n\n".join([str(chunk) for chunk in context_chunks])
-                history = self._format_history(chat_history)
-                logger.info(f"[Chatbot] Redis Context Retrieved: {len(context)} characters, {len(context_chunks)} chunks")
-                logger.info(f"[Chatbot] Chat History: {len(chat_history)} messages")
-                prompt = (
-                    f"You are Ditstek Assistant. Use the following context to answer the user's question as helpfully as possible.\n"
-                    f"CONTEXT:\n{context}\n\nUSER QUERY: {query}\n"
-                )
+            # Always construct the standard prompt using the retrieved context
+            prompt = (
+                "You are Ditstek Assistant. Use the following context to answer the user's question...\n"
+                f"CONTEXT:\n{context}\n\nUSER QUERY: {query}"
+            )
 
             # At this point we have `prompt` ready to send to the LLM
             logger.info(f"[Chatbot] Prompt prepared (first 300 chars): {str(prompt)[:300]}")

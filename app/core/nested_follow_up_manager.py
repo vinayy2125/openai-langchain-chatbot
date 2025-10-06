@@ -3,6 +3,7 @@ import logging
 from app.core.services.chatbot_optimizer import OptimizedChatbot
 from app.core.utils import generate_llm_response  # Import from utils package
 from app.core.prompts import SHARED_SYSTEM_PROMPT, assesment_prompt, dynamic_follow_up, final_response_prompt, suggestion_prompts
+from app.core.utils import sanitize_context, classify_query
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,8 @@ class FollowUpManager:
 				{"role": "user", "content": assessment_prompt},
 			]
 
-			evaluation = generate_llm_response(messages).strip().upper()
+			evaluation_raw = generate_llm_response(messages)
+			evaluation = evaluation_raw.strip().upper() if isinstance(evaluation_raw, str) else ""
 			is_complete = "COMPLETE" in evaluation
 
 			logger.debug(
@@ -115,18 +117,37 @@ class FollowUpManager:
 		# Build a comprehensive prompt for final response
 		conversation_summary = self.format_conversation_history(conversation_history)
 
-		comprehensive_prompt = final_response_prompt(conversation_summary= conversation_summary, prompt_context= prompt_context)
+		# Classify most recent user message to handle chit-chat or irrelevant queries
+		latest_user = ""
+		for msg in reversed(conversation_history):
+			if msg.get("role") == "user":
+				latest_user = msg.get("content", "")
+				break
 
-		messages = [{"role": "system", "content": SHARED_SYSTEM_PROMPT}, {"role": "user", "content": comprehensive_prompt}]
+		q_type = classify_query(latest_user)
+
+		if q_type == "CHITCHAT":
+			# For chit-chat, keep it conversational and avoid exposing KB.
+			chat_prompt = f"You are a friendly assistant. Reply briefly and conversationally to: {latest_user}"
+			messages = [{"role": "system", "content": SHARED_SYSTEM_PROMPT}, {"role": "user", "content": chat_prompt}]
+		elif q_type in ("TYPO",):
+			clarify = "It looks like your last message might be a typo or incomplete. Could you clarify what you meant or what you'd like me to do next?"
+			messages = [{"role": "system", "content": SHARED_SYSTEM_PROMPT}, {"role": "user", "content": clarify}]
+		else:
+			# KB_RELATED or OUTSIDE_KB or UNKNOWN -> sanitize and use final_response_prompt
+			safe_context = sanitize_context(prompt_context)
+			comprehensive_prompt = final_response_prompt(conversation_summary=conversation_summary, prompt_context=safe_context)
+			messages = [{"role": "system", "content": SHARED_SYSTEM_PROMPT}, {"role": "user", "content": comprehensive_prompt}]
 
 		try:
 			logger.info("Calling LLM for comprehensive response (generate_comprehensive_response)")
 			response = generate_llm_response(messages)
+			response_text = response if isinstance(response, str) else (str(response) if response is not None else None)
 			logger.debug(
-				f"[generate_comprehensive_response] Generated comprehensive response of {len(response)} characters"
+				f"[generate_comprehensive_response] Generated comprehensive response of {len(response_text) if response_text else 0} characters"
 			)
 			# Tag the response so callers can know which prompt produced it
-			return {"source": "comprehensive", "text": response}
+			return {"source": "comprehensive", "text": response_text}
 		except Exception as e:
 			logger.error(f"[generate_comprehensive_response] Failed: {e}")
 			return {"source": "comprehensive", "text": "I apologize, but I encountered an issue generating a comprehensive response. Please try rephrasing your question."}
@@ -153,7 +174,9 @@ class FollowUpManager:
 		try:
 			response = generate_llm_response(messages)
 			logger.debug("[generate_suggestions] Generated suggestions:")
-			return response.split("\n")  # Split suggestions into list
+			if not isinstance(response, str):
+				return [response] if response else ["Consider exploring related topics"]
+			return [line.strip() for line in response.split("\n") if line.strip()]
 		except Exception as e:
 			logger.error(f"[generate_suggestions] Failed: {e}")
 			return ["Consider exploring related topics"]  # Single fallback suggestion
@@ -213,7 +236,9 @@ class FollowUpManager:
 		try:
 			response = generate_llm_response(messages)
 			logger.debug(f"[generate_follow_ups] Generated follow-ups: ")
-			return response.split("\n")  # Split follow-ups into list
+			if not isinstance(response, str):
+				return [response] if response else ["Could you provide more details?"]
+			return [line.strip() for line in response.split("\n") if line.strip()]
 		except Exception as e:
 			logger.error(f"[generate_follow_ups] Failed: {e}")
 			return ["Could you provide more details?"]  # Single fallback follow-up
