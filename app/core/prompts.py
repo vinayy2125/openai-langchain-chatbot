@@ -22,8 +22,8 @@ SHARED_SYSTEM_PROMPT += (
     "\n\nMANDATORY FORMATTING RULES: "
     "Return the final answer as Markdown. "
     "Start with the main answer as plain text (no heading). "
-    "After the main answer include a single blank line, then a subtle Suggestions section represented as a bulleted list (use '-' or '*') or the single word 'None'. "
-    "Then include another blank line, followed by a subtle Follow-ups section represented as a bulleted list of suggested follow-up questions or the single word 'None'. "
+    "After the main answer include a single blank line, then a bulleted list of optional suggestions (use '-' or '*') or the single word 'None' — do NOT add any heading or label before this list. "
+    "Then include another blank line, followed by a bulleted list of suggested follow-up questions (or the single word 'None') — do NOT add any heading or label before this list. "
     "Preserve newlines and bullets exactly as you present them. "
     "Do not include raw knowledge-base documents, IDs, or internal metadata in the user-facing response."
 )
@@ -66,13 +66,14 @@ def final_response_prompt(prompt_context: str, conversation_summary: Optional[st
     return f"""
 Based on the conversation so far, write a clear and direct answer that fully addresses the user’s question using only relevant context.
 
-Output format (strict):
-- Start immediately with the main answer text (no headings, disclaimers, or boilerplate).
-- After the main answer, include one blank line and then a bulleted list for suggestions (use '-' or '*').
-- After the suggestions list, include exactly one blank line and then a bulleted list for follow-up questions (user-focused next-step questions).
+    Output format (strict):
+    - Start immediately with the main answer text (no headings, disclaimers, or boilerplate).
+    - After the main answer, include one blank line and then a bulleted list of optional suggestions (use '-' or '*'); do NOT include a heading or label before the list.
+    - After the suggestions list, include exactly one blank line and then a bulleted list of suggested follow-up questions (user-focused next-step questions); do NOT include a heading or label before the list.
 
 Additional rules:
 - Keep the main answer concise, conversational, and user-friendly.
+- If the query is irrelevant to the context, respond with: "I'm sorry, but I couldn't find relevant information for your query. Could you clarify or provide more details?"
 - Do not expose raw knowledge-base content, vector IDs, or internal debugging info.
 - Follow-up questions must be phrased as helpful next-step questions for the user, not questions about Ditstek or its internal processes.
 - Preserve blank lines and bullet characters exactly as specified.
@@ -97,8 +98,9 @@ Evaluation Criteria:
 1. Can we understand the main points of what the user wants?
 2. Do we have enough context to provide a helpful response?
 3. Can we offer actionable guidance based on what we know?
+4. Is the query relevant to the provided context?
 
-Respond with ONLY: COMPLETE or CONTINUE
+Respond with ONLY: COMPLETE, CONTINUE, or IRRELEVANT
 """
 
 
@@ -168,6 +170,9 @@ Your task:
 2. Generate {followup_count} natural follow-up questions.
 3. Include practical suggestions considering the conversation history.
 4. Explore areas: {category_names}
+5. Add one newline before the followup.
+6. Add one newline after the followup.
+
 
 Output format: JSON only
 """
@@ -186,6 +191,8 @@ Initial context:
 Latest user message:
 {latest_query}
 
+Add one newline before the followup.
+Add one newline after the followup.
 Generate ONE natural follow-up question to advance the conversation.
 """
 

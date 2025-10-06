@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 UNIVERSAL_SESSION_ID = "universal_session_id"
-CHUNK_EMBEDDING_THREADS = 20
+CHUNK_EMBEDDING_THREADS = 10
 BATCH_SIZE = 100
 
 
