@@ -17,6 +17,17 @@ SHARED_SYSTEM_PROMPT += (
     "Avoid duplicated punctuation and excessive question marks."
 )
 
+# Additional formatting guidance (helps ensure responses render correctly in the UI)
+SHARED_SYSTEM_PROMPT += (
+    "\n\nMANDATORY FORMATTING RULES: "
+    "Return the final answer as Markdown. "
+    "Start with the main answer as plain text (no heading). "
+    "After the main answer include a single blank line, then a bulleted list of optional suggestions (use '-' or '*') or the single word 'None' — do NOT add any heading or label before this list. "
+    "Then include another blank line, followed by a bulleted list of suggested follow-up questions (or the single word 'None') — do NOT add any heading or label before this list. "
+    "Preserve newlines and bullets exactly as you present them. "
+    "Do not include raw knowledge-base documents, IDs, or internal metadata in the user-facing response."
+)
+
 
 def follow_up_prompt(prompt_text: str) -> dict:
     return {
@@ -52,12 +63,26 @@ Generate exactly one natural and helpful follow-up question.
 
 
 def final_response_prompt(prompt_context: str, conversation_summary: Optional[str]) -> str:
-    return f"""Based on our conversation, provide a precise response that directly addresses the user’s needs and incorporates all relevant context.
+    return f"""
+Based on the conversation so far, write a clear and direct answer that fully addresses the user’s question using only relevant context.
 
-Original Context: {prompt_context}  
-Full Conversation: {conversation_summary}  
+    Output format (strict):
+    - Start immediately with the main answer text (no headings, disclaimers, or boilerplate).
+    - After the main answer, include one blank line and then a bulleted list of optional suggestions (use '-' or '*'); do NOT include a heading or label before the list.
+    - After the suggestions list, include exactly one blank line and then a bulleted list of suggested follow-up questions (user-focused next-step questions); do NOT include a heading or label before the list.
 
-Provide a clear summary addressing the original question, include relevant insights from the chat context, offer actionable recommendations or next steps, and keep the response practical and concise.
+Additional rules:
+- Keep the main answer concise, conversational, and user-friendly.
+- If the query is irrelevant to the context, respond with: "I'm sorry, but I couldn't find relevant information for your query. Could you clarify or provide more details?"
+- Do not expose raw knowledge-base content, vector IDs, or internal debugging info.
+- Follow-up questions must be phrased as helpful next-step questions for the user, not questions about Ditstek or its internal processes.
+- Preserve blank lines and bullet characters exactly as specified.
+
+Context (only use what’s relevant):
+{prompt_context}
+
+Full conversation (for reference):
+{conversation_summary}
 """
 
 
@@ -73,8 +98,9 @@ Evaluation Criteria:
 1. Can we understand the main points of what the user wants?
 2. Do we have enough context to provide a helpful response?
 3. Can we offer actionable guidance based on what we know?
+4. Is the query relevant to the provided context?
 
-Respond with ONLY: COMPLETE or CONTINUE
+Respond with ONLY: COMPLETE, CONTINUE, or IRRELEVANT
 """
 
 
@@ -87,7 +113,9 @@ Additional Context: {context}
 Recent Conversation:  
 {conversation_summary}  
 
+Add one newline before the suggestion.
 Provide exactly one suggestion in 1–2 sentences.
+Add one newline after the suggestion.
 """
 
 
@@ -142,6 +170,9 @@ Your task:
 2. Generate {followup_count} natural follow-up questions.
 3. Include practical suggestions considering the conversation history.
 4. Explore areas: {category_names}
+5. Add one newline before the followup.
+6. Add one newline after the followup.
+
 
 Output format: JSON only
 """
@@ -160,6 +191,8 @@ Initial context:
 Latest user message:
 {latest_query}
 
+Add one newline before the followup.
+Add one newline after the followup.
 Generate ONE natural follow-up question to advance the conversation.
 """
 
