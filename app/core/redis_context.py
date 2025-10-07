@@ -4,31 +4,36 @@ from app.db.redis_vector_helper import similarity_search
 
 logger = logging.getLogger("chatbot")
 
-def get_redis_context_chunks(session_id: str, query: str, conversation_history: List[Dict[str, Any]], top_n: int = 6) -> List[str]:
+def get_redis_context_chunks(session_id: str, query: str, conversation_history: List[Dict[str, Any]], top_n: int = 4) -> List[str]:
     """
-    Retrieve context chunks from Redis using the latest query and conversation history.
-    Returns a list of text chunks (strings) for LLM context.
+    Retrieve context chunks from Redis using semantic search, prioritizing Ditstek-specific content.
+    Returns deduplicated, relevant chunks from the knowledge base.
     """
-    # Combine latest query and recent conversation for richer context
-    # (You can tune this logic as needed)
-    search_query = query
+    # Extract key terms for better context matching
+    key_terms = ["ditstek", "healthcare", "development", "software", "tech stack", "case study", "portfolio"]
+    search_terms = query.lower()
+    
+    # Add domain-specific context if relevant
+    if any(term in search_terms for term in key_terms):
+        search_query = f"ditstek {query} technical details case studies"
+    else:
+        search_query = f"ditstek capabilities {query}"
+    
+    # Get most recent relevant user query for context
     if conversation_history:
-        # Accept both list[dict] (with 'content') and list[tuple](role, content)
-        last_msgs = []
-        for item in conversation_history[-3:]:
+        for item in reversed(conversation_history[-2:]):  # Only last 2 messages
             try:
-                if isinstance(item, dict):
-                    c = item.get("content")
-                elif isinstance(item, (list, tuple)) and len(item) >= 2:
-                    # role, message_text
-                    c = item[1]
-                else:
-                    c = None
-                if c and isinstance(c, str) and c.strip():
-                    last_msgs.append(c.strip())
+                if isinstance(item, dict) and item.get("role") == "user":
+                    content = item.get("content")
+                    if content and any(term in content.lower() for term in key_terms):
+                        search_query = f"{search_query} {content.strip()}"
+                        break  # Only get the most relevant recent message
             except Exception:
                 continue
-        search_query = " ".join(last_msgs + [query])
+    
+    # Perform similarity search with enhanced query
+    logger.info(f"[RedisContext] Enhanced search query: {search_query}")
+    results = similarity_search(session_id, search_query, top_n=top_n)
     
     results = similarity_search(session_id, search_query, top_n=top_n)
 
@@ -36,20 +41,33 @@ def get_redis_context_chunks(session_id: str, query: str, conversation_history: 
         logger.info("[RedisContext] No context retrieved from Redis.")
         return []
 
-    # Expect standardized list[dict] from similarity_search with keys: response, query, query_embedding, timestamp, similarity
+    # Process and deduplicate results, prioritizing high-quality content
+    seen_content = set()
     normalized: List[str] = []
-    previews: List[str] = []
-    for idx, item in enumerate(results):
+    
+    for item in results:
         if not isinstance(item, dict):
-            logger.debug(f"[RedisContext] Skipping non-dict item at index {idx}: {type(item)}")
             continue
-        text = item.get("response") or item.get("text") or item.get("query") or ""
-        if text and isinstance(text, str) and text.strip():
-            normalized.append(text.strip())
-            previews.append(text.strip()[:100])
+            
+        # Get content with fallbacks
+        text = (item.get("response") or item.get("text") or item.get("query") or "").strip()
+        
+        # Skip if empty or already seen
+        if not text or text.lower() in seen_content:
+            continue
+            
+        # Prioritize content with Ditstek-specific information
+        if any(term in text.lower() for term in key_terms):
+            normalized.insert(0, text)  # Add to front
+        else:
+            normalized.append(text)  # Add to back
+            
+        seen_content.add(text.lower())
+        
+    # Log preview of selected context
+    if normalized:
+        logger.info(f"[RedisContext] Selected {len(normalized)} relevant context chunks")
+        logger.debug(f"[RedisContext] First chunk preview: {normalized[0][:100]}")
 
     logger.info(f"[RedisContext] Retrieved {len(normalized)} context items (top_n={top_n})")
-    if previews:
-        logger.info(f"[RedisContext] Retrieved context preview (first 100 chars each): {' | '.join(previews)}")
-
     return normalized

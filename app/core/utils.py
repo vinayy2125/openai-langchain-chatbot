@@ -81,39 +81,34 @@ def generate_llm_response(prompt):
             raw_preview = "<<unserializable response>>"
         logger.info("LLM returned object type=%s; preview=%s", type(response).__name__, raw_preview)
 
-        # Best-effort server-side diagnostic JSON write so we can inspect the exact
-        # object shape seen inside the running server process. This is append-only
-        # and should never raise (we swallow exceptions).
-        try:
-            import json
-            diag = {
-                "ts": datetime.utcnow().isoformat(),
-                "type": type(response).__name__,
-                "repr_preview": raw_preview
-            }
-            with open(r"d:/Chatbot/logs/llm_server_diag.json", "a", encoding="utf-8") as f:
-                f.write(json.dumps(diag, ensure_ascii=False) + "\n")
-        except Exception:
-            logger.debug("Failed to write llm_server_diag.json; continuing without diagnostics")
+        # We still keep an in-memory preview in the normal logs for debugging.
+        logger.debug("LLM raw preview stored in memory (no on-disk diag)")
 
-        # If the response is empty or None, also write a small diagnostic file for analysis
+        # Extract text (duck-typed): prefer .content, then dict-like get, else str()
+        result = None
         try:
-            if response is None or (isinstance(response, (str, bytes)) and not str(response).strip()):
-                with open("d:/Chatbot/logs/llm_diag.log", "a", encoding="utf-8") as diag:
-                    diag.write(f"{datetime.utcnow().isoformat()} - EMPTY_RESPONSE - type={type(response).__name__} repr={repr(response)[:1000]}\n")
+            if hasattr(response, "content"):
+                result = response.content
+            else:
+                # dict-like access
+                get = getattr(response, "get", None)
+                if callable(get):
+                    result = get("content")
+                else:
+                    result = str(response)
         except Exception:
-            # Best-effort; don't break execution
-            logger.debug("Failed to write llm_diag.log")
-
-        # Extract text
-        if hasattr(response, "content"):
-            result = response.content
-        elif isinstance(response, dict) and "content" in response:
-            result = response.get("content")
-        else:
             result = str(response)
 
-        result_text = result.strip() if isinstance(result, str) else str(result)
+        result_text = None
+        if result is None:
+            result_text = None
+        elif isinstance(result, (str, bytes)):
+            result_text = str(result).strip()
+        else:
+            try:
+                result_text = str(result).strip()
+            except Exception:
+                result_text = None
         if not result_text:
             logger.warning("LLM returned empty or whitespace-only content")
             return None
@@ -125,3 +120,6 @@ def generate_llm_response(prompt):
         logger.exception("Error during LLM invocation: %s", exc)
         logger.error("Messages that caused the error: %s", (messages if messages is not None else "<none>"))
         return None
+
+
+

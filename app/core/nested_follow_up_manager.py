@@ -3,7 +3,6 @@ import logging
 from app.core.services.chatbot_optimizer import OptimizedChatbot
 from app.core.utils import generate_llm_response  # Import from utils package
 from app.core.prompts import SHARED_SYSTEM_PROMPT, assesment_prompt, dynamic_follow_up, final_response_prompt, suggestion_prompts
-from app.core.utils import sanitize_context, classify_query
 
 logger = logging.getLogger(__name__)
 
@@ -116,28 +115,8 @@ class FollowUpManager:
 
 		# Build a comprehensive prompt for final response
 		conversation_summary = self.format_conversation_history(conversation_history)
-
-		# Classify most recent user message to handle chit-chat or irrelevant queries
-		latest_user = ""
-		for msg in reversed(conversation_history):
-			if msg.get("role") == "user":
-				latest_user = msg.get("content", "")
-				break
-
-		q_type = classify_query(latest_user)
-
-		if q_type == "CHITCHAT":
-			# For chit-chat, keep it conversational and avoid exposing KB.
-			chat_prompt = f"You are a friendly assistant. Reply briefly and conversationally to: {latest_user}"
-			messages = [{"role": "system", "content": SHARED_SYSTEM_PROMPT}, {"role": "user", "content": chat_prompt}]
-		elif q_type in ("TYPO",):
-			clarify = "It looks like your last message might be a typo or incomplete. Could you clarify what you meant or what you'd like me to do next?"
-			messages = [{"role": "system", "content": SHARED_SYSTEM_PROMPT}, {"role": "user", "content": clarify}]
-		else:
-			# KB_RELATED or OUTSIDE_KB or UNKNOWN -> sanitize and use final_response_prompt
-			safe_context = sanitize_context(prompt_context)
-			comprehensive_prompt = final_response_prompt(conversation_summary=conversation_summary, prompt_context=safe_context)
-			messages = [{"role": "system", "content": SHARED_SYSTEM_PROMPT}, {"role": "user", "content": comprehensive_prompt}]
+		comprehensive_prompt = final_response_prompt(conversation_summary=conversation_summary, prompt_context=prompt_context)
+		messages = [{"role": "system", "content": SHARED_SYSTEM_PROMPT}, {"role": "user", "content": comprehensive_prompt}]
 
 		try:
 			logger.info("Calling LLM for comprehensive response (generate_comprehensive_response)")
