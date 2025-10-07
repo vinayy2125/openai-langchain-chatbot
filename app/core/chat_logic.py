@@ -96,7 +96,17 @@ async def build_chatbot_response(
 
             # Normalize many possible return shapes into a safe string
             if raw_comp is None:
-                comprehensive_response = ""
+                from app.core.fallback_handler import get_smart_fallback
+                context_chunks = get_redis_context_chunks(
+                    session_id, 
+                    latest_query, 
+                    conversation_history or []
+                )
+                comprehensive_response = get_smart_fallback(
+                    latest_query,
+                    context_chunks=context_chunks,
+                    conversation_history=conversation_history
+                )
             elif isinstance(raw_comp, str):
                 comprehensive_response = raw_comp
             elif isinstance(raw_comp, dict):
@@ -162,9 +172,15 @@ async def build_chatbot_response(
                         line = line.strip()
                     current_section.append(line)
 
-            # Send any remaining content
+            # Format and send remaining content
             if current_section:
-                yield {"status": "complete_chunk", "chunk": "\n".join(current_section)}
+                from app.core.response_formatter import format_response
+                formatted_content = format_response(
+                    "\n".join(current_section),
+                    latest_query,
+                    conversation_history
+                )
+                yield {"status": "complete_chunk", "chunk": formatted_content}
 
             # Add spacing and final suggestions
             yield {
