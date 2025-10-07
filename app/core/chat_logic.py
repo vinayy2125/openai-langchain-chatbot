@@ -79,13 +79,56 @@ async def build_chatbot_response(
         requirements_complete = follow_up_manager.check_requirements(session_id)
 
         if requirements_complete:
-            # Generate comprehensive final response
             logger.info(
                 f"Requirements complete for session {session_id}, generating comprehensive response"
             )
-            comprehensive_response = follow_up_manager.generate_comprehensive_response(
-                session_id
+
+            # Call and normalize the comprehensive response safely.
+            try:
+                raw_comp = follow_up_manager.generate_comprehensive_response(
+                    session_id
+                )
+            except Exception as exc:
+                logger.exception(
+                    "[ChatLogic] generate_comprehensive_response raised; using fallback"
+                )
+                raw_comp = None
+
+            # Normalize many possible return shapes into a safe string
+            if raw_comp is None:
+                comprehensive_response = ""
+            elif isinstance(raw_comp, str):
+                comprehensive_response = raw_comp
+            elif isinstance(raw_comp, dict):
+                # common shapes: {"content": "..."} or {"chunk": "..."}
+                comprehensive_response = (
+                    raw_comp.get("content")
+                    or raw_comp.get("chunk")
+                    or raw_comp.get("text")
+                    or json.dumps(raw_comp)
+                )
+            else:
+                # object-like (AIMessage etc.) — prefer .content, .text, fallback to str()
+                comprehensive_response = (
+                    getattr(raw_comp, "content", None)
+                    or getattr(raw_comp, "text", None)
+                    or str(raw_comp)
+                )
+
+            comprehensive_response = (comprehensive_response or "").strip()
+            logger.info(
+                f"[ChatLogic] Normalized comprehensive_response len={len(comprehensive_response)} preview={comprehensive_response[:300]!r}"
             )
+
+            # Guarantee at least one user-visible chunk so SSE doesn't stall
+            if not comprehensive_response:
+                comprehensive_response = (
+                    "I'm sorry —. "
+                    "Could you provide more details or rephrase your question?"
+                )
+                logger.warning(
+                    "[ChatLogic] Using fallback comprehensive_response for session %s", session_id
+                )
 
             # Format and stream the response in a concise, structured way
             # Process the response to ensure proper markdown formatting and structure
@@ -317,9 +360,9 @@ async def build_chatbot_response(
                         else:
                             current_section.append(line)
 
-            # Send any remaining content
+            # Send any remaining content (preserve newlines)
             if current_section:
-                section_text = " ".join(current_section)
+                section_text = "\n".join(current_section)
                 yield {"status": "complete_chunk", "chunk": section_text}
 
             # Add spacing after main response (no separator lines)
@@ -375,7 +418,7 @@ async def build_chatbot_response(
                         )
                     yield {
                         "status": "suggestions",
-                        "chunk": f"- {clean_suggestion.strip()}",
+                        "chunk": f"\n- {clean_suggestion.strip()}\n",
                     }
                 else:
                     yield {
@@ -414,7 +457,7 @@ async def build_chatbot_response(
 
                     yield {
                         "status": "followup",
-                        "chunk": f"- {clean_followup.strip()}?",
+                        "chunk": f"\n- {clean_followup.strip()}?\n",
                     }
                 else:
                     # Context-aware fallback follow-up
@@ -425,7 +468,7 @@ async def build_chatbot_response(
                     ):
                         yield {
                             "status": "followup",
-                            "chunk": "- What specific features or functionalities are most important for your app?",
+                            "chunk": "\n- What specific features or functionalities are most important for your app?\n",
                         }
                     elif any(
                         word in context_keywords
@@ -433,7 +476,7 @@ async def build_chatbot_response(
                     ):
                         yield {
                             "status": "followup",
-                            "chunk": "- What type of AI functionality do you envision for your project?",
+                            "chunk": "\n- What type of AI functionality do you envision for your project?\n",
                         }
                     elif any(
                         word in context_keywords
@@ -441,28 +484,26 @@ async def build_chatbot_response(
                     ):
                         yield {
                             "status": "followup",
-                            "chunk": "- What's the main purpose of your website - e-commerce, corporate, or service-based?",
+                            "chunk": "\n- What's the main purpose of your website - e-commerce, corporate, or service-based?\n",
                         }
                     else:
                         yield {
                             "status": "followup",
-                            "chunk": "- What specific aspects would you like to explore further?",
+                            "chunk": "\n- What specific aspects would you like to explore further?\n",
                         }
             except Exception as e:
                 logger.error(f"Error generating follow-ups: {e}")
                 # Fallback with generic suggestion and follow-up
                 yield {
                     "status": "suggestion",
-                    "chunk": "- Consider **implementing** a basic prototype to test core functionality",
+                    "chunk": "\n- Consider **implementing** a basic prototype to test core functionality\n",
                 }
                 yield {"status": "separator", "chunk": "\n\n"}
                 yield {
                     "status": "followup",
-                    "chunk": "- What specific features are most important to you?",
+                    "chunk": "\n- What specific features are most important to you?\n",
                 }
 
     except Exception as e:
         yield {"status": "error", "message": str(e)}
-
-
-# Removed legacy fallback/prompt response helpers (dead code)
+        
