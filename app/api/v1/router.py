@@ -84,33 +84,55 @@ async def register_user(user: UserCreate):
         if conn:
             conn.close()
 
-
 # Message History Route
 @router.get("/chat/{session_id}/messages", response_model=HistoryResponse)
 async def get_chat_messages(session_id: str):
     """Get all messages for a chat session."""
     try:
         messages = await get_messages_for_session(session_id)
-        if not messages:
-            raise HTTPException(
-                status_code=404, detail="No messages found for this session"
-            )
-
+        
         formatted_messages = []
-        for role, msg, ts in messages:
-            formatted_messages.append(
-                {
-                    "role": role,
-                    "message": msg,
-                    "timestamp": ts.isoformat() if ts else None,
-                }
+        
+        # Get session's current prompt to show at top
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT current_prompt_id FROM sessions WHERE session_id = %s",
+                (session_id,)
             )
+            result = cursor.fetchone()
+            if result and result[0]:
+                cursor.execute(
+                    "SELECT prompt_text, response_text FROM prompts WHERE id = %s",
+                    (result[0],)
+                )
+                prompt_data = cursor.fetchone()
+                if prompt_data:
+                    formatted_messages.append({
+                        "role": "bot",
+                        "message": prompt_data[1] or prompt_data[0],
+                        "timestamp": None,
+                    })
+        finally:
+            cursor.close()
+            conn.close()
+        
+        # Add chat messages
+        if messages:
+            for message in messages:
+                formatted_messages.append(
+                    {
+                        "role": "bot" if message.role == "assistant" else message.role,
+                        "message": message.content,
+                        "timestamp": message.created_at.isoformat() if message.created_at else None,
+                    }
+                )
+        
         return HistoryResponse(session_id=session_id, messages=formatted_messages)
-    except HTTPException as he:
-        raise he
     except Exception as e:
         logger.error(f"Error retrieving chat messages: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error retrieving chat messages")
+        return HistoryResponse(session_id=session_id, messages=[])
 
 
 # Health Check Route

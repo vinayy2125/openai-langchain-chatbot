@@ -352,6 +352,7 @@ async def send_message_stream(
 
                 # Reuse streaming follow-up generator with context switch & suggestions
                 sent_chunks = set()
+                complete_response = ""
                 async for evt in build_chatbot_response(
                     session_id=session_id,
                     follow_up_manager=follow_up_manager,
@@ -376,12 +377,28 @@ async def send_message_stream(
                         continue
                     sent_chunks.add(chunk_norm)
 
+                    # Collect response content for saving
+                    if status in ["chunk", "complete_chunk"] and chunk_norm:
+                        complete_response += chunk_norm + " "
+
                     # Persist embeddings for completed chunks if applicable
                     if status == "complete_chunk":
                         logger.info(f"========== chunk ========== {chunk_norm}")
 
                     # Send the normalized chunk
                     yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
+                
+                # Save complete response to database
+                if complete_response.strip():
+                    await save_message(
+                        MessageCreate(
+                            content=complete_response.strip(),
+                            role="assistant",
+                            session_id=session_id,
+                            reply_to=None,
+                            follow_up_to=None,
+                        )
+                    )
 
             return StreamingResponse(
                 stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS
@@ -399,6 +416,7 @@ async def send_message_stream(
             ) + "\n\n"
 
             sent_chunks = set()
+            complete_response = ""
             async for evt in build_chatbot_response(
                 session_id=session_id,
                 follow_up_manager=follow_up_manager,
@@ -422,8 +440,24 @@ async def send_message_stream(
                     continue
                 sent_chunks.add(chunk_norm)
 
+                # Collect response content for saving
+                if status in ["chunk", "complete_chunk"] and chunk_norm:
+                    complete_response += chunk_norm + " "
+
                 logger.debug(f"[SSE] Sending chunk status={status} preview='{chunk_norm[:80]}'")
                 yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
+            
+            # Save complete response to database
+            if complete_response.strip():
+                await save_message(
+                    MessageCreate(
+                        content=complete_response.strip(),
+                        role="assistant",
+                        session_id=session_id,
+                        reply_to=None,
+                        follow_up_to=None,
+                    )
+                )
         
         
         return StreamingResponse(
