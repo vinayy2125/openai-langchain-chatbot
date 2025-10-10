@@ -170,8 +170,13 @@ def load_scraped_data(file_path: str | Path) -> Dict[str, Any]:
 
 def flatten_chunks(scraped_data: Dict[str, Any]) -> List[str]:
     chunks = []
-    for page in scraped_data.get("pages", []):
-        chunks.extend(page.get("chunks", []))
+    if "pages" in scraped_data and isinstance(scraped_data.get("pages"), list):
+        for page in scraped_data.get("pages", []):
+            chunks.extend(page.get("chunks", []))
+    elif "chunks" in scraped_data:
+        chunks = scraped_data.get("chunks", [])
+    else:
+        logger.warning("⚠️ No 'pages' or 'chunks' key found in scraped data.")
     logger.info(f"✂️ Extracted {len(chunks)} chunks from scraped data.")
     return chunks
 
