@@ -7,24 +7,13 @@ import logging
 import psycopg2
 from fastapi import HTTPException, Depends
 from app.api.deps import get_follow_up_manager
-from app.core.services.thread_router import (
-    ChatRouter,
-    detect_company_intent,
-    handle_company_query,
-)
-from app.core.prompts import follow_up_prompt
-from app.core.nested_follow_up_manager import FollowUpManager
-
+from app.core.services.thread_router import ChatRouter
+from app.core.chat_logic import build_chatbot_response
 from app.api.v1.models import (
-    SessionState,
-    FollowUp,
-    FollowUpType,
     MessageCreate,
     Message,
-    StreamingChatResponse,
     SentMessage,
 )
-from app.db import redis_operations as redis_crud
 
 
 logger = logging.getLogger(__name__)
@@ -187,7 +176,7 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
             WHERE m.session_id = %s
             ORDER BY m.created_at ASC
         """,
-            (session_id,),
+            (str(session_id),),
         )
 
         messages = []
@@ -211,30 +200,6 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
         cursor.close()
         conn.close()
 
-
-async def generate_follow_up(
-    prompt_text: str, conversation_history: list, llm
-) -> FollowUp:
-    """Generate a follow-up question using LLM."""
-    messages = [
-        follow_up_prompt(prompt_text=prompt_text)
-    ]
-
-    follow_up_response = ""
-    async for chunk in llm.stream(messages):
-        if chunk:
-            follow_up_response += chunk
-
-    try:
-        follow_up_data = json.loads(follow_up_response)
-        return FollowUp(**follow_up_data)
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Error parsing follow-up response: {str(e)}")
-        return FollowUp(
-            type=FollowUpType.EXPANSION,
-            question="Could you provide more details about your requirements?",
-            context="Ensuring we understand your needs correctly",
-        )
 
 
 async def send_message_stream(
@@ -342,7 +307,7 @@ async def send_message_stream(
         if not follow_up_manager.check_requirements(session_id):
 
             async def stream_follow_up():
-                from app.core.chat_logic import build_chatbot_response
+                
 
                 
                 # Add the `data:` prefix to the JSON-encoded string
@@ -389,7 +354,7 @@ async def send_message_stream(
         
         # --- Requirements captured: full response streaming ---
         async def generate_full_response_stream():
-            from app.core.chat_logic import build_chatbot_response
+            
 
             yield "data: " + json.dumps(
                 {

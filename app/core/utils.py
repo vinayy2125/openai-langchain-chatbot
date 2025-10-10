@@ -3,7 +3,6 @@ from langchain_openai import ChatOpenAI
 from app.core.prompts import SHARED_SYSTEM_PROMPT
 import logging
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 

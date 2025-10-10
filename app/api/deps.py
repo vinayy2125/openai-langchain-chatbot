@@ -1,5 +1,4 @@
 from typing import Optional
-
 from app.core.nested_follow_up_manager import FollowUpManager
 from app.core.llm_client import llm
 
