@@ -1,7 +1,8 @@
 from typing import Any, List, Dict, Optional
 import logging
 from app.core.services.chatbot_optimizer import OptimizedChatbot
-from app.core.utils import generate_llm_response  # Import from utils package
+from app.core.prompts import SHARED_SYSTEM_PROMPT
+from app.core.utils import generate_llm_response  
 from app.core.prompts import SHARED_SYSTEM_PROMPT, assesment_prompt, dynamic_follow_up, final_response_prompt, suggestion_prompts
 
 logger = logging.getLogger(__name__)
@@ -78,8 +79,6 @@ class FollowUpManager:
 			)
 
 			assessment_prompt = assesment_prompt(recent_conversation=recent_conversation, prompt_context=prompt_context)
-
-			from app.core.prompts import SHARED_SYSTEM_PROMPT
 
 			messages = [
 				{"role": "system", "content": SHARED_SYSTEM_PROMPT},
@@ -214,7 +213,7 @@ class FollowUpManager:
 
 		try:
 			response = generate_llm_response(messages)
-			logger.debug(f"[generate_follow_ups] Generated follow-ups: ")
+			logger.debug("[generate_follow_ups] Generated follow-ups: ")
 			if not isinstance(response, str):
 				return [response] if response else ["Could you provide more details?"]
 			return [line.strip() for line in response.split("\n") if line.strip()]

@@ -4,38 +4,12 @@ import logging
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from app.core.prompts import enhanced_query_prompt, enhanced_query_prompt_no_context
 from app.core.redis_context import get_redis_context_chunks
+from app.core.fallback_handler import get_smart_fallback
+from app.core.response_formatter import format_response
 
 # Initialize logger
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-
-
-# Utility helpers (restored minimal versions for optimizer imports)
-def _maybe_expand_queries(query: str) -> list:
-    """Return lightweight expanded query variants (deduplicated)."""
-    variants = [query, f"Details about {query}", f"In-depth explanation of {query}"]
-    # Preserve order while deduping
-    seen = set()
-    deduped = []
-    for v in variants:
-        if v and v not in seen:
-            seen.add(v)
-            deduped.append(v)
-    return deduped
-
-
-def _dedupe_chunks(docs) -> list:
-    """Simplify dedupe: accepts list of doc objects or strings, returns list of (text, meta)."""
-    seen = set()
-    result = []
-    for d in docs:
-        text = getattr(d, "page_content", str(d)).strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        meta = getattr(d, "metadata", {}) if hasattr(d, "metadata") else {}
-        result.append((text, meta))
-    return result
 
 
 async def build_chatbot_response(
@@ -96,7 +70,6 @@ async def build_chatbot_response(
 
             # Normalize many possible return shapes into a safe string
             if raw_comp is None:
-                from app.core.fallback_handler import get_smart_fallback
                 context_chunks = get_redis_context_chunks(
                     session_id, 
                     latest_query, 
@@ -104,8 +77,7 @@ async def build_chatbot_response(
                 )
                 comprehensive_response = get_smart_fallback(
                     latest_query,
-                    context_chunks=context_chunks,
-                    conversation_history=conversation_history
+                    context_chunks=context_chunks
                 )
             elif isinstance(raw_comp, str):
                 comprehensive_response = raw_comp
@@ -174,7 +146,7 @@ async def build_chatbot_response(
 
             # Format and send remaining content
             if current_section:
-                from app.core.response_formatter import format_response
+                
                 formatted_content = format_response(
                     "\n".join(current_section),
                     latest_query,
@@ -283,7 +255,6 @@ async def build_chatbot_response(
                 prompt_context is not None and len(assistant_messages) == 0
             )
             is_manual_query = prompt_context is None and len(assistant_messages) == 0
-            is_followup_response = len(assistant_messages) > 0
 
             # FIX: Unified prompt instruction with smart context awareness
             # Always use Redis for context retrieval
