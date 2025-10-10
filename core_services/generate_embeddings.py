@@ -1,10 +1,32 @@
 # core_services\generate_embeddings.py
+# core_services\generate_embeddings.py
+
+import os
+import logging
+from typing import List, Optional
+import numpy as np
 from sentence_transformers import SentenceTransformer
 from app.db import redis_operations as redis_crud
 
-# Download from the 🤗 Hub
-model = SentenceTransformer("google/embeddinggemma-300m")
+logger = logging.getLogger(__name__)
 
+# Download from the 🤗 Hub
+HF_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+
+if HF_API_KEY:
+    # Use the supported login mechanism from huggingface_hub if available to avoid
+    # the deprecated `use_auth_token` kwarg on SentenceTransformer.
+    try:
+        from huggingface_hub import login as hf_login
+
+        hf_login(token=HF_API_KEY)
+        logger.info("Logged in to Hugging Face hub using HUGGINGFACE_API_KEY")
+    except Exception:
+        logger.debug("Could not use huggingface_hub.login; falling back to passing token to model")
+
+    model = SentenceTransformer("google/embeddinggemma-300m")
+else:
+    model = SentenceTransformer("google/embeddinggemma-300m")
 # Run inference with queries and documents
 query = "Which planet is known as the Red Planet?"
 documents = [
@@ -15,21 +37,40 @@ documents = [
 ]
 query_embeddings = model.encode_query(query)
 document_embeddings = model.encode_document(documents)
-print(query_embeddings.shape, document_embeddings.shape) # type: ignore
-# (768,) (4, 768)
+logger.info("Embedding shapes: %s %s", getattr(query_embeddings, 'shape', None), getattr(document_embeddings, 'shape', None))
 
 # Compute similarities to determine a ranking
-similarities = model.similarity(query_embeddings, document_embeddings) # type: ignore
-print(similarities)
-# tensor([[0.3011, 0.6359, 0.4930, 0.4889]])
+try:
+    similarities = model.similarity(query_embeddings, document_embeddings)  # type: ignore
+    logger.info("Similarity preview: %s", similarities)
+except Exception:
+    logger.debug("Model does not expose `similarity` helper; skipping similarity demo")
 
 
-def get_embedding(text: str) -> list[float]:
-    """Get embedding vector for a given text using the loaded model."""
+def get_embedding(text: str) -> List[float]:
+    """Get embedding vector for a given text using the loaded model.
+
+    Returns a plain Python list[float] no matter what the model returns (numpy/torch/etc.).
+    """
     emb = model.encode_query(text)
-    return emb.tolist()
+    # Convert to a list of floats robustly
+    try:
+        # numpy arrays and torch tensors expose .tolist()
+        if hasattr(emb, "tolist"):
+            out = emb.tolist()
+        else:
+            out = list(emb)
+    except Exception:
+        try:
+            out = list(np.asarray(emb).reshape(-1).astype(float).tolist())
+        except Exception:
+            # Last resort: coerce to string split (unlikely)
+            out = [float(x) for x in str(emb).strip('[]()').split() if x.replace('.', '', 1).lstrip('-').isdigit()]
 
-def generate_and_store_embedding(r, text: str, metadata: dict = None) -> str:
+    # Ensure all elements are floats
+    return [float(x) for x in out]
+
+def generate_and_store_embedding(r, text: str, metadata: Optional[dict] = None) -> str:
     """Generate embedding for the given text and store it in Redis with optional metadata.
 
     Args:
