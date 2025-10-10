@@ -9,7 +9,6 @@ from app.core.response_formatter import format_response
 
 # Initialize logger
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 
 async def build_chatbot_response(
@@ -262,8 +261,14 @@ async def build_chatbot_response(
                 session_id=session_id,
                 query=latest_query,
                 conversation_history=conversation_history or [],
-                top_n=6
+                top_n=6,
             )
+            # Log retrieved context (short preview) for each query to help debugging
+            try:
+                preview_items = [c[:300] for c in context_chunks[:6]]
+                logger.debug("[ChatLogic] Retrieved context chunks preview: %s", preview_items)
+            except Exception:
+                logger.debug("[ChatLogic] Retrieved context chunks but failed to produce preview")
             context_text = "\n".join(context_chunks)
             if is_prompt_selection or is_manual_query:
                 enhanced_query = enhanced_query_prompt(context_text=context_text, latest_query=latest_query)
