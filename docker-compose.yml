@@ -26,7 +26,24 @@ services:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+  
+  redis:
+      image: redis/redis-stack:latest
+      ports:
+        - "6379:6379"
+      environment:
+        - REDIS_ARGS=--requirepass Ditstek12345 --bind 0.0.0.0 --protected-mode yes
+      volumes:
+        - redis_data:/data
+      healthcheck:
+        test: ["CMD", "redis-cli", "-a", "Ditstek12345", "ping"]
+        interval: 30s
+        timeout: 10s
+        retries: 5
+      restart: always
 
 volumes:
   postgres_data:
+    driver: local
+  redis_data:
     driver: local
