@@ -1,7 +1,7 @@
 import re
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 
-def get_smart_fallback(query: str, context_chunks: Optional[List[str]] = None, conversation_history: Optional[List[Dict[str, Any]]] = None) -> str:
+def get_smart_fallback(query: str, context_chunks: Optional[List[str]] = None) -> str:
     """
     Generate smart fallback responses when exact information isn't available.
     Uses partial matches and related information to provide helpful responses.
