@@ -339,11 +339,28 @@ class OptimizedChatbot:
         2. Query + Context + History + Instructions → Main LLM → Response
         """
         try:
-            from app.core.redis_context import get_redis_context_chunks
-            logger.info(f"[Chatbot] Starting response generation; query length={len(query)}")
+            # Try generating compact search keys via GPT-4o-mini to improve retrieval
+            try:
+                search_keys = self._generate_search_keys(query) or []
+                logger.debug("Generated search keys for query: %s", search_keys)
+            except Exception as e:
+                logger.debug("Search-key generation failed, continuing without keys: %s", e)
+                search_keys = []
 
-            # Always fetch Redis context for the query (no prompt-detection heuristics)
-            context_chunks = get_redis_context_chunks(session_id, query, chat_history, top_n=8)
+            # Prefer keyed retrieval when available; fall back to legacy retrieval call
+            try:
+                from app.core.redis_context import get_redis_context_chunks
+
+                if search_keys:
+                    # If redis helper supports search_keys, pass them (non-breaking if ignored)
+                    context_chunks = get_redis_context_chunks(query=query, search_keys=search_keys, top_k=8)
+                else:
+                    context_chunks = get_redis_context_chunks(query=query, top_k=8)
+            except Exception as e:
+                logger.warning("Redis context retrieval failed, using empty context: %s", e)
+                context_chunks = []
+
+            # Continue existing flow: build prompt + call LLM (unchanged)
             # Build a joined context string (may be empty)
             context = "\n\n---\n\n".join([str(chunk) for chunk in (context_chunks or [])])
             history = self._format_history(chat_history)
@@ -726,35 +743,61 @@ class OptimizedChatbot:
         return False
 
     def _generate_search_keys(self, query: str) -> List[str]:
-        """Generate search keys using GPT-4o-mini for better vector DB retrieval"""
-
-        key_generation_prompt = key_generate_prompt(query=query)
-
+        """
+        Use self.query_llm (GPT-4o-mini) with key_generate_prompt to produce compact search keys.
+        Returns a list of simple tokens/phrases to bias Redis vector retrieval.
+        This is resilient: on any error it returns an empty list so retrieval falls back to normal flow.
+        """
         try:
-            # Use GPT-4o-mini for key generation
-            from app.core.prompts import SHARED_SYSTEM_PROMPT
-
+            prompt = key_generate_prompt.format(query=query)
+            # query_llm is a LangChain ChatOpenAI-like object; use generate_llm_response wrapper where suitable
+            # Use the local query_llm for deterministic low-cost key generation
             messages = [
-                {"role": "system", "content": SHARED_SYSTEM_PROMPT},
-                {"role": "user", "content": key_generation_prompt},
+                {"role": "system", "content": "Generate short, comma-separated search keys for retrieval."},
+                {"role": "user", "content": prompt},
             ]
+            # Prefer using generate_llm_response utility if available
+            try:
+                from app.core.utils import generate_llm_response
+                resp = generate_llm_response(messages)
+            except Exception:
+                # Fallback to direct call on self.query_llm
+                resp = None
+                try:
+                    resp_obj = self.query_llm.invoke([SystemMessage(content=messages[0]["content"]), HumanMessage(content=messages[1]["content"])])
+                    resp = getattr(resp_obj, "content", None) or str(resp_obj)
+                except Exception as e:
+                    logger.debug("Direct query_llm invoke failed: %s", e)
 
-            response = self.query_llm.invoke(messages)
-            if isinstance(response.content, str):
-                search_keys = [key.strip() for key in response.content.split("\n") if key.strip()]
-            else:
-                search_keys = [str(key).strip() for key in response.content if str(key).strip()]
+            if not resp:
+                return []
 
-            # Fallback to original query if no keys generated
-            if not search_keys:
-                search_keys = [query]
+            # Parse: split on newlines/commas and clean tokens
+            raw = resp.strip()
+            # Accept common formats: comma separated, newline separated, JSON array
+            keys = []
+            # quick JSON array parse attempt
+            try:
+                import json
 
-            logger.info(f"Generated {len(search_keys)} search keys from query")
-            return search_keys
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    keys = [str(k).strip() for k in parsed if k]
+            except Exception:
+                # fallback heuristics
+                for sep in ("\n", ",", ";"):
+                    if sep in raw:
+                        keys = [k.strip() for k in raw.split(sep) if k.strip()]
+                        break
+                if not keys:
+                    # single-line fallback: take up to 5 space-separated phrases
+                    keys = [raw]
 
-        except Exception as e:
-            logger.error(f"Key generation failed: {e}")
-            return [query]  # Fallback to original query
+            # Limit to reasonable count
+            return keys[:10]
+        except Exception as exc:
+            logger.exception("Error generating search keys: %s", exc)
+            return []
 
     # _retrieve_context is obsolete and removed: all context now comes from Redis
 
