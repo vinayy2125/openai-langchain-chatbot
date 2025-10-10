@@ -17,7 +17,7 @@ from app.config import get_redis
 from core_services.embedding_utils import get_embedding
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 logger = logging.getLogger(__name__)
 
 UNIVERSAL_SESSION_ID = "universal_session_id"
