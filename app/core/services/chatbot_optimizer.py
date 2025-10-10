@@ -21,12 +21,7 @@ import random
 from datetime import datetime
 from app.core.prompts import key_generate_prompt, stream_follow_up_generation_prompt, stream_follow_up_only_prompt, optimized_prompt, count_tokens_template, Requirements, fallback_response_prompt
 
-# Configure the logger
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
+# Configure the logger (configured centrally in app.main)
 logger = logging.getLogger("chatbot")
 
 
@@ -353,9 +348,16 @@ class OptimizedChatbot:
 
                 if search_keys:
                     # If redis helper supports search_keys, pass them (non-breaking if ignored)
-                    context_chunks = get_redis_context_chunks(query=query, search_keys=search_keys, top_k=8)
+                    context_chunks = get_redis_context_chunks(session_id, query, [], top_n=8)
                 else:
-                    context_chunks = get_redis_context_chunks(query=query, top_k=8)
+                    context_chunks = get_redis_context_chunks(session_id, query, [], top_n=8)
+
+                # Log retrieved context preview for debugging
+                try:
+                    preview = [c[:300] for c in (context_chunks or [])[:6]]
+                    logger.debug("[Optimizer] Retrieved Redis context preview: %s", preview)
+                except Exception:
+                    logger.debug("[Optimizer] Retrieved Redis context but failed to prepare preview")
             except Exception as e:
                 logger.warning("Redis context retrieval failed, using empty context: %s", e)
                 context_chunks = []
@@ -749,7 +751,15 @@ class OptimizedChatbot:
         This is resilient: on any error it returns an empty list so retrieval falls back to normal flow.
         """
         try:
-            prompt = key_generate_prompt.format(query=query)
+            # key_generate_prompt is a function that returns a prompt string when called
+            try:
+                prompt = key_generate_prompt(query)
+            except Exception:
+                # fallback: if key_generate_prompt was accidentally replaced by a template string
+                try:
+                    prompt = str(key_generate_prompt).format(query=query)
+                except Exception:
+                    prompt = f"Generate search keys for: {query}"
             # query_llm is a LangChain ChatOpenAI-like object; use generate_llm_response wrapper where suitable
             # Use the local query_llm for deterministic low-cost key generation
             messages = [
@@ -757,15 +767,26 @@ class OptimizedChatbot:
                 {"role": "user", "content": prompt},
             ]
             # Prefer using generate_llm_response utility if available
+            # Prefer using generate_llm_response utility if available (handles message conversion)
             try:
                 from app.core.utils import generate_llm_response
                 resp = generate_llm_response(messages)
             except Exception:
-                # Fallback to direct call on self.query_llm
+                # Fallback to direct call on self.query_llm using a tolerant interface
                 resp = None
                 try:
-                    resp_obj = self.query_llm.invoke([SystemMessage(content=messages[0]["content"]), HumanMessage(content=messages[1]["content"])])
-                    resp = getattr(resp_obj, "content", None) or str(resp_obj)
+                    # Some LLM wrappers accept a list of simple dict messages or tuples; try both safely
+                    invoke_payload = None
+                    try:
+                        # try passing the raw messages list first
+                        invoke_payload = messages
+                        resp_obj = self.query_llm.invoke(invoke_payload)
+                    except Exception:
+                        # try converting to tuples (role, content)
+                        invoke_payload = [(m["role"], m["content"]) for m in messages]
+                        resp_obj = self.query_llm.invoke(invoke_payload)
+
+                    resp = getattr(resp_obj, "content", None) or (resp_obj.get("content") if hasattr(resp_obj, "get") else str(resp_obj))
                 except Exception as e:
                     logger.debug("Direct query_llm invoke failed: %s", e)
 
@@ -841,6 +862,12 @@ class OptimizedChatbot:
             # Get context from Redis
             from app.core.redis_context import get_redis_context_chunks
             context_chunks = get_redis_context_chunks(session_id, query, [], top_n=8)
+            # Prepare context preview (safe) and log it
+            try:
+                preview_list = [str(c)[:300] for c in (context_chunks or [])[:8]]
+                logger.debug("[Optimizer:get_flow_debug_info] Redis context preview: %s", preview_list)
+            except Exception:
+                logger.debug("[Optimizer:get_flow_debug_info] Retrieved context but failed to prepare preview")
             context = "\n\n---\n\n".join([str(chunk) for chunk in context_chunks])
 
             return {

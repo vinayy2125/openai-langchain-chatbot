@@ -1,6 +1,6 @@
 FROM python:3.13
-COPY . /project
 WORKDIR /project
+COPY . .
 RUN pip install uv
 RUN uv pip install --system -e .[compile]
 EXPOSE 8006
