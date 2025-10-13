@@ -9,8 +9,9 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Define LLM instance here so it always exists
+# ChatOpenAI will read the API key from the environment (OPENAI_API_KEY) loaded via load_dotenv()
 llm = ChatOpenAI(
-    model_name="gpt-4o",
+    model="gpt-4o",
     temperature=0.7,
     max_tokens=None,
     streaming=True,

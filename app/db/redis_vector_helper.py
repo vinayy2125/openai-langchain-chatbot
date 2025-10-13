@@ -5,7 +5,8 @@ import logging
 import json
 from app.config import get_redis
 from datetime import datetime
-from core_services.generate_embeddings import get_embedding as vectorize_text
+from redis.commands.search.query import Query
+from core_services.embedding_utils import get_embedding as vectorize_text
 logger = logging.getLogger(__name__)
 
 
@@ -44,7 +45,6 @@ def store_text(session_id: str, text: str) -> bool:
 
 # ✅ Updated similarity_search with correct RediSearch query syntax
 def similarity_search(session_id: str, query: str, top_n: int = 5) -> list:
-    from redis.commands.search.query import Query
     r = get_redis  # Use as object, not callable
     query_embedding = vectorize_text(query)
     query_blob = np.array(query_embedding, dtype=np.float32).tobytes()

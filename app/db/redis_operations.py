@@ -1,18 +1,4 @@
-"""
-services/redis_service.py
-
-Redis-backed vector store (replacement for Pinecone).
-
-Key features:
-- Stores chunks as RedisJSON documents under prefix `voicechat:user:{user_id}:chunk:{n}`.
-- Uses a per-user atomic counter (INCR) to allocate chunk indices (grouped per user).
-- Creates a RediSearch JSON index with NUMERIC fields for user_id/chat_id and a VECTOR field.
-- Compatible with redis-py 6.x search API (Query(...).return_fields(...).dialect(2)).
-"""
-
 from __future__ import annotations
-
-import logging
 from datetime import datetime
 from typing import List, Optional
 import pdfplumber
@@ -35,96 +21,7 @@ logger = logging.getLogger("redis_service")
 # -------------------------
 # Configuration (override via settings)
 # -------------------------
-INDEX_NAME = getattr(settings, "redis_vector_index_name", "dits_chat_idx")
 PREFIX = getattr(settings, "redis_prefix", "dits_chatbot:")
-EMBED_DIM = int(getattr(settings, "embed_dim", 786))
-DISTANCE = getattr(settings, "distance_metric", "COSINE").upper()
-EMBEDDING_MODEL = getattr(settings, "embedding_model", "intfloat/e5-large-v2")
-
-
-
-# -------------------------
-# Index helpers
-# -------------------------
-def ensure_index_exists(r):
-    """
-    Ensure RediSearch JSON index exists for the given prefix and vector field.
-    Uses NUMERIC for user_id and chat_id (better numeric filtering) and TEXT for content.
-    Idempotent: if index exists, returns silently.
-    """
-    try:
-        r.ft(INDEX_NAME).info()
-        print("INDEX_NAME-----> ", INDEX_NAME)
-        logger.debug("Redis index '%s' already exists", INDEX_NAME)
-        return
-    except Exception:
-        logger.info("Creating Redis index '%s' (prefix=%s, dim=%d, metric=%s)",
-                    INDEX_NAME, PREFIX, EMBED_DIM, DISTANCE)
-
-    fields = [
-            NumericField("$.user_id", as_name="user_id"),
-            NumericField("$.chat_id", as_name="chat_id"),
-            TextField("$.text", as_name="text"),
-            VectorField(
-                "$.embedding",
-                "HNSW",
-                {
-                    "TYPE": "FLOAT32",
-                    "DIM": EMBED_DIM,
-                    "DISTANCE_METRIC": DISTANCE,
-                    "M": 16,
-                    "EF_CONSTRUCTION": 200,
-                },
-                as_name="embedding",
-            ),
-        ]
-
-
-    definition = IndexDefinition(prefix=[PREFIX], index_type=IndexType.JSON)
-    # create_index will raise if index exists concurrently; that's fine in multi-instance setups
-    r.ft(INDEX_NAME).create_index(fields, definition=definition)
-    logger.info("Created Redis index '%s'", INDEX_NAME)
-
-
-def describe_index_stats() -> dict:
-    """
-    Return RediSearch index info (dict).
-    """
-    r = get_redis_client()
-    ensure_index_exists(r)
-    info = r.ft(INDEX_NAME).info()
-    print("info-----> ", info)
-    # convert to plain dict if needed
-    try:
-        return dict(info)
-    except Exception:
-        return info
-
-
-# -------------------------
-# Retrieval
-# -------------------------
-def retrieve_context(query: str, user_id: int, top_k: int = 3) -> str:
-    """
-    Perform a KNN vector search restricted to the provided user_id.
-    Returns joined text chunks (by similarity order) for that user.
-    Compatible with redis-py 6.x Query API.
-    """
-    logger.info("retrieve_context user=%s query_len=%d top_k=%d", user_id, len(query or ""), top_k)
-    try:
-        r = get_redis_client()
-    except Exception as e:
-        logger.exception("Cannot obtain Redis client: %s", e)
-        return "Error: cannot connect to Redis."
-
-    try:
-        ensure_index_exists(r)
-    except Exception as e:
-        # keep going, search may still work
-        logger.warning("ensure_index_exists failed (continuing): %s", e)
-
-    # get query embedding
-    from core_services.generate_embeddings import get_embedding
 
     q_emb = get_embedding(query)
     vec = np.array(q_emb, dtype=np.float32)
@@ -312,7 +209,6 @@ def list_user_chunks(user_id: int, limit: int = 100) -> List[str]:
             break
     return out
 
-# def generate_and_store_embedding(r, text: str, metadata: dict = None) -> str:
 def generate_and_store_embedding(r, session_id: int, query: str, response: str) -> str:
     """Generate embedding for the given text and store it in Redis.
     Groups queries and embeddings by session_id.
@@ -326,7 +222,6 @@ def generate_and_store_embedding(r, session_id: int, query: str, response: str) 
     Returns:
         The Redis key under which the document is stored.
     """
-    from core_services.generate_embeddings import get_embedding
 
     # Generate embedding for the new query
     query_embedding = get_embedding(query)
