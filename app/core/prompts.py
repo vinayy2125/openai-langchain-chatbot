@@ -48,31 +48,10 @@ MANDATORY SAFETY RULES
 MANDATORY FORMATTING RULES
 - Return the final answer as Markdown.
 - Start with the main answer as plain text (no heading).
-- After the main answer include a single blank line, then a bulleted list of optional suggestions (use '-' or '*') or the single word 'None' — do NOT add any heading or label before this list.
-- Then include another blank line, followed by a bulleted list of suggested follow-up questions (or the single word 'None') — do NOT add any heading or label before this list.
 - Preserve newlines and bullets exactly as you present them.
 - Do not include raw knowledge-base documents, IDs, or internal metadata in the user-facing response.             
                                             
 """)
-
-
-def follow_up_prompt(prompt_text: str) -> dict:
-    return {
-        "role": "system",
-        "content": (
-            f"You are an AI assistant helping to gather requirements through follow-up questions.\n"
-            f"Original Prompt: {prompt_text}\n\n"
-            "Generate a follow-up question that:\n"
-            "1. Is relevant to the original prompt\n"
-            "2. Builds on previous responses\n"
-            "3. Helps gather complete requirements\n\n"
-            "Return a JSON object with:\n"
-            '- type: "yes_no", "nested", "expansion", or "clarification"\n'
-            "- question: The follow-up question\n"
-            "- context: Why you're asking this\n"
-            "- options: Array of choices (for nested type only)\n"
-        ),
-    }
 
 
 def dynamic_follow_up(prompt_context: str, latest_query: Optional[str], context: Optional[str], conversation_summary: Optional[str]) -> str:
@@ -95,15 +74,11 @@ Based on the conversation so far, write a clear and direct answer that fully add
 
     Output format (strict):
     - Start immediately with the main answer text (no headings, disclaimers, or boilerplate).
-    - After the main answer, include one blank line and then a bulleted list of optional suggestions (use '-' or '*'); do NOT include a heading or label before the list.
-    - After the suggestions list, include exactly one blank line and then a bulleted list of suggested follow-up questions (user-focused next-step questions); do NOT include a heading or label before the list.
 
 Additional rules:
 - Keep the main answer concise, conversational, and user-friendly.
 - If the query is irrelevant to the context, respond with: "I'm sorry, but I couldn't find relevant information for your query. Could you clarify or provide more details?"
 - Do not expose raw knowledge-base content, vector IDs, or internal debugging info.
-- Follow-up questions must be phrased as helpful next-step questions for the user, not questions about Ditstek or its internal processes.
-- Preserve blank lines and bullet characters exactly as specified.
 
 Context (only use what’s relevant):
 {prompt_context}
@@ -144,7 +119,11 @@ Provide exactly one suggestion in 1–2 sentences.
 """
 
 
-def enhanced_query_prompt(context_text: str, latest_query: str) -> str:
+def enhanced_query_prompt(context_text: str, latest_query: str, conversation_history: Optional[Any]) -> str:
+    if conversation_history and isinstance(conversation_history, (list, tuple)):
+        prev_context = conversation_history[-2:]
+    else:
+        prev_context = 'None'
     return f"""
 # Ditstek Innovations - Expert AI Assistant System Prompt
  
@@ -165,7 +144,6 @@ Format your response based on the query type and follow all formatting and clari
 ### 2. Technical Questions
 - Use **bullet points** for clarity.  
 - Include **specific technologies, tools, or methods**.  
-- Reference **relevant code snippets or examples**.  
 - Keep content **practical and implementation-focused**.
  
 ---
@@ -192,113 +170,14 @@ Format your response based on the query type and follow all formatting and clari
 - Add **spacing between sections** for readability. 
  
 ---
- 
+
+Previous context: {prev_context}
+
 ### Context
 {context_text}
  
 ### Current Query
 {latest_query}
-"""
-
-
-def enhanced_query_prompt_no_context(context_text: str, latest_query: str, conversation_history: Optional[Any]) -> str:
-    if conversation_history and isinstance(conversation_history, (list, tuple)):
-        prev_context = conversation_history[-2:]
-    else:
-        prev_context = 'None'
-
-    return f"""
-You are an expert AI assistant for Ditstek Innovations. Adapt your response style to the query:
-
-1. For simple questions (what is, can you, how to):
-   - Give direct, concise answers
-   - Use natural conversational tone
-   - One clear sentence when possible
-
-2. For technical queries:
-   - Structure information with bullet points
-   - Include specific technologies and examples
-   - Keep technical details relevant and focused
-
-3. If exact information isn't available:
-   - Share related helpful information
-   - Reference similar capabilities or projects
-   - Guide the conversation productively
-
-4. For all responses:
-   - Start directly (no "At Ditstek" phrases)
-   - Use bullet points for complex information
-   - Keep paragraphs short and focused
-   - Use markdown formatting when helpful
-
-Previous context: {prev_context}
-
-Available knowledge base context:
-{context_text}
-
-Current query:
-{latest_query}
-"""
-
-
-def stream_follow_up_generation_prompt(prompt_context: str, latest_query: Optional[str], category_names: Optional[str], followup_count: Optional[int], transcript: Optional[str]) -> str:
-    return f"""
-You are an expert AI consultant engaging in a natural conversation. Adapt your style based on the context:
-
-Context from conversation:
-{transcript}
-
-Background context:
-{prompt_context}
-
-Current query:
-{latest_query}
-
-Response Guidelines:
-1. For technical queries:
-   - Use structured lists
-   - Include specific technical details
-   - Reference relevant projects/experience
-2. For simple queries:
-   - Give direct, concise answers
-   - Use natural conversational tone
-   - Keep it brief but informative
-3. When information is uncertain:
-   - Provide helpful related information
-   - Guide towards areas of expertise
-   - Suggest specific clarifying questions
-
-Generate {followup_count} follow-up questions that:
-- Build naturally on the conversation
-- Help understand specific requirements
-- Explore relevant technical aspects
-- Maintain conversation flow
-
-Areas to explore: {category_names}
-
-Format Requirements:
-- Add newline before and after each section
-- Use markdown for formatting
-- Keep responses focused and engaging
-
-Output format: JSON only
-"""
-
-
-def stream_follow_up_only_prompt(prompt_context: Optional[str], latest_query: Optional[str], transcript: Optional[str]) -> str:
-    return f"""
-You are an expert requirements consultant having a conversation with a client.
-
-Recent conversation transcript:
-{transcript}
-
-Initial context:
-{prompt_context}
-
-Latest user message:
-{latest_query}
-
-Generate ONE natural follow-up question to advance the conversation.
 """
 
 
@@ -310,24 +189,6 @@ Structure your response with clear sections.
 Include relevant background information.
 """
 
-
-def optimized_prompt(history: Optional[str], context: Optional[str], question: Optional[str], length_rule: Optional[str]) -> str:
-    return f"""
-You are a focused AI assistant providing concise responses (200 words max) with minimal formatting. Prioritize direct answers.
-
-Conversation so far:
-{history}
-
-Relevant context:
-{context}
-
-User's latest question:
-{question}
-
-Follow the length rule: {length_rule}
-"""
-
-
 def key_generate_prompt(query: str) -> str:
     return f"""Break down this user query into 3-5 specific search keys/terms to find relevant knowledge base information.
 
@@ -335,11 +196,6 @@ User Query: {query}
 
 Return ONLY the search keys, one per line, without numbers or bullets.
 """
-
-
-
-
-
 class Requirements:
     requirement_categories = [
         {"key": "goal", "name": "Project Goal / Primary Objective", "question": "What is the primary goal or outcome you want to achieve?", "patterns": ["goal", "objective", "aim", "purpose"]},
