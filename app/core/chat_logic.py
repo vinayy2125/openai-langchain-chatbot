@@ -2,7 +2,7 @@ import json
 import re
 import logging
 from typing import List, Dict, Any, Optional, AsyncGenerator
-from app.core.prompts import enhanced_query_prompt, enhanced_query_prompt_no_context
+from app.core.prompts import enhanced_query_prompt
 from app.core.redis_context import get_redis_context_chunks
 from app.core.fallback_handler import get_smart_fallback
 from app.core.response_formatter import format_response
@@ -271,9 +271,7 @@ async def build_chatbot_response(
                 logger.debug("[ChatLogic] Retrieved context chunks but failed to produce preview")
             context_text = "\n".join(context_chunks)
             if is_prompt_selection or is_manual_query:
-                enhanced_query = enhanced_query_prompt(context_text=context_text, latest_query=latest_query)
-            else:
-                enhanced_query = enhanced_query_prompt_no_context(context_text=context_text, latest_query=latest_query, conversation_history=conversation_history)
+                enhanced_query = enhanced_query_prompt(context_text=context_text, latest_query=latest_query, conversation_history=conversation_history or [])
                 # Log the enhanced query (short preview) for debugging
             logger.info(f"[ChatLogic] Enhanced query prepared (first 300 chars): {str(enhanced_query)[:300]}")
             # Generate and format the main response
