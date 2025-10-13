@@ -1,25 +1,21 @@
-"""
-Chatbot Optimization Service with Streaming Support
-This service provides optimized chatbot response generation with:
-- Context length management
-- Performance optimization
-- Detailed response generation
-- Robust fallback handling
-- Streaming response support
-"""
-
 import logging
+import json
 import sys
-import tiktoken
-from typing import List, Tuple, Dict, Generator, Union, AsyncGenerator, Any
-from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
-from langchain.schema import AIMessage
 import re
-import time
-import random
+import os
+import tiktoken
+from pydantic import SecretStr
+from app.core.utils import generate_llm_response
+from typing import List, Tuple, Dict, Generator, Union
+from functools import lru_cache
+from langchain_openai import ChatOpenAI
 from datetime import datetime
-from app.core.prompts import key_generate_prompt, stream_follow_up_generation_prompt, stream_follow_up_only_prompt, optimized_prompt, count_tokens_template, Requirements, fallback_response_prompt
+from app.core.prompts import key_generate_prompt, stream_follow_up_generation_prompt, stream_follow_up_only_prompt, optimized_prompt, count_tokens_template, Requirements
+from app.core.redis_context import get_redis_context_chunks
+from app.core.utils import generate_llm_response
+from app.core.redis_context import get_redis_context_chunks
+
+
 
 # Configure the logger (configured centrally in app.main)
 logger = logging.getLogger("chatbot")
@@ -148,11 +144,9 @@ class OptimizedChatbot:
         self.generated_followups = []  # Store generated follow-ups internally
 
         # ADD: Separate LLM for query key generation with GPT-4o-mini
-        import os
-        from langchain_openai import ChatOpenAI
+       
 
         # Ensure api_key is None if not set, to match expected type
-        from pydantic import SecretStr
         api_key = os.getenv("OPENAI_API_KEY")
         self.query_llm = ChatOpenAI(
             model="gpt-4o-mini",
@@ -193,13 +187,6 @@ class OptimizedChatbot:
             return True
         return False
 
-    # ---------------- Requirement Collection Helpers -----------------
-    def _init_requirement_state(self, session_id: str):
-        if session_id not in self.collected_requirements:
-            self.collected_requirements[session_id] = {
-                "answers": {},  # key -> {'question':..., 'answer':...}
-                "asked": set(),  # keys already asked
-            }
 
     def stream_follow_up_generation(
         self,
@@ -284,9 +271,6 @@ class OptimizedChatbot:
             for line in fallback.split("\n"):
                 yield line
 
-    def get_follow_ups(self, session_id: str) -> list[str]:
-        """Get follow-up questions for a session."""
-        return self.follow_ups.get(session_id, [])
 
     def get_session_data(self, session_id: str) -> dict:
         """Get session data for a given session ID."""
@@ -344,7 +328,6 @@ class OptimizedChatbot:
 
             # Prefer keyed retrieval when available; fall back to legacy retrieval call
             try:
-                from app.core.redis_context import get_redis_context_chunks
 
                 if search_keys:
                     # If redis helper supports search_keys, pass them (non-breaking if ignored)
@@ -379,7 +362,6 @@ class OptimizedChatbot:
             logger.info(f"[Chatbot] Prompt prepared (first 300 chars): {str(prompt)[:300]}")
             try:
                 # Use the centralized helper which creates proper message objects
-                from app.core.utils import generate_llm_response
 
                 final_text = generate_llm_response(prompt)
 
@@ -525,224 +507,7 @@ class OptimizedChatbot:
 
         return text.strip()
 
-    def _generate_response_stream(
-        self, question: str, context: str, history: str
-    ) -> Generator[Any, None, None]:
-        logger.debug("Entered _generate_response_stream")
 
-        # Format context with separators and metadata
-        if isinstance(context, list):
-            context_chunks = []
-            for i, chunk in enumerate(context):
-                try:
-                    if isinstance(chunk, tuple) or isinstance(chunk, list):
-                        # Defensive unpack: find the first string-like element as text
-                        text = None
-                        meta = None
-                        for el in chunk:
-                            if isinstance(el, str) and el.strip():
-                                text = el
-                                break
-                        # If not found, try first element as fallback
-                        if text is None and len(chunk) > 0:
-                            text = str(chunk[0])
-
-                        # Find dict-like metadata if present
-                        for el in chunk:
-                            if isinstance(el, dict):
-                                meta = el
-                                break
-
-                        source_info = None
-                        if isinstance(meta, dict):
-                            source_info = meta.get("source") or meta.get("url")
-                        if not source_info:
-                            source_info = "N/A"
-
-                        context_chunks.append(f"Source {i+1} ({source_info}):\n{text}")
-                    else:
-                        context_chunks.append(str(chunk))
-                except Exception:
-                    # Best-effort: fall back to stringified chunk
-                    context_chunks.append(str(chunk))
-            context = "\n\n---\n\n".join(context_chunks)
-
-        # Log the formatted context
-        logger.debug("Formatted Context:")
-
-        template_tokens = self._count_template_tokens()
-        optimized_context, stats = self.context_optimizer.optimize_context(
-            context, question, history, template_tokens
-        )
-        logger.debug("Optimization stats: ")
-
-        prompt = self._create_optimized_prompt(history, optimized_context, question)
-        # logger.debug("Final Prompt: %s", prompt)
-
-        cache_key = f"{question[:50]}_{hash(optimized_context[:100])}"
-        if cache_key in self.response_cache:
-            cached_response = self.response_cache[cache_key]
-            logger.info("Returning cached response for question (source=cached)")
-            # Ensure callers can see the source and receive chunk events
-            yield {"status": "chunk", "chunk": cached_response, "source": "cache"}
-            return
-
-        try:
-            if hasattr(self.llm, "stream"):
-                stream = self.llm.stream(prompt)
-                buffer = ""
-                full_response = ""
-
-                for chunk in stream:
-                    content = chunk.content if hasattr(chunk, "content") else chunk
-                    if not content:
-                        continue
-
-                    full_response += content
-                    buffer += content
-
-                    # Process buffer for paragraph/header/bullet-level chunking
-                    while True:
-                        # Paragraph boundary
-                        if "\n\n" in buffer:
-                            idx = buffer.find("\n\n") + 2
-                            piece = buffer[:idx]
-                            buffer = buffer[idx:]
-                            cleaned = self._clean_response_formatting(piece)
-                            if cleaned:
-                                # fingerprint for debugging
-                                try:
-                                    fp = f"{hash(cleaned)}|{cleaned[:60].replace('\n',' ')}"
-                                except Exception:
-                                    fp = cleaned[:60]
-                                logger.debug(f"[Optimizer] Yielding stream chunk fp={fp}")
-                                yield {"status": "chunk", "chunk": cleaned, "source": "stream"}
-                            continue
-
-                        # Header at the very start
-                        m = re.match(r'^(#{1,6} [^\n]+\n)', buffer)
-                        if m:
-                            piece = m.group(1)
-                            buffer = buffer[len(piece):]
-                            cleaned = self._clean_response_formatting(piece)
-                            if cleaned:
-                                try:
-                                    fp = f"{hash(cleaned)}|{cleaned[:60].replace('\n',' ')}"
-                                except Exception:
-                                    fp = cleaned[:60]
-                                logger.debug(f"[Optimizer] Yielding tail chunk fp={fp}")
-                                yield {"status": "chunk", "chunk": cleaned, "source": "stream"}
-                            continue
-
-                        # Header later in buffer
-                        idx_header = buffer.find('\n#')
-                        if idx_header != -1 and idx_header > 0:
-                            piece = buffer[: idx_header + 1]
-                            buffer = buffer[idx_header + 1 :]
-                            cleaned = self._clean_response_formatting(piece)
-                            if cleaned:
-                                yield {"status": "chunk", "chunk": cleaned, "source": "stream"}
-                            continue
-
-                        # Bullet/list break
-                        idx_bullet = buffer.find('\n- ')
-                        if idx_bullet != -1 and idx_bullet > 0:
-                            piece = buffer[: idx_bullet + 1]
-                            buffer = buffer[idx_bullet + 1 :]
-                            cleaned = self._clean_response_formatting(piece)
-                            if cleaned:
-                                yield {"status": "chunk", "chunk": cleaned, "source": "stream"}
-                            continue
-
-                        # Safety flush for long buffers (avoid excessive latency)
-                        if len(buffer) > 300:
-                            piece = buffer[:300]
-                            buffer = buffer[300:]
-                            cleaned = self._clean_response_formatting(piece)
-                            if cleaned:
-                                yield {"status": "chunk", "chunk": cleaned, "source": "stream"}
-                            continue
-
-                        # No complete chunk ready yet
-                        break
-
-
-                # Send remaining content as cleaned paragraph/header chunks
-                if buffer.strip():
-                    cleaned = self._clean_response_formatting(buffer)
-                    if cleaned:
-                        paragraphs = cleaned.split("\n\n")
-                        for p_idx, paragraph in enumerate(paragraphs):
-                            if paragraph.strip():
-                                try:
-                                    fp = f"{hash(paragraph)}|{paragraph[:60].replace('\n',' ')}"
-                                except Exception:
-                                    fp = paragraph[:60]
-                                logger.debug(f"[Optimizer] Yielding buffered paragraph fp={fp}")
-                                yield {"status": "chunk", "chunk": paragraph, "source": "stream"}
-                            if p_idx < len(paragraphs) - 1:
-                                # preserve paragraph separation as an empty chunk separator
-                                yield {"status": "chunk", "chunk": "\n\n", "source": "stream"}
-
-                # Cache the cleaned response
-                cleaned_full = self._clean_response_formatting(full_response)
-                self.response_cache[cache_key] = cleaned_full
-                logger.info("Completed streaming response (source=stream). Caching cleaned response.")
-            else:
-                raw_answer = self.llm.invoke(prompt)
-                response = (
-                    raw_answer.content
-                    if isinstance(raw_answer, AIMessage)
-                    else str(raw_answer)
-                )
-                # Apply response cleaning and cache
-                if isinstance(response, str):
-                    cleaned_response = self._clean_response_formatting(response)
-                else:
-                    cleaned_response = self._clean_response_formatting(str(response))
-                self.response_cache[cache_key] = cleaned_response
-
-                # Emit cleaned paragraphs as chunk events and tag source
-                paragraphs = cleaned_response.split("\n\n")
-                for p_idx, paragraph in enumerate(paragraphs):
-                    if paragraph.strip():
-                        yield {"status": "chunk", "chunk": paragraph, "source": "non-stream"}
-                    if p_idx < len(paragraphs) - 1:
-                        yield {"status": "chunk", "chunk": "\n\n", "source": "non-stream"}
-        except Exception:
-            logger.error("LLM streaming call failed", exc_info=True)
-            fallback_response = self._generate_fallback_response(question, context)
-            yield fallback_response
-
-    def _would_break_markdown(self, text: str) -> bool:
-        """Check if breaking at this point would damage Markdown formatting"""
-        # Count unclosed bold markers
-        bold_count = text.count("**")
-        if bold_count % 2 != 0:
-            return True
-
-        # Check if we're in the middle of a header
-        lines = text.split("\n")
-        if (
-            lines
-            and lines[-1].strip().startswith("#")
-            and not lines[-1].strip().endswith(" ")
-        ):
-            return True
-
-        # Check if we're breaking a word that might be part of markdown
-        if text.endswith("**") or text.endswith("*") or text.endswith("#"):
-            return True
-
-        # Check for incomplete list items
-        if text.strip().endswith("-") and not text.strip().endswith(" -"):
-            return True
-
-        # Check for incomplete numbered lists
-        if re.search(r"\d+\.$", text.strip()):
-            return True
-
-        return False
 
     def _generate_search_keys(self, query: str) -> List[str]:
         """
@@ -769,7 +534,6 @@ class OptimizedChatbot:
             # Prefer using generate_llm_response utility if available
             # Prefer using generate_llm_response utility if available (handles message conversion)
             try:
-                from app.core.utils import generate_llm_response
                 resp = generate_llm_response(messages)
             except Exception:
                 # Fallback to direct call on self.query_llm using a tolerant interface
@@ -799,7 +563,7 @@ class OptimizedChatbot:
             keys = []
             # quick JSON array parse attempt
             try:
-                import json
+                
 
                 parsed = json.loads(raw)
                 if isinstance(parsed, list):
@@ -918,4 +682,3 @@ class OptimizedChatbot:
         return fallback_response_prompt(question=question, context=context)
 
 
-# Follow-ups are now handled internally by the OptimizedChatbot class

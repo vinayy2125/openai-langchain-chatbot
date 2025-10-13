@@ -82,7 +82,6 @@ def generate_and_store_embedding(r, text: str, metadata: Optional[dict] = None) 
         The Redis key under which the document is stored.
     """
     embedding = get_embedding(text)
-    import uuid
     doc_id = str(uuid.uuid4())
     key = f"{redis_crud.PREFIX}{doc_id}"
     doc = {
