@@ -1,16 +1,13 @@
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Dict, Any, Union
-from uuid import UUID
+from app.db.base import get_db_conn
+from typing import List, Optional, Dict, Any
 from pydantic import (
-    BaseModel,
-    EmailStr,
     Field,
+    BaseModel,
     ConfigDict,
-    field_validator,
     model_validator,
 )
-import psycopg2
 
 
 class FollowUpType(str, Enum):
@@ -177,7 +174,7 @@ class SentMessage(BaseModel):
     def validate_prompt_or_query_for_new_session(self) -> "SentMessage":
         """Allow starting a session with either a prompt_id or an initial query.
         Only raise if neither is provided for a brand-new DB session."""
-        from app.db.base import get_db_conn
+        
 
         conn = get_db_conn()
         cursor = conn.cursor()
