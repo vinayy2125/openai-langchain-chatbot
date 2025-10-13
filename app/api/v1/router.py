@@ -93,27 +93,49 @@ async def get_chat_messages(session_id: str):
         
         formatted_messages = []
         
-        # Get session's current prompt to show at top
+        # Get root prompts (same as /root endpoint)
         conn = get_db_conn()
         cursor = conn.cursor()
+        root_prompts = []
         try:
             cursor.execute(
-                "SELECT current_prompt_id FROM sessions WHERE session_id = %s",
-                (session_id,)
+                """
+                SELECT 
+                    id::text,
+                    prompt_text,
+                    response_text,
+                    display_order,
+                    created_at,
+                    updated_at
+                FROM prompts
+                WHERE parent_id IS NULL
+                ORDER BY display_order ASC
+                """
             )
-            result = cursor.fetchone()
-            if result and result[0]:
-                cursor.execute(
-                    "SELECT prompt_text, response_text FROM prompts WHERE id = %s",
-                    (result[0],)
-                )
-                prompt_data = cursor.fetchone()
-                if prompt_data:
-                    formatted_messages.append({
-                        "role": "bot",
-                        "message": prompt_data[1] or prompt_data[0],
-                        "timestamp": None,
-                    })
+            rows = cursor.fetchall()
+            
+            if rows:
+                # Build root prompts list
+                for row in rows:
+                    root_prompts.append(Prompt(
+                        id=row[0],
+                        prompt_text=row[1],
+                        response_text=row[2] if row[2] is not None else "",
+                        display_order=row[3],
+                        type=PromptType.ROOT,
+                        created_at=row[4],
+                        updated_at=row[5],
+                    ))
+                
+                # Add welcome message
+                prompt_options = "\n".join([row[1] for row in rows])
+                welcome_message = f"Welcome to Ditstek innovations! 👋\n\nHow can I assist you today?\n\n{prompt_options}"
+                
+                formatted_messages.append({
+                    "role": "bot",
+                    "message": welcome_message,
+                    "timestamp": None,
+                })
         finally:
             cursor.close()
             conn.close()
@@ -129,10 +151,10 @@ async def get_chat_messages(session_id: str):
                     }
                 )
         
-        return HistoryResponse(session_id=session_id, messages=formatted_messages)
+        return HistoryResponse(session_id=session_id, messages=formatted_messages, root_prompts=root_prompts)
     except Exception as e:
         logger.error(f"Error retrieving chat messages: {str(e)}")
-        return HistoryResponse(session_id=session_id, messages=[])
+        return HistoryResponse(session_id=session_id, messages=[], root_prompts=[])
 
 
 # Health Check Route

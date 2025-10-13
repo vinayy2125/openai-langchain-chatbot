@@ -232,3 +232,6 @@ class HistoryResponse(BaseModel):
     messages: List[Dict[str, Any]] = Field(
         ..., description="List of messages in the conversation"
     )
+    root_prompts: Optional[List[Prompt]] = Field(
+        None, description="Root prompts available for the session"
+    )
