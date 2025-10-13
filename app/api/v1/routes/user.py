@@ -7,7 +7,6 @@ from app.db.base import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 
 router = APIRouter()
 
-# --- Pydantic Model for User ---
 class UserCreate(BaseModel):
     username: str
     email: EmailStr

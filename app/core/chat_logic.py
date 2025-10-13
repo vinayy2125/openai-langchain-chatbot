@@ -261,11 +261,11 @@ async def build_chatbot_response(
                 session_id=session_id,
                 query=latest_query,
                 conversation_history=conversation_history or [],
-                top_n=6,
+                top_n=4,
             )
             # Log retrieved context (short preview) for each query to help debugging
             try:
-                preview_items = [c[:300] for c in context_chunks[:6]]
+                preview_items = [c[:300] for c in context_chunks[:4]]
                 logger.debug("[ChatLogic] Retrieved context chunks preview: %s", preview_items)
             except Exception:
                 logger.debug("[ChatLogic] Retrieved context chunks but failed to produce preview")
