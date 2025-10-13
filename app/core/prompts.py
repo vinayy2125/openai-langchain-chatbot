@@ -1,5 +1,3 @@
-"""Shared prompt constants used across the application without markdown formatting instructions."""
-
 from typing import Any, Optional
 
 SHARED_SYSTEM_PROMPT = ("""
@@ -40,28 +38,22 @@ Behavior Summary
 - For technical questions: provide **architecture, patterns, tech considerations, alternatives, and best practices** — **no code**.  
 - For simple queries: respond **briefly, clearly, and professionally**.  
 - Always maintain **Ditstek Innovations representation** and professional authority
- 
+
+MANDATORY SAFETY RULES
+- Do NOT insert spaces inside words or between letters.
+- Do NOT add spaces around hyphens.
+- Preserve URLs without added spaces.
+- Avoid duplicated punctuation and excessive question marks.
+
+MANDATORY FORMATTING RULES
+- Return the final answer as Markdown.
+- Start with the main answer as plain text (no heading).
+- After the main answer include a single blank line, then a bulleted list of optional suggestions (use '-' or '*') or the single word 'None' — do NOT add any heading or label before this list.
+- Then include another blank line, followed by a bulleted list of suggested follow-up questions (or the single word 'None') — do NOT add any heading or label before this list.
+- Preserve newlines and bullets exactly as you present them.
+- Do not include raw knowledge-base documents, IDs, or internal metadata in the user-facing response.             
+                                            
 """)
-
-# Additional mandatory safety rules applied globally to all prompts
-SHARED_SYSTEM_PROMPT += (
-    "\n\nMANDATORY SAFETY RULES: "
-    "Do NOT insert spaces inside words or between letters. "
-    "Do NOT add spaces around hyphens. "
-    "Preserve URLs without added spaces. "
-    "Avoid duplicated punctuation and excessive question marks."
-)
-
-# Additional formatting guidance (helps ensure responses render correctly in the UI)
-SHARED_SYSTEM_PROMPT += (
-    "\n\nMANDATORY FORMATTING RULES: "
-    "Return the final answer as Markdown. "
-    "Start with the main answer as plain text (no heading). "
-    "After the main answer include a single blank line, then a bulleted list of optional suggestions (use '-' or '*') or the single word 'None' — do NOT add any heading or label before this list. "
-    "Then include another blank line, followed by a bulleted list of suggested follow-up questions (or the single word 'None') — do NOT add any heading or label before this list. "
-    "Preserve newlines and bullets exactly as you present them. "
-    "Do not include raw knowledge-base documents, IDs, or internal metadata in the user-facing response."
-)
 
 
 def follow_up_prompt(prompt_text: str) -> dict:
@@ -345,14 +337,7 @@ Return ONLY the search keys, one per line, without numbers or bullets.
 """
 
 
-def fallback_response_prompt(question: str, context: str) -> str:
-    return f"""
-I apologize, but I'm experiencing technical difficulties. Based on the available information, here's what I can tell you about your question "{question}":
-Available Context:
-{context[:100]}...
-Recommendation:
-Please try rephrasing your question or contact support for more detailed assistance.
-"""
+
 
 
 class Requirements:

@@ -2,7 +2,7 @@
 import numpy as np
 from redis.commands.search.query import Query
 from app.config import get_redis
-from core_services.generate_embeddings import get_embedding
+from core_services.embedding_utils import get_embedding
 
 r = get_redis
 

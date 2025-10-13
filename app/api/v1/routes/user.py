@@ -3,7 +3,7 @@ from pydantic import BaseModel, EmailStr
 from datetime import datetime
 import psycopg2
 import uuid
-from database_setup import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
+from app.db.base import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 
 router = APIRouter()
 
