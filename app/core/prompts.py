@@ -301,7 +301,6 @@ Latest user message:
 Generate ONE natural follow-up question to advance the conversation.
 """
 
-
 def count_tokens_template():
     return """
 Provide a detailed answer that fully addresses the user's question.
@@ -310,24 +309,6 @@ Structure your response with clear sections.
 Include relevant background information.
 """
 
-
-def optimized_prompt(history: Optional[str], context: Optional[str], question: Optional[str], length_rule: Optional[str]) -> str:
-    return f"""
-You are a focused AI assistant providing concise responses (200 words max) with minimal formatting. Prioritize direct answers.
-
-Conversation so far:
-{history}
-
-Relevant context:
-{context}
-
-User's latest question:
-{question}
-
-Follow the length rule: {length_rule}
-"""
-
-
 def key_generate_prompt(query: str) -> str:
     return f"""Break down this user query into 3-5 specific search keys/terms to find relevant knowledge base information.
 
@@ -335,11 +316,6 @@ User Query: {query}
 
 Return ONLY the search keys, one per line, without numbers or bullets.
 """
-
-
-
-
-
 class Requirements:
     requirement_categories = [
         {"key": "goal", "name": "Project Goal / Primary Objective", "question": "What is the primary goal or outcome you want to achieve?", "patterns": ["goal", "objective", "aim", "purpose"]},

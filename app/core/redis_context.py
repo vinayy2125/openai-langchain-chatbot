@@ -35,8 +35,6 @@ def get_redis_context_chunks(session_id: str, query: str, conversation_history: 
     logger.info(f"[RedisContext] Enhanced search query: {search_query}")
     results = similarity_search(session_id, search_query, top_n=top_n)
     
-    results = similarity_search(session_id, search_query, top_n=top_n)
-
     if not results:
         logger.info("[RedisContext] No context retrieved from Redis.")
         return []

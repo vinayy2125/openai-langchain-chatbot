@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 
 import yaml
-import numpy as np
 from redis.commands.search.field import TextField, VectorField, TagField
 from redis.commands.search.index_definition import IndexDefinition, IndexType
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
@@ -17,7 +16,6 @@ from app.config import get_redis
 from core_services.embedding_utils import get_embedding
 
 # Configure logging
-logger = logging.getLogger(__name__)
 logger = logging.getLogger(__name__)
 
 UNIVERSAL_SESSION_ID = "universal_session_id"

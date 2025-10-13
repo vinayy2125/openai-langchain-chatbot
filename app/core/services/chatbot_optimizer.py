@@ -6,11 +6,11 @@ import os
 import tiktoken
 from pydantic import SecretStr
 from app.core.utils import generate_llm_response
-from typing import List, Tuple, Dict, Generator, Union
+from typing import List, Tuple, Generator
 from functools import lru_cache
 from langchain_openai import ChatOpenAI
 from datetime import datetime
-from app.core.prompts import key_generate_prompt, stream_follow_up_generation_prompt, stream_follow_up_only_prompt, optimized_prompt, count_tokens_template, Requirements
+from app.core.prompts import key_generate_prompt, count_tokens_template, Requirements
 from app.core.redis_context import get_redis_context_chunks
 from app.core.utils import generate_llm_response
 from app.core.redis_context import get_redis_context_chunks
@@ -80,58 +80,6 @@ class ContextOptimizer:
             return text
         return self.encoding.decode(tokens[:max_tokens])
 
-    def optimize_context(self, context: Union[str, List[str]], question: str, history: str, template_tokens: int, response_reservation: int = 512, safety_buffer: int = 64) -> Tuple[str, Dict[str, int]]:
-        """Create an optimized context string that fits within token limits."""
-        # Normalize context into list of chunks
-        if isinstance(context, str):
-            if "\n\n---\n\n" in context:
-                chunks = [c for c in context.split("\n\n---\n\n") if c.strip()]
-            else:
-                chunks = [p for p in context.split("\n\n") if p.strip()]
-        else:
-            chunks = [str(c) for c in context or []]
-
-        question_tokens = self.count_tokens_cached(question or "")
-        history_tokens = self.count_tokens_cached(history or "")
-
-        available_for_context = max(
-            self.context_limit - template_tokens - question_tokens - history_tokens - response_reservation - safety_buffer,
-            0,
-        )
-
-        prioritized = self.prioritize_chunks(chunks, question, max_chunks=32)
-
-        final_chunks: List[str] = []
-        current_tokens = 0
-        sep = "\n\n---\n\n"
-        sep_tokens = self.count_tokens_cached(sep)
-
-        for chunk in prioritized:
-            ctokens = self.count_tokens_cached(chunk)
-            if current_tokens + ctokens + sep_tokens <= available_for_context:
-                final_chunks.append(chunk)
-                current_tokens += ctokens + sep_tokens
-            else:
-                remaining = available_for_context - current_tokens - sep_tokens
-                if remaining > 50:
-                    truncated = self.truncate_to_tokens(chunk, max(0, remaining))
-                    final_chunks.append(truncated)
-                    current_tokens += self.count_tokens_cached(truncated) + sep_tokens
-                break
-
-        final_context = sep.join(final_chunks)
-        stats = {
-            "original_chunks": len(chunks),
-            "prioritized_chunks": len(prioritized),
-            "final_chunks": len(final_chunks),
-            "original_tokens": self.count_tokens_cached(sep.join(chunks)) if chunks else 0,
-            "final_tokens": current_tokens,
-            "available_for_context": available_for_context,
-        }
-        logger.debug(f"Context optimization stats: {stats}")
-        return final_context, stats
-
-
 class OptimizedChatbot:
     """
     Streaming-only chatbot service with optimized context handling.
@@ -191,91 +139,6 @@ class OptimizedChatbot:
             self.conversation_state[session_id]["follow_up_count"] = 0
             return True
         return False
-
-
-    def stream_follow_up_generation(
-        self,
-        conversation_history: list[dict],
-        latest_query: str,
-        prompt_context: str,
-        combined: bool = False,
-        followup_count: int = 2,
-    ):
-        """
-        Generate follow-up questions or combined answer+follow-ups.
-
-        Key changes:
-        - Yields raw text chunks only (no `data:` or extra JSON inside).
-        - Follow-ups + suggestions handled via prompt.
-        - Context-switch options included when unrelated query detected.
-        """
-        history = conversation_history or []
-        session_id = next(
-            (msg.get("session_id") for msg in history if msg.get("session_id")),
-            "generic",
-        )
-
-        # Initialize or get conversation state
-        state = self._init_conversation_state(
-            str(session_id) if session_id is not None else "generic"
-        )
-
-        # Build transcript (last 10 messages)
-        transcript = "\n".join(
-            [
-                f"{'USER' if msg.get('role') == 'user' else 'ASSISTANT'}: {msg.get('content', '')}"
-                for msg in history[-10:]
-            ]
-        )
-
-        category_names = ", ".join([cat["name"] for cat in self.requirement_categories])
-
-        if combined:
-            # Prompt for answer + follow-ups + suggestions
-            prompt = stream_follow_up_generation_prompt(
-                prompt_context=prompt_context,
-                transcript=transcript,
-                latest_query=latest_query,
-                category_names=category_names,
-                followup_count=followup_count,
-            )
-        else:
-            # Prompt for follow-ups only
-            prompt = stream_follow_up_only_prompt(
-                prompt_context=prompt_context,
-                latest_query=latest_query,
-                transcript=transcript,
-            )
-
-        # Track generation state
-        state["follow_up_count"] += 1
-        state["last_generated"] = datetime.now()
-
-        try:
-            # Streaming output from LLM
-            if hasattr(self.llm, "stream"):
-                for chunk in self.llm.stream(prompt):
-                    content = getattr(chunk, "content", str(chunk))
-                    if content:
-                        yield content
-            else:
-                # Fallback for non-streaming LLMs
-                response = self.llm.invoke(prompt)
-                text = getattr(response, "content", str(response))
-                for line in text.split("\n"):
-                    yield line
-
-        except Exception as e:
-            logger.error(f"Follow-up generation failed: {e}", exc_info=True)
-            # Simple fallback
-            fallback = (
-                "Could you tell me more about your goals for this project?\n"
-                "- Business growth\n"
-                "- Process improvement"
-            )
-            for line in fallback.split("\n"):
-                yield line
-
 
     def get_session_data(self, session_id: str) -> dict:
         """Get session data for a given session ID."""
@@ -505,8 +368,6 @@ class OptimizedChatbot:
 
         return text.strip()
 
-
-
     def _generate_search_keys(self, query: str) -> List[str]:
         """
         Use self.query_llm (GPT-4o-mini) with key_generate_prompt to produce compact search keys.
@@ -583,7 +444,6 @@ class OptimizedChatbot:
             return []
 
     # _retrieve_context is obsolete and removed: all context now comes from Redis
-
     def _format_history(self, chat_history: list) -> str:
         return "\n".join(
             f"{'User' if role == 'user' else 'Assistant'}: {msg}"
@@ -595,22 +455,6 @@ class OptimizedChatbot:
         template = count_tokens_template()
         return self.context_optimizer.count_tokens_cached(template)
 
-    def _create_optimized_prompt(
-        self, history: str, context: str, question: str
-    ) -> str:
-        length_rule = (
-            "Provide direct, concise responses with minimal formatting. "
-            "Limit responses to 200 words maximum. "
-            "Use bold only for critical terms or concepts. "
-            "Avoid headers unless absolutely necessary. "
-            "Focus on answering the specific question asked. "
-            "Use natural paragraph breaks sparingly. "
-            "Ensure consistent single spacing between words. "
-        )
-
-        prompt = optimized_prompt(history=history, context=context, question=question, length_rule=length_rule)
-        # Append an explicit mandatory formatting safety block to avoid LLM introducing spacing/markdown corruption
-        full_prompt = (prompt.strip() + "\n\n").strip()
-        return full_prompt
+    
 
 
