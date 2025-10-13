@@ -8,36 +8,9 @@ from pydantic import (
     ConfigDict,
     model_validator,
 )
-
-
-class FollowUpType(str, Enum):
-    YES_NO = "yes_no"
-    NESTED = "nested"
-    EXPANSION = "expansion"
-    CLARIFICATION = "clarification"
-
-
 class PromptType(str, Enum):
     ROOT = "root"
     FOLLOW_UP = "follow_up"
-
-
-class SessionState(BaseModel):
-    """Simple state tracking for chat sessions."""
-
-    current_follow_up: Optional["FollowUp"] = Field(
-        None, description="Current active follow-up if any"
-    )
-    conversation_history: List[Dict[str, Any]] = Field(
-        default_factory=list, description="History of the conversation"
-    )
-    prompt_id: Optional[str] = Field(None, description="Current active prompt ID")
-    prompt_text: Optional[str] = Field(
-        None, description="Selected prompt text or initial user-provided context"
-    )
-
-    model_config = ConfigDict(from_attributes=True)
-
 
 class PromptBase(BaseModel):
     prompt_text: str = Field(..., description="The text of the prompt")
@@ -46,11 +19,6 @@ class PromptBase(BaseModel):
         default=0, description="The order in which to display the prompt"
     )
     type: PromptType = Field(default=PromptType.ROOT, description="The type of prompt")
-
-
-class PromptCreate(PromptBase):
-    parent_id: Optional[str] = Field(None, description="The ID of the parent prompt")
-
 
 class Prompt(PromptBase):
     model_config = ConfigDict(from_attributes=True)
@@ -69,48 +37,6 @@ class UserCreate(BaseModel):
     mobile: Optional[str] = None
     browser: str
     ip: str
-
-
-class User(BaseModel):
-    """Full user model with all fields."""
-
-    id: str
-    username: Optional[str] = None
-    email: Optional[str] = None
-    mobile: Optional[str] = None
-    browser: str
-    ip: str
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class SessionBase(BaseModel):
-    title: Optional[str] = Field(None, max_length=255)
-    browser: str = Field(..., max_length=255)
-    ip: str = Field(..., max_length=50)
-    is_active: bool = Field(default=True)
-
-
-class SessionCreate(SessionBase):
-    user_id: str
-    current_prompt_id: Optional[str] = None
-
-
-class Session(SessionBase):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    session_id: str
-    user_id: str
-    current_prompt_id: Optional[str] = None
-    requirements_met: bool = False
-    follow_up_count: int = 0
-    created_at: datetime
-    last_interaction_at: datetime
-    updated_at: datetime
-
 
 class MessageBase(BaseModel):
     content: str = Field(..., description="Message content")
@@ -142,20 +68,6 @@ class UserRegisterResponse(BaseModel):
     status: str
     message: str
     session_id: str
-
-
-class FollowUp(BaseModel):
-    type: FollowUpType
-    question: str = Field(..., description="The follow-up question to ask")
-    context: str = Field(
-        ..., description="Context explaining why this follow-up is being asked"
-    )
-    options: Optional[List[str]] = Field(
-        default=None, description="Possible response options for nested questions"
-    )
-
-    model_config = ConfigDict(from_attributes=True)
-
 
 class SentMessage(BaseModel):
     """Message sent by the user to the chatbot."""
@@ -202,27 +114,6 @@ class SentMessage(BaseModel):
             }
         }
     )
-
-
-class StreamingChatResponse(BaseModel):
-    status: str = Field(
-        ..., description="Status of the response: 'follow_up', 'complete', 'error'"
-    )
-    message: str = Field(..., description="Main response message")
-    follow_up: Optional[FollowUp] = Field(
-        None, description="Follow-up question if status is 'follow_up'"
-    )
-    content: Optional[str] = Field(None, description="Additional content or context")
-    suggestions: Optional[List[str]] = Field(
-        None, description="Suggested responses or actions"
-    )
-    sources: Optional[List[str]] = Field(None, description="Source references if any")
-    conversation_history: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Recent conversation history"
-    )
-
-    model_config = ConfigDict(from_attributes=True)
-
 
 class HistoryResponse(BaseModel):
     session_id: str = Field(..., description="UUID of the chat session")
