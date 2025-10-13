@@ -88,7 +88,6 @@ async def initialize_session_with_prompt(
         cursor.close()
         conn.close()
 
-
 async def save_message(message_data: MessageCreate) -> Message:
     """Save a message to the database with proper relationships and metadata."""
     conn = get_db_conn()
@@ -153,7 +152,6 @@ async def save_message(message_data: MessageCreate) -> Message:
         cursor.close()
         conn.close()
 
-
 async def get_messages_for_session(session_id: UUID) -> List[Message]:
     """Retrieve all messages for a given session with their relationships and metadata."""
     conn = get_db_conn()
@@ -200,8 +198,6 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
         cursor.close()
         conn.close()
 
-
-
 async def send_message_stream(
     req: SentMessage, follow_up_manager=Depends(get_follow_up_manager)
 ):
@@ -214,11 +210,7 @@ async def send_message_stream(
     """
     try:
         logger.info("========== send_message_stream called ==========")
-        session_id = (req.session_id)
-        qwry = (req.query or "").strip()
-    
-        chunk_list = []
-        
+        session_id = (req.session_id)    
         if not session_id:
             raise HTTPException(status_code=422, detail="Invalid session_id provided")
 

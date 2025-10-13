@@ -44,7 +44,7 @@ def store_text(session_id: str, text: str) -> bool:
 
 
 # ✅ Updated similarity_search with correct RediSearch query syntax
-def similarity_search(session_id: str, query: str, top_n: int = 5) -> list:
+def similarity_search(session_id: str, query: str, top_n: int = 4) -> list:
     r = get_redis  # Use as object, not callable
     query_embedding = vectorize_text(query)
     query_blob = np.array(query_embedding, dtype=np.float32).tobytes()
