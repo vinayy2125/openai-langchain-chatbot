@@ -100,7 +100,6 @@ User Query: {query}
 Return ONLY the search keys, one per line, without numbers or bullets.
 """
 
-
 def count_tokens_template():
     return """
 Provide a detailed answer that fully addresses the user's question.

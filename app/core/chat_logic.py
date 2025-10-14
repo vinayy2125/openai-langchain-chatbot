@@ -15,19 +15,7 @@ async def build_chatbot_response(
     prompt_context: Optional[str] = None,
     mode: str = "complete",
 ) -> AsyncGenerator[Any, None]:
-    """
-    Build a streaming response from the chatbot that handles both direct responses and follow-up suggestions.
 
-    Args:
-        session_id: The session identifier
-        follow_up_manager: Instance of FollowUpManager
-        conversation_history: List of conversation messages
-        prompt_context: Original prompt context
-        mode: Either "follow_up" or "complete" to determine response type
-
-    Yields:
-        Formatted SSE messages for streaming response
-    """
     try:
         # Get session data and validate
         session_data = follow_up_manager.get_session_data(session_id)

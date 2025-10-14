@@ -1,11 +1,10 @@
 import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Union, Optional
-
-from app.db.redis_vector_helper import store_text, similarity_search, r
-
+from app.config import get_redis
+from app.db.redis_vector_helper import store_text, similarity_search 
 router = APIRouter()
 
 logging.basicConfig(level=logging.INFO)
@@ -37,14 +36,14 @@ class RedisContextDataResponse(BaseModel):
 @router.post("/redis-context", response_model=Union[RedisContextDataResponse, RedisContextStoreResponse])
 async def redis_context_endpoint(payload: RedisContextRequest):
     if payload.fetch_context:
-        strt_time = datetime.utcnow()
+        strt_time = datetime.now(timezone.utc)
         # Use similarity_search to get queries with similarity scores
         key = f"session:{payload.session_id}"
-        stored_results = r.json().get(key)
+        stored_results = get_redis.json().get(key)
         if stored_results and "created_at" in stored_results:
             created_at = stored_results["created_at"]
         else:
-            created_at = datetime.utcnow().isoformat()
+            created_at = datetime.now(timezone.utc).isoformat()
 
         queries = similarity_search(payload.session_id, payload.text)
         logging.info(f"Similarity search returned {payload.text} results.")
@@ -64,15 +63,15 @@ async def redis_context_endpoint(payload: RedisContextRequest):
             "session_id": payload.session_id,
             "created_at": created_at,
             "queries": cleaned_queries,
-            "response_time": (datetime.utcnow() - strt_time).total_seconds(),
+            "response_time": (datetime.now(timezone.utc) - strt_time).total_seconds(),
         }
         return RedisContextDataResponse(**response_obj)
 
     else:
         # Store the text after vectorizing
-        strt_time = datetime.utcnow()
+        strt_time = datetime.now(timezone.utc)
         success = store_text(payload.session_id, payload.text)
-        response_time = (datetime.utcnow() - strt_time).total_seconds()       
+        response_time = (datetime.now(timezone.utc) - strt_time).total_seconds()       
         if success:
             return RedisContextStoreResponse(status="success", message="Text stored successfully.", response_time=response_time)
         else:
