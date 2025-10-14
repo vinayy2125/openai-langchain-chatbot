@@ -5,12 +5,11 @@ import re
 import os
 import tiktoken
 from pydantic import SecretStr
-from app.core.utils import generate_llm_response
-from typing import List, Tuple, Generator
+from typing import List, Generator
 from functools import lru_cache
 from langchain_openai import ChatOpenAI
 from datetime import datetime
-from app.core.prompts import key_generate_prompt, count_tokens_template, Requirements, final_response_prompt
+from app.core.prompts import key_generate_prompt, Requirements, final_response_prompt
 from app.core.redis_context import get_redis_context_chunks
 from app.core.utils import generate_llm_response
 from app.core.response_formatter import format_response
@@ -42,42 +41,6 @@ class ContextOptimizer:
     def count_tokens_cached(self, text: str) -> int:
         return len(self.encoding.encode(text))
 
-    def score_chunk_relevance(self, chunk: str, question: str) -> float:
-        if not question:
-            return 0.0
-        question_words = set(question.lower().split())
-        chunk_words = set(chunk.lower().split())
-        overlap = len(question_words.intersection(chunk_words))
-        total_question_words = max(len(question_words), 1)
-        relevance_score = overlap / total_question_words
-        key_terms = ["what", "how", "why", "when", "where", "who", "which"]
-        for term in key_terms:
-            if term in question.lower() and term in chunk.lower():
-                relevance_score += 0.1
-        return min(relevance_score, 1.0)
-
-    def prioritize_chunks(self, chunks: List[str], question: str, max_chunks: int = 8) -> List[str]:
-        """Deterministically score and return top chunks by relevance and length."""
-        if not chunks:
-            return []
-
-        scored: List[Tuple[float, int, str]] = []
-        for idx, chunk in enumerate(chunks):
-            try:
-                score = self.score_chunk_relevance(chunk, question)
-            except Exception:
-                score = 0.0
-            scored.append((score, len(chunk), chunk))
-
-        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
-        prioritized = [c for _, _, c in scored[:max_chunks]]
-        return prioritized
-
-    def truncate_to_tokens(self, text: str, max_tokens: int) -> str:
-        tokens = self.encoding.encode(text)
-        if len(tokens) <= max_tokens:
-            return text
-        return self.encoding.decode(tokens[:max_tokens])
 
 class OptimizedChatbot:
     """
@@ -110,18 +73,6 @@ class OptimizedChatbot:
 
         self.conversation_state = {} 
 
-    def _init_conversation_state(self, session_id: str):
-        """Initialize a flexible conversation state tracker."""
-        if session_id not in self.conversation_state:
-            self.conversation_state[session_id] = {
-                "topics_covered": set(),  
-                "topics_to_explore": set(),  
-                "user_context": {},  
-                "follow_up_strategy": "explore", 
-                "follow_up_count": 0, 
-                "last_generated": None,  
-            }
-        return self.conversation_state[session_id]
 
     def reset_follow_up_count(self, session_id: str):
         """Reset the follow-up count for a session, useful when switching prompts."""
@@ -170,11 +121,7 @@ class OptimizedChatbot:
         session_id: str = "default",
         stream: bool = True,
     ) -> Generator:
-        """
-        Enhanced response generation with Redis context retrieval:
-        1. Query + chat_history → Redis context chunks
-        2. Query + Context + History + Instructions → Main LLM → Response
-        """
+
         try:
             try:
                 search_keys = self._generate_search_keys(query) or []
@@ -306,11 +253,6 @@ class OptimizedChatbot:
         return text.strip()
 
     def _generate_search_keys(self, query: str) -> List[str]:
-        """
-        Use self.query_llm (GPT-4o-mini) with key_generate_prompt to produce compact search keys.
-        Returns a list of simple tokens/phrases to bias Redis vector retrieval.
-        This is resilient: on any error it returns an empty list so retrieval falls back to normal flow.
-        """
         try:
             # key_generate_prompt is a function that returns a prompt string when called
             try:
@@ -366,9 +308,7 @@ class OptimizedChatbot:
             if not resp:
                 return []
 
-            # Parse: split on newlines/commas and clean tokens
             raw = str(resp).strip()
-            # Accept common formats: comma separated, newline separated, JSON array
             keys = []
             try:
                 
@@ -395,8 +335,3 @@ class OptimizedChatbot:
             f"{'User' if role == 'user' else 'Assistant'}: {msg}"
             for role, msg in chat_history
         )
-
-
-    
-
-
