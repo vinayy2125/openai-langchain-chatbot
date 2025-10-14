@@ -1,9 +1,42 @@
-# core_services/embedding_utils.py
+"""Embedding utilities using SentenceTransformers with local-model support."""
+from typing import List, Optional
+import os
+import logging
+import numpy as np
 from sentence_transformers import SentenceTransformer
 
-model = SentenceTransformer("google/embeddinggemma-300m")
+logger = logging.getLogger(__name__)
 
-def get_embedding(text: str) -> list[float]:
-    """Get embedding vector for a given text using the loaded model."""
+# Allow overriding the model path via environment for offline/local use
+EMBEDDING_MODEL_PATH = os.getenv("EMBEDDING_MODEL_PATH") or os.getenv("EMBEDDING_MODEL")
+DEFAULT_MODEL_NAME = "google/embeddinggemma-300m"
+
+MODEL_NAME = EMBEDDING_MODEL_PATH or DEFAULT_MODEL_NAME
+
+try:
+    model = SentenceTransformer(MODEL_NAME)
+    logger.info("Loaded SentenceTransformer model: %s", MODEL_NAME)
+except Exception as e:
+    logger.exception("Failed to load embedding model %s: %s", MODEL_NAME, e)
+    # re-raise so calling code notices configuration issues early
+    raise
+
+
+def _to_float_list(emb) -> List[float]:
+    try:
+        if hasattr(emb, "tolist"):
+            out = emb.tolist()
+        else:
+            out = list(emb)
+    except Exception:
+        out = list(np.asarray(emb).reshape(-1).astype(float).tolist())
+    return [float(x) for x in out]
+
+
+def get_embedding(text: str) -> List[float]:
+    """Get embedding vector for a given text using the loaded model.
+
+    Returns a plain Python list[float].
+    """
     emb = model.encode_query(text)
-    return emb.tolist()
+    return _to_float_list(emb)
