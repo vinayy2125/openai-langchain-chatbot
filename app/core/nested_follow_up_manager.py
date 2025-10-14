@@ -1,9 +1,8 @@
-from typing import Any, List, Dict, Optional
+from typing import List, Dict
 import logging
 from app.core.services.chatbot_optimizer import OptimizedChatbot
-from app.core.prompts import SHARED_SYSTEM_PROMPT
 from app.core.utils import generate_llm_response  
-from app.core.prompts import SHARED_SYSTEM_PROMPT, assesment_prompt, final_response_prompt
+from app.core.prompts import SHARED_SYSTEM_PROMPT, assesment_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -106,30 +105,6 @@ class FollowUpManager:
 
 		return False
 
-	def generate_comprehensive_response(self, session_id: str) -> Any:
-		"""Generate a comprehensive final response when requirements are complete"""
-		session_data = self.get_session_data(session_id)
-		prompt_context = session_data.get("prompt_context", "")
-		conversation_history = session_data.get("conversation_history", [])
-
-		# Build a comprehensive prompt for final response
-		conversation_summary = self.format_conversation_history(conversation_history)
-		comprehensive_prompt = final_response_prompt(conversation_summary=conversation_summary, prompt_context=prompt_context)
-		messages = [{"role": "system", "content": SHARED_SYSTEM_PROMPT}, {"role": "user", "content": comprehensive_prompt}]
-
-		try:
-			logger.info("Calling LLM for comprehensive response (generate_comprehensive_response)")
-			response = generate_llm_response(messages)
-			response_text = response if isinstance(response, str) else (str(response) if response is not None else None)
-			logger.debug(
-				f"[generate_comprehensive_response] Generated comprehensive response of {len(response_text) if response_text else 0} characters"
-			)
-			# Tag the response so callers can know which prompt produced it
-			return {"source": "comprehensive", "text": response_text}
-		except Exception as e:
-			logger.error(f"[generate_comprehensive_response] Failed: {e}")
-			return {"source": "comprehensive", "text": "I apologize, but I encountered an issue generating a comprehensive response. Please try rephrasing your question."}
-
 	def get_session_data(self, session_id):
 		"""
 		Retrieve session data for a given session_id.
@@ -153,7 +128,3 @@ class FollowUpManager:
 		session_data = self.get_session_data(session_id)
 		return session_data.get("conversation_history", [])
 
-	# Suggestion/follow-up generation is now unified under the OptimizedChatbot
-	# which uses the `final_response_prompt` to return main answer, suggestions
-	# and follow-ups in a single, structured output. The separate helpers were
-	# removed to reduce duplication and improve performance.

@@ -33,11 +33,6 @@ async def build_chatbot_response(
         if not latest_query and prompt_context:
             latest_query = prompt_context.split("\n")[0][:140]
 
-        # Unified flow: always use the OptimizedChatbot to produce a comprehensive
-        # response that includes the main answer, optional suggestions, and follow-ups
-        # (the `final_response_prompt` enforces the output format: main answer, blank
-        # line, suggestions list, blank line, follow-up list). This removes duplicate
-        # branching and separate suggestion/follow-up generation.
         try:
             response_stream = follow_up_manager.chatbot.get_detailed_response(
                 query=latest_query,
