@@ -31,7 +31,6 @@ SSE_HEADERS = {
     "Access-Control-Allow-Headers": "*",
 }
 
-
 # User Management Routes
 @router.post("/user/register", response_model=UserRegisterResponse)
 async def register_user(user: UserCreate):
