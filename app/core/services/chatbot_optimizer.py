@@ -10,10 +10,10 @@ from typing import List, Tuple, Generator
 from functools import lru_cache
 from langchain_openai import ChatOpenAI
 from datetime import datetime
-from app.core.prompts import key_generate_prompt, count_tokens_template, Requirements
+from app.core.prompts import key_generate_prompt, count_tokens_template, Requirements, final_response_prompt
 from app.core.redis_context import get_redis_context_chunks
 from app.core.utils import generate_llm_response
-from app.core.redis_context import get_redis_context_chunks
+from app.core.response_formatter import format_response
 
 
 
@@ -213,14 +213,10 @@ class OptimizedChatbot:
             logger.info(f"[Chatbot] Redis Context Retrieved: {len(context)} characters, {len(context_chunks) if context_chunks else 0} chunks")
             logger.info(f"[Chatbot] Chat History: {len(chat_history)} messages")
 
-            # Always construct the standard prompt using the retrieved context
-            prompt = (
-                "You are Ditstek Assistant. Use the following context to answer the user's question...\n"
-                f"CONTEXT:\n{context}\n\nUSER QUERY: {query}"
-            )
-
-            # At this point we have `prompt` ready to send to the LLM
-            logger.info(f"[Chatbot] Prompt prepared (first 300 chars): {str(prompt)[:300]}")
+            # Construct the unified final response prompt using centralized template
+            history_str = history or ""
+            prompt = final_response_prompt(prompt_context=context, conversation_summary=history_str)
+            logger.info("[Chatbot] Prompt prepared (first 300 chars): %s", str(prompt)[:300])
             try:
                 # Use the centralized helper which creates proper message objects
 
@@ -242,12 +238,14 @@ class OptimizedChatbot:
 
                 logger.info(f"[Chatbot] Final LLM output length={len(final_text)}; preview: {final_text[:300]}")
 
-                # Stream paragraph-level chunks to callers (cleaned)
+                # Stream paragraph-level chunks to callers; apply cleaning and formatting
                 paragraphs = [p for p in final_text.split("\n\n") if p.strip()]
                 for p_idx, paragraph in enumerate(paragraphs):
                     cleaned = self._clean_response_formatting(paragraph)
-                    if cleaned:
-                        yield {"status": "chunk", "chunk": cleaned}
+                    # Apply higher-level formatting rules per paragraph
+                    formatted = format_response(cleaned, query, None)
+                    if formatted:
+                        yield {"status": "chunk", "chunk": formatted}
                     # Preserve paragraph separation as an explicit small chunk
                     if p_idx < len(paragraphs) - 1:
                         yield {"status": "chunk", "chunk": "\n\n"}
@@ -409,7 +407,26 @@ class OptimizedChatbot:
                         invoke_payload = [(m["role"], m["content"]) for m in messages]
                         resp_obj = self.query_llm.invoke(invoke_payload)
 
-                    resp = getattr(resp_obj, "content", None) or (resp_obj.get("content") if hasattr(resp_obj, "get") else str(resp_obj))
+                    # Extract content safely from various possible response object shapes
+                    resp = None
+                    try:
+                        resp = getattr(resp_obj, "content", None)
+                    except Exception:
+                        resp = None
+
+                    if not resp:
+                        try:
+                            # dict-like objects may implement .get; obtain it safely
+                            get_fn = getattr(resp_obj, "get", None)
+                            if callable(get_fn):
+                                resp = get_fn("content")
+                            else:
+                                resp = None
+                        except Exception:
+                            try:
+                                resp = str(resp_obj)
+                            except Exception:
+                                resp = None
                 except Exception as e:
                     logger.debug("Direct query_llm invoke failed: %s", e)
 
@@ -417,7 +434,7 @@ class OptimizedChatbot:
                 return []
 
             # Parse: split on newlines/commas and clean tokens
-            raw = resp.strip()
+            raw = str(resp).strip()
             # Accept common formats: comma separated, newline separated, JSON array
             keys = []
             # quick JSON array parse attempt
