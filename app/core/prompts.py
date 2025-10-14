@@ -54,20 +54,6 @@ MANDATORY FORMATTING RULES
 """)
 
 
-def dynamic_follow_up(prompt_context: str, latest_query: Optional[str], context: Optional[str], conversation_summary: Optional[str]) -> str:
-    return f"""Based on this conversation, generate a single dynamic follow-up to guide the user and gather more information.
-
-Original Context: {prompt_context}  
-Latest Query: {latest_query if latest_query else 'N/A'}  
-Additional Context: {context if context else 'N/A'}  
-
-Recent Conversation:  
-{conversation_summary}  
-
-Generate exactly one natural and helpful follow-up question.
-"""
-
-
 def final_response_prompt(prompt_context: str, conversation_summary: Optional[str]) -> str:
     return f"""
 Based on the conversation so far, write a clear and direct answer that fully addresses the user’s question using only relevant context.
@@ -106,80 +92,13 @@ Respond with ONLY: COMPLETE, CONTINUE, or IRRELEVANT
 """
 
 
-def suggestion_prompts(prompt_context: str, context: str, conversation_summary: str) -> str:
-    return f"""Based on this conversation, generate a single concise and actionable suggestion or recommendation.
+def key_generate_prompt(query: str) -> str:
+    return f"""Break down this user query into 3-5 specific search keys/terms to find relevant knowledge base information.
 
-Original Context: {prompt_context}  
-Additional Context: {context}  
+User Query: {query}
 
-Recent Conversation:  
-{conversation_summary}  
-
-Provide exactly one suggestion in 1–2 sentences.
+Return ONLY the search keys, one per line, without numbers or bullets.
 """
-
-
-def enhanced_query_prompt(context_text: str, latest_query: str, conversation_history: Optional[Any]) -> str:
-    if conversation_history and isinstance(conversation_history, (list, tuple)):
-        prev_context = conversation_history[-2:]
-    else:
-        prev_context = 'None'
-    return f"""
-# Ditstek Innovations - Expert AI Assistant System Prompt
- 
-You are an expert AI assistant for **Ditstek Innovations**.  
-Format your response based on the query type and follow all formatting and clarity rules.
- 
----
- 
-## Response Guidelines
- 
-### 1. Simple Queries (e.g., *what is*, *how to*)
-- Respond in **one clear, direct sentence** when possible.  
-- Use a **conversational and friendly tone**.  
-- **Skip unnecessary details**.
- 
----
- 
-### 2. Technical Questions
-- Use **bullet points** for clarity.  
-- Include **specific technologies, tools, or methods**.  
-- Keep content **practical and implementation-focused**.
- 
----
- 
-### 3. Feature or Requirement Discussions
-- **Break down** the topic logically.  
-- Use **bulleted or numbered lists** for clarity.  
-- Mention **technical considerations, trade-offs, or dependencies**.  
-- Reference **similar or related Ditstek projects** if relevant.
- 
----
- 
-### 4. When Exact Information Isn't Available
-- Provide **closest relevant knowledge**.  
-- **Guide the user** toward known solutions or documentation.  
-- Suggest **specific, practical alternatives**.
- 
----
- 
-## Formatting Rules
-- **Start directly** (avoid “At Ditstek…” openings).  
-- Use **markdown** (headings, bullets, spacing).  
-- Keep **paragraphs short** (2–3 sentences max).  
-- Add **spacing between sections** for readability. 
- 
----
-
-Previous context: {prev_context}
-
-### Context
-{context_text}
- 
-### Current Query
-{latest_query}
-"""
-
 
 def count_tokens_template():
     return """
@@ -187,14 +106,6 @@ Provide a detailed answer that fully addresses the user's question.
 Include specific examples and explanations.
 Structure your response with clear sections.
 Include relevant background information.
-"""
-
-def key_generate_prompt(query: str) -> str:
-    return f"""Break down this user query into 3-5 specific search keys/terms to find relevant knowledge base information.
-
-User Query: {query}
-
-Return ONLY the search keys, one per line, without numbers or bullets.
 """
 class Requirements:
     requirement_categories = [

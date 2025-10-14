@@ -41,7 +41,7 @@ def create_index_from_yaml(yaml_path: str):
         return
 
     # get_redis in config returns a connected redis client instance
-    r = get_redis
+    r = get_redis()
 
     # Check if required Redis modules are loaded
     try:
@@ -203,7 +203,7 @@ def embed_chunk_with_id(index: int, chunk_text: str, session_id: str) -> Dict[st
 def store_chunk_document(chunk_id: str, data: Dict[str, Any]) -> bool:
     """Store a single chunk as a Redis JSON document."""
     try:
-        r = get_redis
+        r = get_redis()
         # Verify RedisJSON functionality
         key = f"chunk:{chunk_id}"
         r.json().set(key, "$", data)

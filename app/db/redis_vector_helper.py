@@ -10,8 +10,7 @@ from core_services.embedding_utils import get_embedding as vectorize_text
 logger = logging.getLogger(__name__)
 
 
-# Use the Redis client from the config
-r = get_redis
+# Always get the Redis client inside each function by calling get_redis()
 
 def store_text(session_id: str, text: str) -> bool:
     """Store the text along with its vectorized representation in Redis under the session_id in a structured JSON format."""
@@ -25,18 +24,19 @@ def store_text(session_id: str, text: str) -> bool:
     }
     key = f"session:{session_id}"
     try:
-        stored = r.json().get(key)
+        stored = get_redis.json().get(key)
         if stored is None:
+
             # Initialize with a new object
             new_obj = {
                 "session_id": session_id,
                 "created_at": now,
                 "queries": [query_obj]
             }
-            r.json().set(key, '$', new_obj)
+            get_redis.json().set(key, '$', new_obj)
         else:
             # Append the new query object
-            r.json().arrappend(key, '$.queries', query_obj)
+            get_redis.json().arrappend(key, '$.queries', query_obj)
         return True
     except Exception as e:
         # Optionally log the exception
@@ -45,7 +45,6 @@ def store_text(session_id: str, text: str) -> bool:
 
 # ✅ Updated similarity_search with correct RediSearch query syntax
 def similarity_search(session_id: str, query: str, top_n: int = 4) -> list:
-    r = get_redis  # Use as object, not callable
     query_embedding = vectorize_text(query)
     query_blob = np.array(query_embedding, dtype=np.float32).tobytes()
     logging.info(f"Performing similarity search for session_id: {session_id} with query: {query}")
@@ -59,7 +58,7 @@ def similarity_search(session_id: str, query: str, top_n: int = 4) -> list:
             .paging(0, top_n)
             .dialect(2)
         )
-        results = r.ft("chunk_index").search(q, query_params={"vec": query_blob})
+        results = get_redis.ft("chunk_index").search(q, query_params={"vec": query_blob})
     except Exception as e:
         logger.error(f"❌ RediSearch query failed: {e}")
         return []
