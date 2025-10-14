@@ -3,7 +3,7 @@ import logging
 from app.core.services.chatbot_optimizer import OptimizedChatbot
 from app.core.prompts import SHARED_SYSTEM_PROMPT
 from app.core.utils import generate_llm_response  
-from app.core.prompts import SHARED_SYSTEM_PROMPT, assesment_prompt, dynamic_follow_up, final_response_prompt, suggestion_prompts
+from app.core.prompts import SHARED_SYSTEM_PROMPT, assesment_prompt, final_response_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -130,35 +130,6 @@ class FollowUpManager:
 			logger.error(f"[generate_comprehensive_response] Failed: {e}")
 			return {"source": "comprehensive", "text": "I apologize, but I encountered an issue generating a comprehensive response. Please try rephrasing your question."}
 
-	def generate_suggestions(self, session_id: str, context: str = "") -> List[str]:
-		"""Generate actionable suggestions based on conversation and context"""
-		session_data = self.get_session_data(session_id)
-		conversation_history = session_data.get("conversation_history", [])
-		prompt_context = session_data.get("prompt_context", "")
-
-		# Build suggestion prompt
-		conversation_summary = self.format_conversation_history(
-			conversation_history[-4:]
-		)  # Last 4 messages for context
-
-		suggestion_prompt = suggestion_prompts(prompt_context = prompt_context, context = context, conversation_summary = conversation_summary)
-
-
-		messages = [
-			{"role": "system", "content": SHARED_SYSTEM_PROMPT},
-			{"role": "user", "content": suggestion_prompt},
-		]
-
-		try:
-			response = generate_llm_response(messages)
-			logger.debug("[generate_suggestions] Generated suggestions:")
-			if not isinstance(response, str):
-				return [response] if response else ["Consider exploring related topics"]
-			return [line.strip() for line in response.split("\n") if line.strip()]
-		except Exception as e:
-			logger.error(f"[generate_suggestions] Failed: {e}")
-			return ["Consider exploring related topics"]  # Single fallback suggestion
-
 	def get_session_data(self, session_id):
 		"""
 		Retrieve session data for a given session_id.
@@ -182,41 +153,7 @@ class FollowUpManager:
 		session_data = self.get_session_data(session_id)
 		return session_data.get("conversation_history", [])
 
-	def generate_follow_ups(
-		self,
-		session_id: str,
-		latest_query: Optional[str] = None,
-		context: Optional[str] = None,
-	) -> List[str]:
-		"""Generate a single, focused follow-up based on session data, latest query, and optional context."""
-		session_data = self.get_session_data(session_id)
-		conversation_history = session_data.get("conversation_history", [])
-		prompt_context = session_data.get("prompt_context", "")
-
-		# Build follow-up prompt
-		conversation_summary = self.format_conversation_history(
-			conversation_history[-4:]
-		)  # Last 4 messages for context
-
-		follow_up_prompt = dynamic_follow_up(
-			prompt_context=prompt_context,
-			latest_query=latest_query,
-			context=context,
-			conversation_summary=conversation_summary
-		)
-
-
-		messages = [
-			{"role": "system", "content": SHARED_SYSTEM_PROMPT},
-			{"role": "user", "content": follow_up_prompt},
-		]
-
-		try:
-			response = generate_llm_response(messages)
-			logger.debug("[generate_follow_ups] Generated follow-ups: ")
-			if not isinstance(response, str):
-				return [response] if response else ["Could you provide more details?"]
-			return [line.strip() for line in response.split("\n") if line.strip()]
-		except Exception as e:
-			logger.error(f"[generate_follow_ups] Failed: {e}")
-			return ["Could you provide more details?"]  # Single fallback follow-up
+	# Suggestion/follow-up generation is now unified under the OptimizedChatbot
+	# which uses the `final_response_prompt` to return main answer, suggestions
+	# and follow-ups in a single, structured output. The separate helpers were
+	# removed to reduce duplication and improve performance.
