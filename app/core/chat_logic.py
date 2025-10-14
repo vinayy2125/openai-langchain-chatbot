@@ -18,19 +18,7 @@ async def build_chatbot_response(
     prompt_context: Optional[str] = None,
     mode: str = "complete",
 ) -> AsyncGenerator[Any, None]:
-    """
-    Build a streaming response from the chatbot that handles both direct responses and follow-up suggestions.
 
-    Args:
-        session_id: The session identifier
-        follow_up_manager: Instance of FollowUpManager
-        conversation_history: List of conversation messages
-        prompt_context: Original prompt context
-        mode: Either "follow_up" or "complete" to determine response type
-
-    Yields:
-        Formatted SSE messages for streaming response
-    """
     try:
         # Get session data and validate
         session_data = follow_up_manager.get_session_data(session_id)
@@ -48,7 +36,6 @@ async def build_chatbot_response(
         if not latest_query and prompt_context:
             latest_query = prompt_context.split("\n")[0][:140]
 
-        # Check if requirements are complete and decide response strategy
         requirements_complete = follow_up_manager.check_requirements(session_id)
 
         if requirements_complete:
@@ -56,7 +43,6 @@ async def build_chatbot_response(
                 f"Requirements complete for session {session_id}, generating comprehensive response"
             )
 
-            # Call and normalize the comprehensive response safely.
             try:
                 raw_comp = follow_up_manager.generate_comprehensive_response(
                     session_id
@@ -67,7 +53,6 @@ async def build_chatbot_response(
                 )
                 raw_comp = None
 
-            # Normalize many possible return shapes into a safe string
             if raw_comp is None:
                 context_chunks = get_redis_context_chunks(
                     session_id, 
@@ -101,7 +86,6 @@ async def build_chatbot_response(
                 f"[ChatLogic] Normalized comprehensive_response len={len(comprehensive_response)} preview={comprehensive_response[:300]!r}"
             )
 
-            # Guarantee at least one user-visible chunk so SSE doesn't stall
             if not comprehensive_response:
                 comprehensive_response = (
                     "I'm sorry —. "
@@ -111,8 +95,6 @@ async def build_chatbot_response(
                     "[ChatLogic] Using fallback comprehensive_response for session %s", session_id
                 )
 
-            # Format and stream the response in a concise, structured way
-            # Process the response to ensure proper markdown formatting and structure
             lines = comprehensive_response.split("\n")
             current_section = []
 
@@ -121,9 +103,7 @@ async def build_chatbot_response(
                 if not line:
                     continue
 
-                # Convert headers to consistent format
                 if line.startswith("#"):
-                    # If we have accumulated content, send it
                     if current_section:
                         yield {
                             "status": "chunk",
@@ -131,19 +111,14 @@ async def build_chatbot_response(
                         }
                         current_section = []
 
-                    # Format header and send
                     header = re.sub(r"^#{1,6}\s*", "###### ", line)
                     yield {"status": "chunk", "chunk": "\n\n" + header + "\n"}
                 else:
-                    # Process regular content
-                    # Ensure proper bold formatting
                     line = re.sub(r"\*\*([^*]+)\*\*", r"**\1**", line)
-                    # Ensure bullet points are properly formatted
                     if line.lstrip().startswith("- "):
                         line = line.strip()
                     current_section.append(line)
 
-            # Format and send remaining content
             if current_section:
                 
                 formatted_content = format_response(
@@ -153,17 +128,14 @@ async def build_chatbot_response(
                 )
                 yield {"status": "complete_chunk", "chunk": formatted_content}
 
-            # Add spacing and final suggestions
             yield {
                 "status": "separator",
                 "chunk": "\n\n",
-            }  # Extra spacing after main content
+            }  
 
-            # Add clear separation before suggestions and follow-ups
             yield {"status": "separator", "chunk": "\n\n"}
 
             try:
-                # Generate both suggestions and follow-ups
                 suggestions = follow_up_manager.generate_suggestions(
                     session_id, context="comprehensive response completed"
                 )
@@ -171,11 +143,9 @@ async def build_chatbot_response(
                     session_id, latest_query, context="comprehensive response"
                 )
 
-                # Format suggestions with bullet points and bold highlights
                 if suggestions:
                     formatted_suggestions = []
-                    for s in suggestions[:2]:  # Limit to 2 suggestions
-                        # Ensure suggestion starts with bullet point
+                    for s in suggestions[:2]:  
                         s = s.strip()
                         if not s.startswith("- "):
                             s = "- " + s
@@ -204,13 +174,11 @@ async def build_chatbot_response(
                         "chunk": "- Consider implementing a **proof of concept** to validate the approach",
                     }
 
-                # Add spacing between sections
                 yield {"status": "separator", "chunk": "\n\n"}
 
-                # Format follow-ups with clear structure
                 if follow_ups and len(follow_ups) > 0:
                     formatted_followups = []
-                    for f in follow_ups[:2]:  # Limit to 2 follow-ups
+                    for f in follow_ups[:2]:  
                         f = f.strip()
                         if not f.startswith("- "):
                             f = "- " + f
@@ -227,7 +195,6 @@ async def build_chatbot_response(
 
             except Exception as e:
                 logger.error(f"Error generating suggestions and follow-ups: {e}")
-                # Fallback with generic grouped suggestions and follow-ups
                 yield {
                     "status": "suggestions",
                     "chunk": "Consider implementing a proof of concept to validate the approach",
@@ -239,12 +206,10 @@ async def build_chatbot_response(
                 }
 
         else:
-            # Generate concise response + specific follow-ups to gather more requirements
             logger.info(
                 f"Requirements incomplete for session {session_id}, generating concise response with follow-ups"
             )
 
-            # FIX: Smart context detection instead of hardcoded patterns
             assistant_messages = [
                 msg
                 for msg in (conversation_history or [])
@@ -255,15 +220,12 @@ async def build_chatbot_response(
             )
             is_manual_query = prompt_context is None and len(assistant_messages) == 0
 
-            # FIX: Unified prompt instruction with smart context awareness
-            # Always use Redis for context retrieval
             context_chunks = get_redis_context_chunks(
                 session_id=session_id,
                 query=latest_query,
                 conversation_history=conversation_history or [],
                 top_n=4,
             )
-            # Log retrieved context (short preview) for each query to help debugging
             try:
                 preview_items = [c[:300] for c in context_chunks[:4]]
                 logger.debug("[ChatLogic] Retrieved context chunks preview: %s", preview_items)
@@ -272,12 +234,8 @@ async def build_chatbot_response(
             context_text = "\n".join(context_chunks)
             if is_prompt_selection or is_manual_query:
                 enhanced_query = enhanced_query_prompt(context_text=context_text, latest_query=latest_query, conversation_history=conversation_history or [])
-                # Log the enhanced query (short preview) for debugging
             logger.info(f"[ChatLogic] Enhanced query prepared (first 300 chars): {str(enhanced_query)[:300]}")
-            # Generate and format the main response
             main_response = ""
-            # Call the chatbot with the raw latest_query and session_id so it
-            # performs Redis context retrieval and prompt construction itself.
             response_stream = follow_up_manager.chatbot.get_detailed_response(
                 query=latest_query,
                 chat_history=[(msg["role"], msg["content"]) for msg in (conversation_history or [])],
@@ -285,26 +243,19 @@ async def build_chatbot_response(
                 stream=True,
             )
 
-            # Process and format the response
             current_section = []
             saw_structured = False
             for chunk in response_stream:
                 if not chunk:
                     continue
 
-                # If upstream already emits structured dict events, prefer those
-                # and avoid reprocessing plain strings which can cause duplicates.
                 if isinstance(chunk, dict):
                     saw_structured = True
                     if "chunk" in chunk:
                         yield chunk
                         continue
-                    # If dict lacks a 'chunk' field, stringify it as a fallback
                     text_chunk = str(chunk)
                 else:
-                    # If we've already observed structured dict events from the
-                    # upstream generator, skip raw string chunks to avoid duplicate
-                    # emission paths (optimizer emits dicts). Otherwise process.
                     if saw_structured:
                         continue
                     text_chunk = str(chunk)
@@ -314,61 +265,48 @@ async def build_chatbot_response(
 
                 main_response += text_chunk
 
-                # Split into lines to process sections while preserving leading markers
                 lines = text_chunk.split("\n")
                 for line in lines:
-                    # Trim only trailing whitespace to preserve leading '-' or '#'
                     line = line.rstrip()
                     if not line.strip():
                         if current_section:
-                            # Join and send accumulated section preserving newlines
                             section_text = "\n".join(current_section)
                             yield {"status": "chunk", "chunk": section_text}
                             current_section = []
                         continue
 
-                    # Handle headers (allow leading spaces before '#')
                     if line.lstrip().startswith("#"):
                         if current_section:
                             section_text = "\n".join(current_section)
                             yield {"status": "chunk", "chunk": section_text}
                             current_section = []
 
-                        # Format header and send (preserve a blank line before)
                         header = re.sub(r"^#{1,6}\s*", "###### ", line.lstrip())
                         yield {"status": "chunk", "chunk": "\n\n" + header + "\n"}
                     else:
-                        # Process regular content
-                        # Bullet points: send them as their own chunk (preserve leading '-')
                         if line.lstrip().startswith("- "):
                             if current_section:
                                 section_text = "\n".join(current_section)
                                 yield {"status": "chunk", "chunk": section_text}
                                 current_section = []
-                            # Send bullet points as chunk events (preserve markdown)
                             yield {"status": "chunk", "chunk": line.lstrip()}
                         else:
                             current_section.append(line)
 
-            # Send any remaining content (preserve newlines)
             if current_section:
                 section_text = "\n".join(current_section)
                 yield {"status": "complete_chunk", "chunk": section_text}
 
-            # Add spacing after main response (no separator lines)
             yield {"status": "separator", "chunk": "\n\n"}  # Just spacing, no lines
 
-            # Save the main response to the conversation history
             if main_response:
                 follow_up_manager.add_to_conversation_history(
                     session_id, "assistant", main_response
                 )
 
-            # Add spacing after main response
             yield {"status": "separator", "chunk": "\n\n"}
 
             try:
-                # Generate single suggestion and follow-up
                 suggestion = (
                     follow_up_manager.generate_suggestions(
                         session_id, context=main_response[:200]
