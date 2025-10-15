@@ -8,13 +8,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 
 import yaml
-from redis.commands.search.field import TextField, VectorField, TagField
+from app.logger import get_logger
 from redis.commands.search.index_definition import IndexDefinition, IndexType
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 
 from app.config import get_redis
 from core_services.embedding_utils import get_embedding
 
+# Configure logging
 # Configure logging
 logger = logging.getLogger(__name__)
 
