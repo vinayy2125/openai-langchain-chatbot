@@ -9,7 +9,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     env:
-      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/AI-Chatbot-be
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/ai-chatbot-be
 
     permissions:
       contents: read
@@ -84,7 +84,7 @@ jobs:
       - name: Deploy on Droplet
         run: |
           ssh -o StrictHostKeyChecking=no -p 22 ${{ secrets.USER_PROD }}@${{ secrets.HOST_PROD }} << EOF
-            IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/AI-Chatbot-be:latest
+            IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/ai-chatbot-be:latest
 
             echo "Logging in to GHCR..."
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
