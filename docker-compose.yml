@@ -30,7 +30,7 @@ services:
   redis:
       image: redis/redis-stack:latest
       ports:
-        - "6379:6379"
+        - "6380:6379"
       environment:
         - REDIS_ARGS=--requirepass Ditstek12345 --bind 0.0.0.0 --protected-mode yes
       volumes:
