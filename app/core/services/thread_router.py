@@ -1,7 +1,7 @@
-import logging
+from app.logger import get_logger
 from typing import  Dict, Optional
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class ThreadManager:
     def __init__(self):

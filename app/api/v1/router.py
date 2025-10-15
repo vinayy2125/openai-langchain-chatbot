@@ -1,4 +1,4 @@
-import logging
+from app.logger import get_logger
 from fastapi import APIRouter, HTTPException, Depends
 from uuid import UUID
 from typing import List
@@ -17,8 +17,8 @@ from . import helpers
 from app.db.base import get_db_conn
 from app.api.deps import get_follow_up_manager
 
-# Get logger
-logger = logging.getLogger(__name__)
+# Get centralized logger
+logger = get_logger(__name__)
 
 # Create router
 router = APIRouter(prefix="/api/v1", tags=["v1"])
@@ -30,7 +30,6 @@ SSE_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "*",
 }
-
 
 # User Management Routes
 @router.post("/user/register", response_model=UserRegisterResponse)
@@ -96,9 +95,8 @@ async def get_chat_messages(session_id: str):
         session_uuid = UUID(session_id)
         messages = await get_messages_for_session(session_uuid)
         if not messages:
-            raise HTTPException(
-                status_code=404, detail="No messages found for this session"
-            )
+            # Return empty list if no messages found (do not raise 404)
+            return HistoryResponse(session_id=session_id, messages=[])
 
         formatted_messages = []
         for message in messages:
@@ -109,14 +107,16 @@ async def get_chat_messages(session_id: str):
                 timestamp = str(ts) if ts else None
             formatted_messages.append(
                 {
+                    "id": message.id,
                     "role": message.role,
                     "message": message.content,
                     "timestamp": timestamp,
+                    "reply_to": message.reply_to,
+                    "follow_up_to": message.follow_up_to,
+                    "metadata": message.metadata,
                 }
             )
         return HistoryResponse(session_id=session_id, messages=formatted_messages)
-    except HTTPException as e:
-        raise e
     except Exception as e:
         logger.error(f"Error retrieving chat messages: {str(e)}")
         raise HTTPException(status_code=500, detail="Error retrieving chat messages")

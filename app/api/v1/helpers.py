@@ -3,8 +3,8 @@ import os
 from typing import Dict, Any, List
 from fastapi.responses import StreamingResponse
 from uuid import UUID
-import logging
 import psycopg2
+from app.logger import get_logger
 from fastapi import HTTPException, Depends
 from app.api.deps import get_follow_up_manager
 from app.core.services.thread_router import ChatRouter
@@ -16,7 +16,7 @@ from app.api.v1.models import (
 )
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
@@ -201,15 +201,8 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
 async def send_message_stream(
     req: SentMessage, follow_up_manager=Depends(get_follow_up_manager)
 ):
-    """
-    Enhanced streaming chat endpoint:
-    - Thread/topic management
-    - Company-intent override
-    - Follow-up or complete response handling
-    - Context-switch detection with suggestions
-    """
+
     try:
-        logger.info("========== send_message_stream called ==========")
         session_id = (req.session_id)    
         if not session_id:
             raise HTTPException(status_code=422, detail="Invalid session_id provided")
@@ -329,7 +322,6 @@ async def send_message_stream(
                     if not chunk_norm:
                         continue
                     if chunk_norm in sent_chunks:
-                        logger.debug(f"[SSE] Skipping duplicate chunk (normalized)='{chunk_norm[:80]}'")
                         continue
                     sent_chunks.add(chunk_norm)
 
@@ -337,7 +329,6 @@ async def send_message_stream(
                     if status == "complete_chunk":
                         logger.info(f"========== chunk ========== {chunk_norm}")
 
-                    # Send the normalized chunk
                     yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
 
             return StreamingResponse(

@@ -1,11 +1,10 @@
 import json
-import re
-import logging
+from app.logger import get_logger
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from app.core.response_formatter import format_response
 
 # Initialize logger
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def build_chatbot_response(
@@ -15,19 +14,7 @@ async def build_chatbot_response(
     prompt_context: Optional[str] = None,
     mode: str = "complete",
 ) -> AsyncGenerator[Any, None]:
-    """
-    Build a streaming response from the chatbot that handles both direct responses and follow-up suggestions.
 
-    Args:
-        session_id: The session identifier
-        follow_up_manager: Instance of FollowUpManager
-        conversation_history: List of conversation messages
-        prompt_context: Original prompt context
-        mode: Either "follow_up" or "complete" to determine response type
-
-    Yields:
-        Formatted SSE messages for streaming response
-    """
     try:
         # Get session data and validate
         session_data = follow_up_manager.get_session_data(session_id)
@@ -45,11 +32,6 @@ async def build_chatbot_response(
         if not latest_query and prompt_context:
             latest_query = prompt_context.split("\n")[0][:140]
 
-        # Unified flow: always use the OptimizedChatbot to produce a comprehensive
-        # response that includes the main answer, optional suggestions, and follow-ups
-        # (the `final_response_prompt` enforces the output format: main answer, blank
-        # line, suggestions list, blank line, follow-up list). This removes duplicate
-        # branching and separate suggestion/follow-up generation.
         try:
             response_stream = follow_up_manager.chatbot.get_detailed_response(
                 query=latest_query,
