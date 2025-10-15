@@ -15,5 +15,3 @@ redis==v6.4.0
 requests==v2.32.5
 sentence-transformers==v5.1.1
 uvicorn==v0.37.0
-
-

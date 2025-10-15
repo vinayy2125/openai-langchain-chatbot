@@ -1,3 +1,5 @@
+"""Main entry point for the chatbot FastAPI application."""
+
 import os
 import uvicorn
 from fastapi import FastAPI
@@ -15,6 +17,8 @@ load_dotenv()
 logger = get_logger("chatbot")
 uvicorn_logger = get_logger("uvicorn")
 
+
+# Factory function to create the FastAPI app
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     # Initialize FastAPI app
@@ -24,7 +28,7 @@ def create_app() -> FastAPI:
         version="1.0.0",
     )
 
-    # Configure CORS
+    # Configure CORS middleware for cross-origin requests
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],  # TODO: restrict in prod
@@ -35,28 +39,32 @@ def create_app() -> FastAPI:
 
     logger.info("LLM client initialized successfully")
 
+    # Attach FollowUpManager to app state
     app.state.follow_up_manager = FollowUpManager(llm)
     logger.info("FollowUpManager initialized successfully")
 
+    # Register main API router
     app.include_router(api_v1_router)
     logger.info("API v1 routes registered")
+    # Register Redis endpoints router
     app.include_router(redis_router.router, prefix="/api/v1")
     logger.info("Redis endpoints registered")
 
     return app
 
+# Main function to start the server
 def main():
     """Main entry point for the application."""
     # Create FastAPI app
     app = create_app()
     logger.info("Application initialized successfully")
 
-    # Get configuration from environment
+    # Get configuration from environment variables
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", "8000"))
     reload = os.getenv("RELOAD", "False").lower() == "true"
 
-    # Run the server
+    # Run the Uvicorn server
     uvicorn.run(
         "main:create_app",
         host=host,
