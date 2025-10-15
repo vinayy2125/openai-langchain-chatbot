@@ -139,7 +139,7 @@ class OptimizedChatbot:
             # Construct the unified final response prompt using centralized template
             history_str = history or ""
             prompt = final_response_prompt(prompt_context=context, conversation_summary=history_str)
-            logger.info("[Chatbot] Prompt prepared (first 300 chars): %s", str(prompt)[:300])
+            logger.info("[Chatbot] Prompt prepared from final_response_prompt")
             try:
                 # Use the centralized helper which creates proper message objects
 
