@@ -1,11 +1,10 @@
 import json
-import re
-import logging
+from app.logger import get_logger
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from app.core.response_formatter import format_response
 
 # Initialize logger
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def build_chatbot_response(
