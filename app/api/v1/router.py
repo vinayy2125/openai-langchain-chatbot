@@ -1,4 +1,4 @@
-import logging
+from app.logger import get_logger
 from fastapi import APIRouter, HTTPException, Depends
 from uuid import UUID
 from typing import List
@@ -17,8 +17,8 @@ from . import helpers
 from app.db.base import get_db_conn
 from app.api.deps import get_follow_up_manager
 
-# Get logger
-logger = logging.getLogger(__name__)
+# Get centralized logger
+logger = get_logger(__name__)
 
 # Create router
 router = APIRouter(prefix="/api/v1", tags=["v1"])

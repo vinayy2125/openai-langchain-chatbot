@@ -1,6 +1,4 @@
-import logging
 import json
-import sys
 import re
 import os
 import tiktoken
@@ -10,19 +8,12 @@ from functools import lru_cache
 from langchain_openai import ChatOpenAI
 from datetime import datetime
 from app.core.prompts import key_generate_prompt, Requirements, final_response_prompt
+from app.logger import get_logger
 from app.core.redis_context import get_redis_context_chunks
 from app.core.utils import generate_llm_response
+
 from app.core.response_formatter import format_response
-
-
-
-# Configure the logger
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
-logger = logging.getLogger("chatbot")
+logger = get_logger("chatbot")
 
 
 class ContextOptimizer:
@@ -125,9 +116,9 @@ class OptimizedChatbot:
         try:
             try:
                 search_keys = self._generate_search_keys(query) or []
-                logger.debug("Generated search keys for query: %s", search_keys)
+                logger.info("Generated search keys for query: %s", search_keys)
             except Exception as e:
-                logger.debug("Search-key generation failed, continuing without keys: %s", e)
+                logger.warning("Search-key generation failed, continuing without keys: %s", e)
                 search_keys = []
 
             try:
@@ -156,12 +147,12 @@ class OptimizedChatbot:
 
                 if not final_text:
                     logger.warning("[Chatbot] LLM produced no content (None/empty). Falling back.")
-                    logger.debug("[Chatbot] Prompt that caused fallback (first 800 chars): %s", str(prompt)[:800])
+                    logger.warning("[Chatbot] Prompt that caused fallback (first 800 chars): %s", str(prompt)[:800])
                     try:
                         with open(r"d:\Chatbot\logs\llm_server_diag.log", "a", encoding="utf-8") as f:
                             f.write(f"{datetime.utcnow().isoformat()} - generate_llm_response returned falsy for session={session_id} repr={repr(final_text)[:200]}\n")
                     except Exception:
-                        logger.debug("Failed to write llm_server_diag.log")
+                        logger.error("Failed to write llm_server_diag.log")
                     yield from self._fallback_response_stream("I couldn't generate a response right now.")
                     return
 
@@ -303,7 +294,7 @@ class OptimizedChatbot:
                             except Exception:
                                 resp = None
                 except Exception as e:
-                    logger.debug("Direct query_llm invoke failed: %s", e)
+                    logger.exception("Direct query_llm invoke failed: %s", e)
 
             if not resp:
                 return []

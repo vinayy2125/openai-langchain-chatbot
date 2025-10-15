@@ -1,44 +1,19 @@
 import os
-import logging
-import sys
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+from fastapi import FastAPI
 from dotenv import load_dotenv
-# Initialize FollowUpManager
-from app.core.nested_follow_up_manager import FollowUpManager
-# Initialize LLM
 from app.core.llm_client import llm
 from app.api.v1 import router as api_v1_router
+from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import redis_endpoint as redis_router
+from app.core.nested_follow_up_manager import FollowUpManager
+from app.logger import get_logger
 
-# Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
-logger = logging.getLogger("chatbot")
 
-# Configure file logging
-log_file_path = os.path.join("logs", "backend.log")
-os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
-file_handler = logging.FileHandler(log_file_path)
-file_handler.setFormatter(
-    logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s")
-)
-file_handler.setLevel(logging.DEBUG)
-logger.addHandler(file_handler)
-
-# Configure uvicorn logger
-uvicorn_logger = logging.getLogger("uvicorn")
-uvicorn_logger.setLevel(logging.DEBUG)
-for handler in logger.handlers:
-    uvicorn_logger.addHandler(handler)
-
+logger = get_logger("chatbot")
+uvicorn_logger = get_logger("uvicorn")
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -58,15 +33,10 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-
-
     logger.info("LLM client initialized successfully")
-
 
     app.state.follow_up_manager = FollowUpManager(llm)
     logger.info("FollowUpManager initialized successfully")
-
-    # Include API routers
 
     app.include_router(api_v1_router)
     logger.info("API v1 routes registered")
@@ -74,7 +44,6 @@ def create_app() -> FastAPI:
     logger.info("Redis endpoints registered")
 
     return app
-
 
 def main():
     """Main entry point for the application."""
@@ -96,7 +65,6 @@ def main():
         factory=True,
         log_level="info",
     )
-
 
 if __name__ == "__main__":
     main()

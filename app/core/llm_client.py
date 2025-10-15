@@ -1,10 +1,10 @@
 import os
-import logging
+from app.logger import get_logger
 from langchain_openai.chat_models import ChatOpenAI
 from dotenv import load_dotenv
 
 # Configure logger
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 load_dotenv()
 
