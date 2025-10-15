@@ -1,10 +1,10 @@
 import os
-import logging
-from langchain_openai import ChatOpenAI
+from app.logger import get_logger
+from langchain_openai.chat_models import ChatOpenAI
 from dotenv import load_dotenv
 
 # Configure logger
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 load_dotenv()
 
@@ -15,5 +15,5 @@ llm = ChatOpenAI(
     temperature=0.7,
     max_tokens=None,
     streaming=True,
-    openai_api_key=os.getenv("OPENAI_API_KEY")
+    api_key=os.getenv("OPENAI_API_KEY")
 )
