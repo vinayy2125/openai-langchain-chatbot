@@ -1,4 +1,4 @@
-import logging
+from app.logger import get_logger
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from datetime import datetime, timezone
@@ -7,8 +7,7 @@ from app.config import get_redis
 from app.db.redis_vector_helper import store_text, similarity_search 
 router = APIRouter()
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class RedisContextRequest(BaseModel):
@@ -46,8 +45,8 @@ async def redis_context_endpoint(payload: RedisContextRequest):
             created_at = datetime.now(timezone.utc).isoformat()
 
         queries = similarity_search(payload.session_id, payload.text)
-        logging.info(f"Similarity search returned {payload.text} results.")
-        logging.info(f"Retrieved {len(queries)} similar queries from Redis.")
+        logger.info(f"Similarity search returned {payload.text} results.")
+        logger.info(f"Retrieved {len(queries)} similar queries from Redis.")
         # Remove embeddings from each query dict
         cleaned_queries = []
         for q in queries:

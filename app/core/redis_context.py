@@ -1,8 +1,7 @@
-import logging
+from app.logger import get_logger
 from typing import List, Dict, Any
 from app.db.redis_vector_helper import similarity_search
-
-logger = logging.getLogger("chatbot")
+logger = get_logger("chatbot")
 
 def get_redis_context_chunks(session_id: str, query: str, conversation_history: List[Dict[str, Any]], top_n: int = 4) -> List[str]:
     """
@@ -65,7 +64,6 @@ def get_redis_context_chunks(session_id: str, query: str, conversation_history: 
     # Log preview of selected context
     if normalized:
         logger.info(f"[RedisContext] Selected {len(normalized)} relevant context chunks")
-        logger.debug(f"[RedisContext] First chunk preview: {normalized[0][:100]}")
 
     logger.info(f"[RedisContext] Retrieved {len(normalized)} context items (top_n={top_n})")
     return normalized
