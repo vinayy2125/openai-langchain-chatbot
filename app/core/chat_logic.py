@@ -2,6 +2,7 @@ import json
 from app.logger import get_logger
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from app.core.response_formatter import format_response
+from app.core.nested_follow_up_manager import FollowUpManager
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -9,7 +10,7 @@ logger = get_logger(__name__)
 
 async def build_chatbot_response(
     session_id: str,
-    follow_up_manager,
+    follow_up_manager: FollowUpManager,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
     prompt_context: Optional[str] = None,
     mode: str = "complete",
