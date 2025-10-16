@@ -102,7 +102,7 @@ jobs:
                 --name AI-Chatbot-be \
                 --network ai-chatbot-network \
                 --restart unless-stopped \
-                -p 8007:8007 \
+                -p 8007:8006 \
                 -e DB_NAME="${{ secrets.DB_NAME_PROD }}" \
                 -e DB_USER="${{ secrets.DB_USER_PROD }}" \
                 -e DB_PASSWORD="${{ secrets.DB_PASSWORD_PROD }}" \
