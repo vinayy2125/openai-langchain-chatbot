@@ -10,12 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import redis_endpoint as redis_router
 from app.core.nested_follow_up_manager import FollowUpManager
 from app.logger import get_logger
+from app.logger import attach_handlers_to_uvicorn
 
 load_dotenv()
 
 
-logger = get_logger("chatbot")
-uvicorn_logger = get_logger("uvicorn")
+
+logger = get_logger("__main__")
 
 
 # Factory function to create the FastAPI app
@@ -64,6 +65,12 @@ def main():
     port = int(os.getenv("PORT", "8000"))
     reload = os.getenv("RELOAD", "False").lower() == "true"
 
+    # Attach our shared handlers to Uvicorn so server logs use the same handlers
+    try:
+        attach_handlers_to_uvicorn()
+    except Exception:
+        logger.exception("Failed to attach handlers to uvicorn; continuing with default logging configuration")
+
     # Run the Uvicorn server
     uvicorn.run(
         "main:create_app",
@@ -76,3 +83,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+ 

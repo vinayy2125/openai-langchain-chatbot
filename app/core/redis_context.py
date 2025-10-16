@@ -1,6 +1,7 @@
 from app.logger import get_logger
 from typing import List, Dict, Any
 from app.db.redis_vector_helper import similarity_search
+from app.core.llm_client import call_llm_summarize_chunks
 logger = get_logger("chatbot")
 
 def get_redis_context_chunks(session_id: str, query: str, conversation_history: List[Dict[str, Any]], top_n: int = 4) -> List[str]:
@@ -66,4 +67,31 @@ def get_redis_context_chunks(session_id: str, query: str, conversation_history: 
         logger.info(f"[RedisContext] Selected {len(normalized)} relevant context chunks")
 
     logger.info(f"[RedisContext] Retrieved {len(normalized)} context items (top_n={top_n})")
-    return normalized
+    # Summarize the top 4 chunks using the LLM, extracting links and details
+    if normalized:
+        summary = summarize_chunks_with_llm(normalized[:4], query)
+        return [summary] if summary else normalized[:1]
+    return []
+
+# Helper function to summarize chunks with LLM
+def summarize_chunks_with_llm(chunks: List[str], query: str) -> str:
+    """
+    Use the LLM to summarize the provided chunks, extracting links and detailed info relevant to the query.
+    Returns a single summary string.
+    """
+    if not chunks:
+        return ""
+    prompt = (
+        f"Summarize the following context chunks for the query: '{query}'. "
+        "Extract any relevant links and provide detailed information. "
+        "Return a single, concise summary for use as AI context.\n\n"
+        "Context Chunks:\n"
+        + "\n---\n".join(chunks)
+    )
+    try:
+        summary = call_llm_summarize_chunks(prompt)
+        return summary.strip() if summary else ""
+    except Exception as e:
+        logger.error(f"[RedisContext] LLM summarization failed: {e}")
+        return ""
+ 
