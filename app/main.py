@@ -58,7 +58,13 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-
+    # ✅ ADD THIS ROOT ENDPOINT (below CORS)
+    @app.get("/")
+    def root():
+        return {
+            "status": "ok",
+            "message": "Chatbot API is running. Visit /api/v1/docs for full API documentation."
+        }
 
     logger.info("LLM client initialized successfully")
 
