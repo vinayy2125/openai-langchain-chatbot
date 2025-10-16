@@ -76,35 +76,6 @@ class OptimizedChatbot:
         """Get session data for a given session ID."""
         return self.session_data.get(session_id, {})
 
-    def initialize_session(self, session_id: str, initial_data: dict) -> None:
-        """Initialize a new session with data."""
-        self.session_data[session_id] = initial_data
-        self.conversation_history[session_id] = []
-
-    def add_to_conversation_history(
-        self, session_id: str, role: str, content: str
-    ) -> None:
-        """Add a message to the conversation history."""
-        if session_id not in self.conversation_history:
-            self.conversation_history[session_id] = []
-        self.conversation_history[session_id].append({"role": role, "content": content})
-
-    def get_conversation_history(self, session_id: str) -> List[dict]:
-        """Get conversation history for a session."""
-        return self.conversation_history.get(session_id, [])
-
-    def format_conversation_history(self, history: List[dict]) -> str:
-        """Format conversation history into a string."""
-        formatted = []
-        for msg in history:
-            formatted.append(f"{msg['role'].upper()}: {msg['content']}")
-        return "\n".join(formatted)
-
-    def check_requirements(self, session_id: str) -> bool:
-        """Check if all required information is collected."""
-        data = self.get_session_data(session_id)
-        return all(data.get(key) for key in ["initial_prompt", "state"])
-
     def get_detailed_response(
         self,
         query: str,
