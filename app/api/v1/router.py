@@ -16,6 +16,7 @@ from .helpers import (
 from . import helpers
 from app.db.base import get_db_conn
 from app.api.deps import get_follow_up_manager
+from app.core.nested_follow_up_manager import FollowUpManager
 
 # Get centralized logger
 logger = get_logger(__name__)
@@ -187,7 +188,7 @@ async def get_root_prompts():
 
 @router.post("/chat/send-stream")
 async def post_send_message_stream(
-    req: SentMessage, follow_up_manager=Depends(get_follow_up_manager)
+    req: SentMessage, follow_up_manager: FollowUpManager = Depends(get_follow_up_manager)
 ):
     """Delegate to helper implementation for streaming chat."""
     return await helpers.send_message_stream(req, follow_up_manager)
