@@ -14,6 +14,7 @@ from app.api.v1.models import (
     Message,
     SentMessage,
 )
+from app.core.nested_follow_up_manager import FollowUpManager
 
 
 logger = get_logger(__name__)
@@ -199,7 +200,7 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
         conn.close()
 
 async def send_message_stream(
-    req: SentMessage, follow_up_manager=Depends(get_follow_up_manager)
+    req: SentMessage, follow_up_manager: FollowUpManager = Depends(get_follow_up_manager)
 ):
 
     try:
