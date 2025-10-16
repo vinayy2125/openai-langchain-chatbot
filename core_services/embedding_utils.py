@@ -4,6 +4,7 @@ import os
 import logging
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from huggingface_hub import login
 
 logger = logging.getLogger(__name__)
 
