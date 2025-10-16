@@ -33,6 +33,7 @@ jobs:
           echo "REDIS_HOST=" >> .env
           echo "REDIS_PORT=" >> .env
           echo "REDIS_PASSWORD=" >> .env
+          echo "HUGGINGFACEHUB_API_TOKEN=" >> .env
 
       # 3. Log in to GitHub Container Registry
       - name: Log in to GitHub Container Registry (GHCR)
@@ -73,6 +74,7 @@ jobs:
           echo "::add-mask::${{ secrets.REDIS_HOST_PROD }}"
           echo "::add-mask::${{ secrets.REDIS_PORT_PROD }}"
           echo "::add-mask::${{ secrets.REDIS_PASSWORD_PROD }}"
+          echo "::add-mask::${{ secrets.HF_TOKEN_PROD }}"
 
       # 7. Deploy on Droplet via SSH
       - name: SSH and Deploy on Droplet
@@ -111,6 +113,7 @@ jobs:
                 -e REDIS_HOST="${{ secrets.REDIS_HOST_PROD }}" \
                 -e REDIS_PORT="${{ secrets.REDIS_PORT_PROD }}" \
                 -e REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD_PROD }}" \
+                -e HUGGINGFACEHUB_API_TOKEN="${{ secrets.HF_TOKEN_PROD }}" \
                 "$IMAGE_NAME"
 
             echo "Pruning unused images..." 

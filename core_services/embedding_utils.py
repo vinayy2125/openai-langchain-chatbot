@@ -9,9 +9,19 @@ logger = logging.getLogger(__name__)
 
 # Allow overriding the model path via environment for offline/local use
 EMBEDDING_MODEL_PATH = os.getenv("EMBEDDING_MODEL_PATH") or os.getenv("EMBEDDING_MODEL")
+HF_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN")
 DEFAULT_MODEL_NAME = "google/embeddinggemma-300m"
 
 MODEL_NAME = EMBEDDING_MODEL_PATH or DEFAULT_MODEL_NAME
+
+if HF_TOKEN:
+    try:
+        login(token=HF_TOKEN)
+        logger.info("Successfully logged into Hugging Face Hub.")
+    except Exception as e:
+        logger.exception("Failed Hugging Face login: %s", e)
+        raise
+
 
 try:
     model = SentenceTransformer(MODEL_NAME)
