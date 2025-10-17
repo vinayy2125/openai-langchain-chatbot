@@ -1,0 +1,123 @@
+name: build-deploy-backend
+ 
+on:
+  push:
+    branches:
+      - devops
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/ai-chatbot-be
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # 1. Checkout code
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          submodules: false
+
+      # 2. Create .env file with only KEYS
+      - name: Create .env file
+        run: |
+          echo "DB_NAME=" >> .env
+          echo "DB_USER=" >> .env
+          echo "DB_PASSWORD=" >> .env
+          echo "DB_HOST=" >> .env
+          echo "DB_PORT=" >> .env
+          echo "TAVILY_API_KEY=" >> .env
+          echo "OPENAI_API_KEY=" >> .env
+          echo "REDIS_HOST=" >> .env
+          echo "REDIS_PORT=" >> .env
+          echo "REDIS_PASSWORD=" >> .env
+          echo "HUGGINGFACEHUB_API_TOKEN=" >> .env
+
+      # 3. Log in to GitHub Container Registry
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      # 4. Build & Push Docker Image to GHCR
+      - name: Build and Push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            
+      # 5. Log out of GHCR
+      - name: Log out of GHCR
+        run: docker logout ghcr.io
+      
+      # 6. Masking the secrets
+      - name: Mask secrets
+        run: |
+          echo "::add-mask::${{ secrets.HOST_PROD }}"
+          echo "::add-mask::${{ secrets.USER_PROD }}"
+          echo "::add-mask::${{ secrets.KEY_PROD }}"
+          echo "::add-mask::${{ secrets.GITHUB_TOKEN }}"
+          echo "::add-mask::${{ secrets.DB_NAME_PROD }}"
+          echo "::add-mask::${{ secrets.DB_USER_PROD }}"
+          echo "::add-mask::${{ secrets.DB_PASSWORD_PROD }}"
+          echo "::add-mask::${{ secrets.DB_HOST_PROD }}"
+          echo "::add-mask::${{ secrets.DB_PORT_PROD }}"
+          echo "::add-mask::${{ secrets.TAVILY_API_KEY_PROD }}"
+          echo "::add-mask::${{ secrets.OPENAI_API_KEY_PROD }}"
+          echo "::add-mask::${{ secrets.REDIS_HOST_PROD }}"
+          echo "::add-mask::${{ secrets.REDIS_PORT_PROD }}"
+          echo "::add-mask::${{ secrets.REDIS_PASSWORD_PROD }}"
+          echo "::add-mask::${{ secrets.HF_TOKEN_PROD }}"
+
+      # 7. Deploy on Droplet via SSH
+      - name: SSH and Deploy on Droplet
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.KEY_PROD }}
+
+      # 8. Deploy on Droplet
+      - name: Deploy on Droplet
+        run: |
+          ssh -o StrictHostKeyChecking=no -p 22 ${{ secrets.USER_PROD }}@${{ secrets.HOST_PROD }} << EOF
+            IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/ai-chatbot-be:latest
+
+            echo "Logging in to GHCR..."
+            echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+
+            echo "Pulling latest image..."
+            sudo docker pull \$IMAGE_NAME
+
+            echo "Stopping old container (if exists)..."
+            sudo docker rm -f AI-Chatbot-be || true
+
+            echo "Running new container..."
+            sudo docker run -d \
+                --name AI-Chatbot-be \
+                --network ai-chatbot-network \
+                --restart unless-stopped \
+                -p 8007:8006 \
+                -e DB_NAME="${{ secrets.DB_NAME_PROD }}" \
+                -e DB_USER="${{ secrets.DB_USER_PROD }}" \
+                -e DB_PASSWORD="${{ secrets.DB_PASSWORD_PROD }}" \
+                -e DB_HOST="${{ secrets.DB_HOST_PROD }}" \
+                -e DB_PORT="${{ secrets.DB_PORT_PROD }}" \
+                -e TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY_PROD }}" \
+                -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY_PROD }}" \
+                -e REDIS_HOST="${{ secrets.REDIS_HOST_PROD }}" \
+                -e REDIS_PORT="${{ secrets.REDIS_PORT_PROD }}" \
+                -e REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD_PROD }}" \
+                -e HUGGINGFACEHUB_API_TOKEN="${{ secrets.HF_TOKEN_PROD }}" \
+                "$IMAGE_NAME"
+
+            echo "Pruning unused images..." 
+            sudo docker image prune -f
+          EOF
