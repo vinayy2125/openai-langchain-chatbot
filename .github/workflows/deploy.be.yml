@@ -3,7 +3,7 @@ name: build-deploy-backend
 on:
   push:
     branches:
-      - devops
+      - dev_main_copy
 
 jobs:
   deploy:
