@@ -109,7 +109,7 @@ class OptimizedChatbot:
 
             # Construct the unified final response prompt using centralized template
             history_str = history or ""
-            prompt = final_response_prompt(prompt_context=context, conversation_summary=history_str)
+            prompt = final_response_prompt(prompt_context=context, conversation_summary=history_str, query=query)
             logger.info("[Chatbot] Prompt prepared from final_response_prompt")
             try:
                 # Use the centralized helper which creates proper message objects
@@ -118,16 +118,16 @@ class OptimizedChatbot:
 
                 if not final_text:
                     logger.warning("[Chatbot] LLM produced no content (None/empty). Falling back.")
-                    logger.warning("[Chatbot] Prompt that caused fallback (first 800 chars): %s", str(prompt)[:800])
+                    logger.warning("[Chatbot] Prompt that caused fallback : %s", str(prompt))
                     try:
                         with open(r"d:\Chatbot\logs\llm_server_diag.log", "a", encoding="utf-8") as f:
-                            f.write(f"{datetime.utcnow().isoformat()} - generate_llm_response returned falsy for session={session_id} repr={repr(final_text)[:200]}\n")
+                            f.write(f"{datetime.utcnow().isoformat()} - generate_llm_response returned falsy for session={session_id} repr={repr(final_text)}\n")
                     except Exception:
                         logger.error("Failed to write llm_server_diag.log")
                     yield from self._fallback_response_stream("I couldn't generate a response right now.")
                     return
 
-                logger.info(f"[Chatbot] Final LLM output length={len(final_text)}; preview: {final_text[:300]}")
+                logger.info(f"[Chatbot] Final LLM output length={len(final_text)}; preview: {final_text}")
 
                 # Stream paragraph-level chunks to callers; apply cleaning and formatting
                 paragraphs = [p for p in final_text.split("\n\n") if p.strip()]
