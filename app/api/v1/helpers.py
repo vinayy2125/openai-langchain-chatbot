@@ -14,7 +14,9 @@ from app.api.v1.models import (
     Message,
     SentMessage,
 )
+from app.api.v1.models import UserCreate
 from app.core.nested_follow_up_manager import FollowUpManager
+from fastapi import HTTPException
 
 
 logger = get_logger(__name__)
@@ -36,6 +38,107 @@ def get_db_conn():
         port=os.getenv("DB_PORT"),
         options="-c client_encoding=UTF8",
     )
+
+
+async def update_user_by_session(session_id: str, user: UserCreate):
+    """Update a user's fields using the session_id.
+
+    Accepts a `UserCreate` model and performs a partial update of only the
+    provided fields (username, email, mobile, browser, ip). Also keeps the
+    sessions table in sync for browser/ip when provided.
+
+    Returns the session_id on success.
+    """
+    try:
+        sid = UUID(str(session_id))
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid session_id format")
+
+    conn = None
+    cursor = None
+    try:
+        logger.debug(f"update_user_by_session called for session={session_id} with data={user.dict()}")
+        conn = get_db_conn()
+        cursor = conn.cursor()
+
+        # Find the user for this session
+        cursor.execute(
+            """
+            SELECT user_id::text FROM sessions WHERE session_id = %s
+            """,
+            (str(sid),),
+        )
+        row = cursor.fetchone()
+        if not row or not row[0]:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        user_id = row[0]
+
+        # Build a partial update for any provided user fields
+        allowed_fields = ["username", "email", "mobile", "browser", "ip"]
+        set_clauses = []
+        params = []
+        for field in allowed_fields:
+            val = getattr(user, field, None)
+            if val is not None:
+                set_clauses.append(f"{field} = %s")
+                params.append(val)
+
+        if not set_clauses:
+            raise HTTPException(status_code=400, detail="No user fields provided to update")
+
+        # Append updated_at and WHERE param
+        set_sql = ",\n                ".join(set_clauses)
+        sql = f"""
+            UPDATE users
+            SET {set_sql},
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            RETURNING id::text
+        """
+        params.append(user_id)
+
+        cursor.execute(sql, tuple(params))
+        updated = cursor.fetchone()
+        if not updated or not updated[0]:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail="User not found for session")
+
+        # Keep sessions.browser/ip in sync if provided (do not force both)
+        session_update_params = []
+        session_set = []
+        if getattr(user, "browser", None) is not None:
+            session_set.append("browser = %s")
+            session_update_params.append(user.browser)
+        if getattr(user, "ip", None) is not None:
+            session_set.append("ip = %s")
+            session_update_params.append(user.ip)
+
+        if session_set:
+            session_sql = f"UPDATE sessions SET {', '.join(session_set)} WHERE session_id = %s"
+            session_update_params.append(str(sid))
+            cursor.execute(session_sql, tuple(session_update_params))
+
+        conn.commit()
+        return str(sid)
+    except HTTPException:
+        raise
+    except psycopg2.IntegrityError as ie:
+        # Constraint failure like unique email, etc.
+        if conn:
+            conn.rollback()
+        logger.warning(f"Integrity error updating user for session {session_id}: {str(ie)}")
+        raise HTTPException(status_code=400, detail=str(ie))
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Error updating user by session {session_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error updating user")
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 
 async def initialize_session_with_prompt(
