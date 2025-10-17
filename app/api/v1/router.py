@@ -194,4 +194,19 @@ async def post_send_message_stream(
     return await helpers.send_message_stream(req, follow_up_manager)
 
 
+# Update user details (PATCH) - now keyed by session_id per register flow
+@router.patch("/user/{session_id}")
+async def update_user(session_id: str, user: UserCreate):
+    """Update user's browser and IP information by session_id using helper."""
+    try:
+        # Pass the full Pydantic model to the helper for partial updates
+        updated_session = await helpers.update_user_by_session(session_id, user)
+        return {"status": "success", "message": "User updated successfully", "session_id": updated_session}
+    except HTTPException as http_ex:
+        raise http_ex
+    except Exception as e:
+        logger.error(f"Error in update_user route: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error updating user")
+
+
 
