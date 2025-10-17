@@ -42,12 +42,6 @@ def generate_llm_response(prompt):
             messages = [SystemMessage(content=SHARED_SYSTEM_PROMPT), HumanMessage(content=str(prompt).strip())]
 
         try:
-            preview = " | ".join([getattr(m, "content", "")[:200] for m in messages])
-        except Exception:
-            preview = "<<unavailable preview>>"
-        logger.info("Invoking LLM (generate_llm_response)")
-
-        try:
             model_name = getattr(llm, 'model_name', None) or getattr(llm, 'model', 'gpt-4o')
             local_llm = ChatOpenAI(
                 model=model_name,
@@ -59,7 +53,7 @@ def generate_llm_response(prompt):
             response = llm.invoke(messages)
 
         try:
-            raw_preview = str(response)[:400]
+            raw_preview = str(response)
         except Exception:
             raw_preview = "<<unserializable response>>"
         logger.info("LLM returned object type=%s; preview=%s", type(response).__name__, raw_preview)
