@@ -19,6 +19,8 @@ jobs:
       # 1. Checkout code
       - name: Checkout Code
         uses: actions/checkout@v3
+        with:
+          submodules: false
 
       # 2. Create .env file with only KEYS
       - name: Create .env file
