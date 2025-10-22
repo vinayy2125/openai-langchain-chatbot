@@ -256,8 +256,12 @@ async def save_message(message_data: MessageCreate) -> Message:
         cursor.close()
         conn.close()
 
+
 async def get_messages_for_session(session_id: UUID) -> List[Message]:
-    """Retrieve all messages for a given session with their relationships and metadata."""
+    """Retrieve all messages for a given session ordered by creation time.
+
+    Returns a list of `Message` objects expected by the router.
+    """
     conn = get_db_conn()
     cursor = conn.cursor()
     try:
@@ -281,8 +285,9 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
             (str(session_id),),
         )
 
-        messages = []
-        for row in cursor.fetchall():
+        messages: List[Message] = []
+        rows = cursor.fetchall()
+        for row in rows:
             message = Message(
                 id=row[0],
                 session_id=row[1],
@@ -396,16 +401,12 @@ async def send_message_stream(
         if not follow_up_manager.check_requirements(session_id):
 
             async def stream_follow_up():
-                
-
-                
-                # Add the `data:` prefix to the JSON-encoded string
+                # Inform client we're preparing a response
                 yield "data: " + json.dumps(
                     {"status": "processing", "message": "Preparing response..."}
                 ) + "\n\n"
 
-                # Reuse streaming follow-up generator with context switch & suggestions
-                sent_chunks = set()
+                # Call the response generator and emit only the final complete_chunk(s)
                 async for evt in build_chatbot_response(
                     session_id=session_id,
                     follow_up_manager=follow_up_manager,
@@ -413,7 +414,6 @@ async def send_message_stream(
                     prompt_context=prompt_context,
                     mode="follow_up",
                 ):
-                    # Normalize to a textual chunk when possible
                     if isinstance(evt, dict):
                         status = evt.get("status", "unknown")
                         chunk = evt.get("chunk", "")
@@ -421,44 +421,30 @@ async def send_message_stream(
                         status = "complete_chunk"
                         chunk = str(evt)
 
-                    # Normalize and skip empty chunks; dedupe any repeats in this response
-                    chunk_norm = "" if chunk is None else str(chunk).strip()
-                    if not chunk_norm:
+                    if chunk is None or str(chunk).strip() == "":
                         continue
-                    if chunk_norm in sent_chunks:
-                        continue
-                    sent_chunks.add(chunk_norm)
 
-                    # Persist embeddings for completed chunks if applicable
+                    # Only emit final complete_chunk to avoid split-markdown showing up in UI
                     if status == "complete_chunk":
-                        logger.info(f"========== chunk ========== {chunk_norm}")
+                        yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
+                        return
 
-                    yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
+            return StreamingResponse(stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS)
 
-            return StreamingResponse(
-                stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS
-            )
-        
         # --- Requirements captured: full response streaming ---
         async def generate_full_response_stream():
-            
-
+            # Inform client generation is starting
             yield "data: " + json.dumps(
-                {
-                    "status": "processing",
-                    "message": "Generating comprehensive response...",
-                }
+                {"status": "processing", "message": "Generating comprehensive response..."}
             ) + "\n\n"
 
-            sent_chunks = set()
             async for evt in build_chatbot_response(
                 session_id=session_id,
                 follow_up_manager=follow_up_manager,
                 conversation_history=conversation_history,
                 prompt_context=prompt_context,
                 mode="complete",
-            ):  
-                # Normalize to a textual chunk when possible
+            ):
                 if isinstance(evt, dict):
                     status = evt.get("status", "unknown")
                     chunk = evt.get("chunk", "")
@@ -466,38 +452,14 @@ async def send_message_stream(
                     status = "complete_chunk"
                     chunk = str(evt)
 
-                chunk_norm = "" if chunk is None else str(chunk).strip()
-                if not chunk_norm:
+                if chunk is None or str(chunk).strip() == "":
                     continue
-                if chunk_norm in sent_chunks:
-                    logger.debug(f"[SSE] Skipping duplicate chunk (normalized)='{chunk_norm[:80]}'")
-                    continue
-                sent_chunks.add(chunk_norm)
 
-                logger.debug(f"[SSE] Sending chunk status={status} preview='{chunk_norm[:80]}'")
+                # Forward chunks as-is (chat_logic currently yields final formatted response)
                 yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
-        
-        
-        return StreamingResponse(
-            generate_full_response_stream(),
-            media_type="text/event-stream",
-            headers=SSE_HEADERS,
-        )
 
-    except HTTPException as http_ex:
-        raise http_ex
+        return StreamingResponse(generate_full_response_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
+
     except Exception as e:
         logger.error(f"Unexpected error in send_message_stream: {str(e)}")
-
-        async def generate_error_stream(e=e):
-            yield f"data: {json.dumps({'status': 'processing', 'message': 'An error occurred'})}\n\n"
-            error_response = {
-                "status": "error",
-                "message": "An unexpected error occurred",
-                "error": str(e),
-            }
-            yield f"data: {json.dumps(error_response)}\n\n"
-
-        return StreamingResponse(
-            generate_error_stream(), media_type="text/event-stream", headers=SSE_HEADERS
-        )
+        raise

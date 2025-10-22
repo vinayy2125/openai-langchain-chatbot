@@ -56,13 +56,11 @@ async def build_chatbot_response(
 
                 # Keep a concatenated copy for history
                 main_response += text_chunk
+                # Do not yield chunk to UI, only accumulate for history
 
-                # Apply response formatting per chunk for consistency
-                formatted = format_response(text_chunk, latest_query, conversation_history)
-                yield {"status": "chunk", "chunk": formatted}
-
-            # Final completion event
-            yield {"status": "complete_chunk", "chunk": ""}
+            # Final completion event with formatted full response
+            formatted_full_response = format_response(main_response, latest_query, conversation_history)
+            yield {"status": "complete_chunk", "chunk": formatted_full_response}
 
             # Persist assistant message to session history
             if main_response:
