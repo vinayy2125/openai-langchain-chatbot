@@ -84,6 +84,13 @@ Analyze the user’s latest message (below) to determine their **marketing funne
 
 ### Output Format
 Return a single, fluent, human-sounding marketing response (no headers or meta explanations). Start immediately with the main response — concise, friendly, and action-oriented.
+    
+        Formatting rules (IMPORTANT):
+        - After the main answer, append one separate follow-up suggestion on the next line.
+        - The follow-up MUST be its own line and rendered in bold Markdown (enclose the follow-up text in double asterisks). Example:
+            **Would you like help scheduling a call?**
+        - Do NOT add any code blocks or fenced blocks. Return plain Markdown text only.
+        - If there is no useful follow-up suggestion, still append a short, polite closing question on the next line, wrapped in bold.
 """
 
 
