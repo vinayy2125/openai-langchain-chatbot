@@ -14,4 +14,10 @@ def format_response(
     if not paragraphs:
         return resp_text
     paragraph_block = "\n\n".join(paragraphs)
+    # Fix common markdown token splits that occur when LLM output is chunked.
+    # Example: '* *Would' -> '**Would' when '*' tokens are split across chunks.
+    # Join adjacent markdown markers separated only by whitespace for *, _, and backticks.
+    paragraph_block = re.sub(r"\*\s+\*", "**", paragraph_block)
+    paragraph_block = re.sub(r"_\s+_", "__", paragraph_block)
+    paragraph_block = re.sub(r"(`{1,3})\s+(`{1,3})", r"\1\2", paragraph_block)
     return paragraph_block

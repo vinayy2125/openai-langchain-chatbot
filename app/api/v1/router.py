@@ -1,7 +1,8 @@
 from app.logger import get_logger
 from fastapi import APIRouter, HTTPException, Depends
-from uuid import UUID
+from uuid import UUID, uuid4
 from typing import List
+from datetime import datetime
 from .models import (
     UserCreate,
     UserRegisterResponse,
@@ -140,40 +141,69 @@ async def get_root_prompts():
         conn = get_db_conn()
         cursor = conn.cursor()
 
-        # Fetch prompts with all required fields
+        # Only return the specific set of prompts we want to show for now.
+        desired_order = [
+            "Start a Project",
+            "Explore DITS Services",
+            "See our Work",
+            "Talk to our team",
+        ]
+
+        # Include the DirectMessageHint as well (we'll always ensure it's present below)
+        allowed_texts = desired_order + ["DirectMessageHint"]
+
         cursor.execute(
             """
-            SELECT 
-                id::text,
-                prompt_text,
-                response_text,
-                display_order,
-                created_at,
-                updated_at
+            SELECT id::text, prompt_text, response_text, display_order, type, created_at, updated_at
             FROM prompts
-            WHERE parent_id IS NULL
-            ORDER BY display_order ASC
-        """
+            WHERE parent_id IS NULL AND prompt_text = ANY(%s)
+            """,
+            (allowed_texts,)
         )
         rows = cursor.fetchall()
 
-        if not rows:
-            return []
+        # Map DB rows by prompt_text for easy ordering
+        rows_by_text = {row[1]: row for row in rows}
 
-        # Convert to Prompt models with all required fields
-        prompts = [
-            Prompt(
-                id=row[0],
-                prompt_text=row[1],
-                response_text=row[2] if row[2] is not None else "",
-                display_order=row[3],
-                type=PromptType.ROOT,
-                created_at=row[4],
-                updated_at=row[5],
-            )
-            for row in rows
-        ]
+        prompts = []
+        for idx, text in enumerate(desired_order, start=1):
+            row = rows_by_text.get(text)
+            if row:
+                pid, prompt_text, response_text, display_order, ptype, created_at, updated_at = row
+                created_at = created_at or datetime.utcnow()
+                updated_at = updated_at or datetime.utcnow()
+                try:
+                    prompt_type = PromptType(ptype) if ptype else PromptType.ROOT
+                except Exception:
+                    prompt_type = PromptType.ROOT
 
+                prompts.append(
+                    Prompt(
+                        id=str(pid),
+                        prompt_text=prompt_text,
+                        response_text=response_text or "",
+                        display_order=display_order or idx,
+                        type=prompt_type,
+                        created_at=created_at,
+                        updated_at=updated_at,
+                    )
+                )
+            else:
+                # If a specific prompt is missing from DB, append a non-persisted placeholder
+                now = datetime.utcnow()
+                prompts.append(
+                    Prompt(
+                        id=str(uuid4()),
+                        prompt_text=text,
+                        response_text="",
+                        display_order=idx,
+                        type=PromptType.ROOT,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+
+        # We intentionally return only the four action prompts for now.
         return prompts
 
     except Exception as e:
