@@ -45,22 +45,20 @@ async def build_chatbot_response(
             for chunk in response_stream:
                 if not chunk:
                     continue
-                # If upstream emits structured dict events, prefer those
-                if isinstance(chunk, dict) and "chunk" in chunk:
-                    text_chunk = str(chunk["chunk"]) or ""
+                
+                # Forward all events to the caller (including form_trigger)
+                yield chunk
+                
+                # If upstream emits structured dict events, prefer those for accumulation
+                if isinstance(chunk, dict):
+                    if chunk.get("status") == "chunk":
+                        text_chunk = str(chunk.get("chunk", "")) or ""
+                        main_response += text_chunk
+                    # Don't accumulate form_trigger or other special events
                 else:
                     text_chunk = str(chunk)
-
-                if not text_chunk:
-                    continue
-
-                # Keep a concatenated copy for history
-                main_response += text_chunk
-                # Do not yield chunk to UI, only accumulate for history
-
-            # Final completion event with formatted full response
-            formatted_full_response = format_response(main_response, latest_query, conversation_history)
-            yield {"status": "complete_chunk", "chunk": formatted_full_response}
+                    if text_chunk:
+                        main_response += text_chunk
 
             # Persist assistant message to session history
             if main_response:
