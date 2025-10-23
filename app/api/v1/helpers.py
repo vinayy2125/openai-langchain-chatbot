@@ -537,12 +537,11 @@ async def fetch_root_prompts():
             (all_prompt_texts,)
         )
         rows = cursor.fetchall()
-        root_prompts = []
         greeting = None
+        desired_order_prompts = []
         hint = None
         for row in rows:
             pid, prompt_text, response_text, display_order, ptype, created_at, updated_at = row
-            # Robust PromptType conversion
             try:
                 prompt_type_val = PromptType[ptype] if ptype in PromptType.__members__ else PromptType.ROOT
             except Exception:
@@ -554,25 +553,28 @@ async def fetch_root_prompts():
                 "display_order": display_order,
                 "type": str(prompt_type_val),
                 "created_at": created_at,
-                "updated_at": updated_at,
-                "is_header": prompt_text == greeting_text,
-                "is_footer": prompt_text == bottom_hint_text,
+                "updated_at": updated_at
             }
             if prompt_text == greeting_text:
                 greeting = prompt_obj
             elif prompt_text == bottom_hint_text:
                 hint = prompt_obj
-            else:
-                root_prompts.append(prompt_obj)
+            elif prompt_text in desired_order:
+                desired_order_prompts.append(prompt_obj)
 
-        # Compose the list: greeting, options, hint
-        result_list = []
-        if greeting:
-            result_list.append(greeting)
-        result_list.extend(root_prompts)
-        if hint:
-            result_list.append(hint)
-        return result_list
+        # Sort desired_order_prompts by the order in desired_order
+        desired_order_prompts_sorted = []
+        for text in desired_order:
+            for prompt in desired_order_prompts:
+                if prompt["prompt_text"] == text:
+                    desired_order_prompts_sorted.append(prompt)
+                    break
+
+        return {
+            "greeting_text": greeting["prompt_text"] if greeting else None,
+            "root_prompts": desired_order_prompts_sorted,
+            "bottom_hint_text": hint["prompt_text"] if hint else None
+        }
     except Exception as e:
         logger.error(f"Error fetching root prompts: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching prompts: {str(e)}")
