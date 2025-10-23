@@ -1,24 +1,19 @@
 from app.logger import get_logger
 from fastapi import APIRouter, HTTPException, Depends
-from uuid import UUID, uuid4
-from typing import List
-from datetime import datetime
+from uuid import UUID
 from .models import (
     UserCreate,
     UserRegisterResponse,
     SentMessage,
-    HistoryResponse,
-    Prompt,
-    PromptType,
+    HistoryResponse
 )
 from .helpers import (
-    get_messages_for_session,
+    get_messages_for_session
 )
 from . import helpers
 from app.db.base import get_db_conn
 from app.api.deps import get_follow_up_manager
 from app.core.nested_follow_up_manager import FollowUpManager
-
 # Get centralized logger
 logger = get_logger(__name__)
 
@@ -88,6 +83,8 @@ async def register_user(user: UserCreate):
             conn.close()
 
 
+
+
 # Message History Route
 
 @router.get("/chat/{session_id}/messages", response_model=HistoryResponse)
@@ -96,29 +93,41 @@ async def get_chat_messages(session_id: str):
     try:
         session_uuid = UUID(session_id)
         messages = await get_messages_for_session(session_uuid)
-        if not messages:
-            # Return empty list if no messages found (do not raise 404)
-            return HistoryResponse(session_id=session_id, messages=[])
+
+        # Get root prompts (greeting/options/hint)
+        root_prompts = None
+        try:
+            root_prompts = await helpers.fetch_root_prompts()
+            logger.info(f"Fetched root prompts: {root_prompts}")
+        except Exception as e:
+            logger.error(f"Error fetching root prompts for chat messages: {str(e)}")
+            root_prompts = None
 
         formatted_messages = []
-        for message in messages:
-            ts = message.created_at
-            if hasattr(ts, "isoformat"):
-                timestamp = ts.isoformat()
-            else:
-                timestamp = str(ts) if ts else None
-            formatted_messages.append(
-                {
-                    "id": message.id,
-                    "role": message.role,
-                    "message": message.content,
-                    "timestamp": timestamp,
-                    "reply_to": message.reply_to,
-                    "follow_up_to": message.follow_up_to,
-                    "metadata": message.metadata,
-                }
-            )
-        return HistoryResponse(session_id=session_id, messages=formatted_messages)
+        if messages:
+            for message in messages:
+                ts = message.created_at
+                if hasattr(ts, "isoformat"):
+                    timestamp = ts.isoformat()
+                else:
+                    timestamp = str(ts) if ts else None
+                formatted_messages.append(
+                    {
+                        "id": message.id,
+                        "role": message.role,
+                        "message": message.content,
+                        "timestamp": timestamp,
+                        "reply_to": message.reply_to,
+                        "follow_up_to": message.follow_up_to,
+                        "metadata": message.metadata,
+                    }
+                )
+
+        return {
+            "root_prompts": root_prompts,
+            "session_id": session_id,
+            "messages": formatted_messages
+        }
     except Exception as e:
         logger.error(f"Error retrieving chat messages: {str(e)}")
         raise HTTPException(status_code=500, detail="Error retrieving chat messages")
@@ -132,88 +141,10 @@ async def health_check():
 
 
 # Prompt Routes
-@router.get("/prompts/root", response_model=List[Prompt])
+@router.get("/prompts/root")
 async def get_root_prompts():
     """Fetch top-level prompts."""
-    conn = None
-    cursor = None
-    try:
-        conn = get_db_conn()
-        cursor = conn.cursor()
-
-        # Only return the specific set of prompts we want to show for now.
-        desired_order = [
-            "Start a Project",
-            "Explore DITS Services",
-            "See our Work",
-            "Talk to our team",
-        ]
-
-        # Include the DirectMessageHint as well (we'll always ensure it's present below)
-        allowed_texts = desired_order + ["DirectMessageHint"]
-
-        cursor.execute(
-            """
-            SELECT id::text, prompt_text, response_text, display_order, type, created_at, updated_at
-            FROM prompts
-            WHERE parent_id IS NULL AND prompt_text = ANY(%s)
-            """,
-            (allowed_texts,)
-        )
-        rows = cursor.fetchall()
-
-        # Map DB rows by prompt_text for easy ordering
-        rows_by_text = {row[1]: row for row in rows}
-
-        prompts = []
-        for idx, text in enumerate(desired_order, start=1):
-            row = rows_by_text.get(text)
-            if row:
-                pid, prompt_text, response_text, display_order, ptype, created_at, updated_at = row
-                created_at = created_at or datetime.utcnow()
-                updated_at = updated_at or datetime.utcnow()
-                try:
-                    prompt_type = PromptType(ptype) if ptype else PromptType.ROOT
-                except Exception:
-                    prompt_type = PromptType.ROOT
-
-                prompts.append(
-                    Prompt(
-                        id=str(pid),
-                        prompt_text=prompt_text,
-                        response_text=response_text or "",
-                        display_order=display_order or idx,
-                        type=prompt_type,
-                        created_at=created_at,
-                        updated_at=updated_at,
-                    )
-                )
-            else:
-                # If a specific prompt is missing from DB, append a non-persisted placeholder
-                now = datetime.utcnow()
-                prompts.append(
-                    Prompt(
-                        id=str(uuid4()),
-                        prompt_text=text,
-                        response_text="",
-                        display_order=idx,
-                        type=PromptType.ROOT,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                )
-
-        # We intentionally return only the four action prompts for now.
-        return prompts
-
-    except Exception as e:
-        logger.error(f"Error fetching root prompts: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching prompts: {str(e)}")
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+    return await helpers.fetch_root_prompts()
 
 
 @router.post("/chat/send-stream")
