@@ -6,16 +6,13 @@ This will insert the greeting, four primary prompts, and the typed hint if
 they don't already exist (checks by prompt_text at top-level).
 """
 import sys
-import os
 from pathlib import Path
+from app.db.base import get_db_conn
 
-# Ensure project root is on sys.path so `from app...` imports work when running
-# this script directly (Python sets sys.path[0] to the scripts directory).
 BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from app.db.base import get_db_conn
 
 
 DEFAULT_PROMPTS = [

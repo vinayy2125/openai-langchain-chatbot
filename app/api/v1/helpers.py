@@ -18,6 +18,9 @@ from app.api.v1.models import (
 from app.api.v1.models import UserCreate
 from app.core.nested_follow_up_manager import FollowUpManager
 from fastapi import HTTPException
+from datetime import datetime
+from app.api.v1.models import PromptType
+from app.db.base import get_db_conn
 
 
 logger = get_logger(__name__)
@@ -153,17 +156,6 @@ async def update_user_by_session(session_id: str, user: UserCreate):
             session_sql = f"UPDATE sessions SET {', '.join(session_set)} WHERE session_id = %s"
             session_update_params.append(str(sid))
             cursor.execute(session_sql, tuple(session_update_params))
-
-        conn.commit()
-        return str(sid)
-    except HTTPException:
-        raise
-    except psycopg2.IntegrityError as ie:
-        # Constraint failure like unique email, etc.
-        if conn:
-            conn.rollback()
-        logger.warning(f"Integrity error updating user for session {session_id}: {str(ie)}")
-        raise HTTPException(status_code=400, detail=str(ie))
     except Exception as e:
         if conn:
             conn.rollback()
@@ -275,7 +267,7 @@ async def save_message(message_data: MessageCreate) -> Message:
         message_row = cursor.fetchone()
         conn.commit()
         if not message_row:
-            raise HTTPException(status_code=500, detail="Failed to save message")
+            raise HTTPException(status_code=500, detail="Failed to save message to database")
         return Message(
             id=message_row[0],
             session_id=message_row[1],
@@ -353,8 +345,10 @@ async def send_message_stream(
 
         # Lazy init ChatRouter
         global chat_router
-        chat_router = globals().get("chat_router", None)
+        if "chat_router" not in globals():
+            chat_router = None
         if chat_router is None:
+            # Initialize ChatRouter without similarity_fn
             chat_router = ChatRouter(follow_up_manager)
 
         session_data = follow_up_manager.get_session_data(session_id)
@@ -370,7 +364,7 @@ async def send_message_stream(
                     # Ensure session_id is UUID for initialize_session_with_prompt
                     session_uuid = session_id if isinstance(session_id, UUID) else UUID(str(session_id))
                     prompt_db = await initialize_session_with_prompt(
-                        session_uuid, UUID(str(req.prompt_id))
+                        UUID(str(session_id)), UUID(str(req.prompt_id))
                     )
                     prompt_context = prompt_db["prompt_text"]
                     prompt_id_str = str(req.prompt_id)
@@ -443,7 +437,13 @@ async def send_message_stream(
         # --- Decide if more follow-ups are needed ---
         if not follow_up_manager.check_requirements(session_id):
             async def stream_follow_up():
-                yield "data: " + json.dumps({"status": "processing", "message": "Preparing response..."}) + "\n\n"
+                # Inform client we're preparing a response
+                yield "data: " + json.dumps(
+                    {"status": "processing", "message": "Preparing response..."}
+                ) + "\n\n"
+
+                # Call the response generator and emit only the final complete_chunk(s)
+                final_response = None
                 async for evt in build_chatbot_response(
                     session_id=session_id,
                     follow_up_manager=follow_up_manager,
@@ -462,12 +462,30 @@ async def send_message_stream(
                         continue
                     yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
                     if status == "complete_chunk":
+                        final_response = chunk
+                        yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
+                        # Save assistant message after streaming
+                        if final_response:
+                            await save_message(
+                                MessageCreate(
+                                    content=final_response.strip(),
+                                    role="assistant",
+                                    session_id=str(session_id),
+                                    reply_to=None,
+                                    follow_up_to=None,
+                                )
+                            )
                         return
             return StreamingResponse(stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS)
 
         # --- Requirements captured: full response streaming ---
         async def generate_full_response_stream():
-            yield "data: " + json.dumps({"status": "processing", "message": "Generating comprehensive response..."}) + "\n\n"
+            # Inform client generation is starting
+            yield "data: " + json.dumps(
+                {"status": "processing", "message": "Generating comprehensive response..."}
+            ) + "\n\n"
+
+            final_response = None
             async for evt in build_chatbot_response(
                 session_id=session_id,
                 follow_up_manager=follow_up_manager,
@@ -484,8 +502,122 @@ async def send_message_stream(
                 # Only skip empty chunks if not form_trigger
                 if chunk is None or (str(chunk).strip() == "" and status != "form_trigger"):
                     continue
+
+                # Save the assistant message only for the final complete_chunk
+                if status == "complete_chunk":
+                    final_response = chunk
+                # Forward chunks as-is (chat_logic currently yields final formatted response)
                 yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
+
+            # After streaming, save the assistant message if present
+            if final_response:
+                # Save assistant message using same fields as user message
+                await save_message(
+                    MessageCreate(
+                        content=final_response.strip(),
+                        role="assistant",
+                        session_id=str(session_id),
+                        reply_to=None,
+                        follow_up_to=None,
+                    )
+                )
+
         return StreamingResponse(generate_full_response_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
     except Exception as e:
         logger.error(f"Unexpected error in send_message_stream: {str(e)}")
         raise
+
+# Internal async function to fetch root prompts
+async def fetch_root_prompts():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+
+        greeting_text = "Hi I'm DITS AI 👋! I'd love to assist you and get to know you better.\n\n**What would you like to talk about?**"
+        bottom_hint_text = "Please type if you are looking for Something else.."
+        desired_order = [
+            "See our Work",
+            "Start a Project",
+            "Talk to our team",
+            "Explore DITS Services",
+        ]
+        all_prompt_texts = [greeting_text] + desired_order + [bottom_hint_text]
+
+        cursor.execute(
+            """
+            SELECT prompt_text FROM prompts WHERE prompt_text = ANY(%s)
+            """,
+            (all_prompt_texts,)
+        )
+        existing = set(row[0] for row in cursor.fetchall())
+
+        now = datetime.utcnow()
+        for idx, text in enumerate(all_prompt_texts, start=1):
+            if text not in existing:
+                cursor.execute(
+                    """
+                    INSERT INTO prompts (prompt_text, response_text, display_order, type, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (text, "", idx, "ROOT", now, now)
+                )
+        conn.commit()
+
+        cursor.execute(
+            """
+            SELECT id::text, prompt_text, response_text, display_order, type, created_at, updated_at
+            FROM prompts
+            WHERE prompt_text = ANY(%s)
+            ORDER BY display_order ASC
+            """,
+            (all_prompt_texts,)
+        )
+        rows = cursor.fetchall()
+        greeting = None
+        desired_order_prompts = []
+        hint = None
+        for row in rows:
+            pid, prompt_text, response_text, display_order, ptype, created_at, updated_at = row
+            try:
+                prompt_type_val = PromptType[ptype] if ptype in PromptType.__members__ else PromptType.ROOT
+            except Exception:
+                prompt_type_val = PromptType.ROOT
+            prompt_obj = {
+                "id": str(pid),
+                "prompt_text": prompt_text,
+                "response_text": response_text or "",
+                "display_order": display_order,
+                "type": str(prompt_type_val),
+                "created_at": created_at,
+                "updated_at": updated_at
+            }
+            if prompt_text == greeting_text:
+                greeting = prompt_obj
+            elif prompt_text == bottom_hint_text:
+                hint = prompt_obj
+            elif prompt_text in desired_order:
+                desired_order_prompts.append(prompt_obj)
+
+        # Sort desired_order_prompts by the order in desired_order
+        desired_order_prompts_sorted = []
+        for text in desired_order:
+            for prompt in desired_order_prompts:
+                if prompt["prompt_text"] == text:
+                    desired_order_prompts_sorted.append(prompt)
+                    break
+
+        return {
+            "greeting_text": greeting["prompt_text"] if greeting else None,
+            "root_prompts": desired_order_prompts_sorted,
+            "bottom_hint_text": hint["prompt_text"] if hint else None
+        }
+    except Exception as e:
+        logger.error(f"Error fetching root prompts: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching prompts: {str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
