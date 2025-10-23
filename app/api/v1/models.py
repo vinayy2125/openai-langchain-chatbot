@@ -82,8 +82,8 @@ class SentMessage(BaseModel):
 
 class HistoryResponse(BaseModel):
     session_id: str = Field(..., description="UUID of the chat session")
-    root_prompts: List[Any] = Field(
-        ..., description="List of root prompts in the conversation"
+    root_prompts: Dict[str, Any] = Field(
+        ..., description="Dictionary of root prompts in the conversation"
     )
     messages: List[Dict[str, Any]] = Field(
         ..., description="List of messages in the conversation"

@@ -96,6 +96,7 @@ async def get_chat_messages(session_id: str):
 
         # Get root prompts (greeting/options/hint)
         root_prompts = None
+        formatted_messages = []
         try:
             root_prompts = await helpers.fetch_root_prompts()
             logger.info(f"Fetched root prompts: {root_prompts}")
@@ -103,7 +104,6 @@ async def get_chat_messages(session_id: str):
             logger.error(f"Error fetching root prompts for chat messages: {str(e)}")
             root_prompts = None
 
-        formatted_messages = []
         if messages:
             for message in messages:
                 ts = message.created_at
@@ -111,6 +111,7 @@ async def get_chat_messages(session_id: str):
                     timestamp = ts.isoformat()
                 else:
                     timestamp = str(ts) if ts else None
+                # Return raw markdown/plain text as stored in DB
                 formatted_messages.append(
                     {
                         "id": message.id,
