@@ -116,32 +116,55 @@ class OptimizedChatbot:
 
                 final_text = generate_llm_response(prompt)
 
-                if not final_text:
-                    logger.warning("[Chatbot] LLM produced no content (None/empty). Falling back.")
-                    logger.warning("[Chatbot] Prompt that caused fallback : %s", str(prompt))
-                    try:
-                        with open(r"d:\Chatbot\logs\llm_server_diag.log", "a", encoding="utf-8") as f:
-                            f.write(f"{datetime.utcnow().isoformat()} - generate_llm_response returned falsy for session={session_id} repr={repr(final_text)}\n")
-                    except Exception:
-                        logger.error("Failed to write llm_server_diag.log")
-                    yield from self._fallback_response_stream("I couldn't generate a response right now.")
-                    return
+                import json
+                funnel_stage = ""
+                response_text = ""
+                safe_final_text = final_text if isinstance(final_text, str) else ""
+                
+                # Extract JSON from markdown code blocks if present
+                def extract_json_from_markdown(text):
+                    """Extract JSON content from markdown code blocks"""
+                    # Pattern to match ```json ... ``` or ``` ... ``` blocks
+                    json_pattern = r'```(?:json)?\s*\n?(.*?)\n?```'
+                    match = re.search(json_pattern, text, re.DOTALL)
+                    if match:
+                        return match.group(1).strip()
+                    return text.strip()
+                
+                try:
+                    # Try to extract JSON from markdown first
+                    cleaned_json = extract_json_from_markdown(safe_final_text)
+                    logger.info(f"[Chatbot] Cleaned JSON for parsing: {cleaned_json}")
+                    llm_json = json.loads(cleaned_json)
+                    logger.info(f"[Chatbot] Parsed JSON object: {llm_json}")
+                    response_text = llm_json.get("response", "") or ""
+                    funnel_stage = (llm_json.get("funnel_stage", "") or "").lower()
+                    logger.info(f"[Chatbot] Extracted response_text: '{response_text}'")
+                    logger.info(f"[Chatbot] Extracted funnel_stage: '{funnel_stage}' (original: '{llm_json.get('funnel_stage', '')}')")
+                except Exception as json_exc:
+                    logger.error(f"[Chatbot] Failed to parse LLM output as JSON: {json_exc}")
+                    logger.info(f"[Chatbot] Raw LLM output: {safe_final_text}")
+                    response_text = safe_final_text
 
-                logger.info(f"[Chatbot] Final LLM output length={len(final_text)}; preview: {final_text}")
+                logger.info(f"[Chatbot] Final LLM output length={len(safe_final_text)}; preview: {safe_final_text}")
+                logger.info(f"[Chatbot] Parsed funnel_stage: '{funnel_stage}' (type: {type(funnel_stage)})")
 
-                # Stream paragraph-level chunks to callers; apply cleaning and formatting
-                paragraphs = [p for p in final_text.split("\n\n") if p.strip()]
-                for p_idx, paragraph in enumerate(paragraphs):
-                    cleaned = self._clean_response_formatting(paragraph)
-                    # Apply higher-level formatting rules per paragraph
-                    formatted = format_response(cleaned, query, None)
-                    if formatted:
-                        yield {"status": "chunk", "chunk": formatted}
-                    # Preserve paragraph separation as an explicit small chunk
-                    if p_idx < len(paragraphs) - 1:
-                        yield {"status": "chunk", "chunk": "\n\n"}
-
+                # Stream the main response chunk
+                cleaned = self._clean_response_formatting(str(response_text))
+                # Remove any FORM_TRIGGER text that might be in the response
+                cleaned = cleaned.replace("FORM_TRIGGER", "").strip()
+                formatted = format_response(cleaned, query, None)
+                if formatted:
+                    yield {"status": "chunk", "chunk": formatted}
                 yield {"status": "complete_chunk", "chunk": ""}
+
+                # Funnel stage handling for form trigger (backend can use this value)
+                logger.info(f"[Chatbot] Checking funnel stage for form trigger: '{funnel_stage}' == 'action'? {funnel_stage == 'action'}")
+                if funnel_stage == "action":
+                    logger.info("[Chatbot] FORM TRIGGER ACTIVATED!")
+                    yield {"status": "form_trigger", "chunk": ""}
+                else:
+                    logger.info(f"[Chatbot] Form trigger NOT activated. Funnel stage is: '{funnel_stage}'")
 
             except Exception as llm_exc:
                 logger.exception(f"[Chatbot] LLM call failed with exception: {llm_exc}")
