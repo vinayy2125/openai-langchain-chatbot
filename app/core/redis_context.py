@@ -24,7 +24,7 @@ def get_redis_context_chunks(
     low-level technical terms.
     """
     # Default domain-aware keywords if none provided
-    default_key_terms = ["ditstek", "healthcare", "development", "software", "tech stack", "case study", "portfolio"]
+    default_key_terms = ["Intent-aware search query", "healthcare", "development", "software", "tech stack", "case study", "portfolio"]
     key_terms = key_terms or default_key_terms
 
     q = (query or "").strip()
