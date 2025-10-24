@@ -162,8 +162,8 @@ async def update_user(session_id: str, user: UserCreate):
     """Update user's browser and IP information by session_id using helper."""
     try:
         # Pass the full Pydantic model to the helper for partial updates
-        updated_session = await helpers.update_user_by_session(session_id, user)
-        return {"status": "success", "message": "User updated successfully", "session_id": updated_session}
+        await helpers.update_user_by_session(session_id, user)
+        return {"status": "success", "message": "User updated successfully", "session_id": session_id}
     except HTTPException as http_ex:
         raise http_ex
     except Exception as e:

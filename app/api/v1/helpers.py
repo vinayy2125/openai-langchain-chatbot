@@ -419,13 +419,13 @@ async def send_message_stream(
         is_new = not session_data or not session_data.get("prompt_context")
 
         # --- First-time session setup ---
+        form_triggered = False
         if is_new:
             prompt_context = None
             prompt_id_str = None
             if req.prompt_id:
                 try:
                     _ = UUID(str(req.prompt_id))
-                    # Ensure session_id is UUID for initialize_session_with_prompt
                     session_uuid = session_id if isinstance(session_id, UUID) else UUID(str(session_id))
                     prompt_db = await initialize_session_with_prompt(
                         UUID(str(session_id)), UUID(str(req.prompt_id))
@@ -450,37 +450,11 @@ async def send_message_stream(
                 except Exception:
                     logger.debug("chatbot.reset_follow_up_count not available or failed; continuing")
             session_data = follow_up_manager.get_session_data(session_id)
-            if req.query:
-                await save_message(
-                    MessageCreate(
-                        content=req.query.strip(),
-                        role="user",
-                        session_id=session_id,
-                        reply_to=None,
-                        follow_up_to=None,
-                    )
-                )
-                follow_up_manager.add_to_conversation_history(
-                    session_id, "user", req.query.strip()
-                )
         else:
             if req.prompt_id and str(req.prompt_id) != str(session_data.get("prompt_id")):
                 logger.warning(
                     f"Ignoring new prompt_id {req.prompt_id} for existing session {session_id}; "
                     f"continuing with original {session_data.get('prompt_id')}"
-                )
-            if req.query:
-                await save_message(
-                    MessageCreate(
-                        content=req.query.strip(),
-                        role="user",
-                        session_id=session_id,
-                        reply_to=None,
-                        follow_up_to=None,
-                    )
-                )
-                follow_up_manager.add_to_conversation_history(
-                    session_id, "user", req.query.strip()
                 )
 
         conversation_history = follow_up_manager.get_conversation_history(session_id)
@@ -494,11 +468,10 @@ async def send_message_stream(
                     {"status": "processing", "message": "Preparing response..."}
                 ) + "\n\n"
 
-                # Call the response generator and emit only the final complete_chunk(s)
-                final_response = None
-
-                # Collect all events first
+                # Accumulate all assistant response chunks
+                assistant_response = ""
                 events = []
+                form_triggered = False
                 async for evt in build_chatbot_response(
                     session_id=session_id,
                     follow_up_manager=follow_up_manager,
@@ -514,6 +487,10 @@ async def send_message_stream(
                         chunk = str(evt)
                     if chunk is None or (str(chunk).strip() == "" and status != "form_trigger"):
                         continue
+                    if status == "form_trigger":
+                        form_triggered = True
+                    if status in ("chunk", "complete_chunk") and chunk:
+                        assistant_response += chunk
                     events.append((status, chunk))
                 # If any event is form_trigger, only yield that
                 for status, chunk in events:
@@ -531,22 +508,33 @@ async def send_message_stream(
                         yield "data: " + json.dumps({"status": status, "chunk": ""}) + "\n\n"
                         return
                 # Otherwise, yield normal chunks
-                final_response = None
                 for status, chunk in events:
                     yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
-                    if status == "complete_chunk":
-                        final_response = chunk
-                        if final_response:
-                            await save_message(
-                                MessageCreate(
-                                    content=final_response.strip(),
-                                    role="assistant",
-                                    session_id=str(session_id),
-                                    reply_to=None,
-                                    follow_up_to=None,
-                                )
+                # After streaming, save the user and assistant message if present, but NOT if form was triggered
+                if not form_triggered:
+                    if req.query:
+                        await save_message(
+                            MessageCreate(
+                                content=req.query.strip(),
+                                role="user",
+                                session_id=session_id,
+                                reply_to=None,
+                                follow_up_to=None,
                             )
-                        return
+                        )
+                        follow_up_manager.add_to_conversation_history(
+                            session_id, "user", req.query.strip()
+                        )
+                    if assistant_response.strip():
+                        await save_message(
+                            MessageCreate(
+                                content=assistant_response.strip(),
+                                role="assistant",
+                                session_id=str(session_id),
+                                reply_to=None,
+                                follow_up_to=None,
+                            )
+                        )
 
             return StreamingResponse(stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS)
 
