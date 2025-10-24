@@ -108,6 +108,15 @@ class FollowUpManager:
 			},
 		)
 
+	def set_session_data(self, session_id, session_data: Dict):
+		"""Persist the given session_data for session_id into the in-memory store.
+
+		This centralizes session writes so callers don't accidentally forget to
+		assign back to self.sessions after mutating the dict.
+		"""
+		self.sessions[session_id] = session_data
+		return session_data
+
 	def get_conversation_history(self, session_id: str) -> List[Dict[str, str]]:
 		"""
 		Get the conversation history for a session.
