@@ -33,8 +33,10 @@ class UserCreate(BaseModel):
     username: Optional[str] = None
     email: Optional[str] = None
     mobile: Optional[str] = None
-    browser: str
-    ip: str
+    browser: Optional[str] = None
+    ip: Optional[str] = None
+    user_details_known: bool = Field(default=False)
+    
 
 class MessageBase(BaseModel):
     content: str = Field(..., description="Message content")

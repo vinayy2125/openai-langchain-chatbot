@@ -1,7 +1,6 @@
 import json
 from app.logger import get_logger
 from typing import List, Dict, Any, Optional, AsyncGenerator
-from app.core.response_formatter import format_response
 from app.core.nested_follow_up_manager import FollowUpManager
 
 # Initialize logger
@@ -45,22 +44,51 @@ async def build_chatbot_response(
             for chunk in response_stream:
                 if not chunk:
                     continue
-                # If upstream emits structured dict events, prefer those
-                if isinstance(chunk, dict) and "chunk" in chunk:
-                    text_chunk = str(chunk["chunk"]) or ""
+                
+                # Forward all events to the caller (including form_trigger)
+                # If upstream emits session-level metadata, persist it in manager
+                if isinstance(chunk, dict) and chunk.get("status") == "meta":
+                    try:
+                        raw_meta = chunk.get("chunk") or {}
+                        # Coerce meta into dict if it's a JSON string
+                        meta = raw_meta
+                        if isinstance(raw_meta, str):
+                            try:
+                                meta = json.loads(raw_meta)
+                            except Exception:
+                                meta = {}
+
+                        if not isinstance(meta, dict):
+                            meta = {}
+
+                        session = follow_up_manager.get_session_data(session_id)
+                        # Only set flag once per session
+                        if meta.get("user_details_known"):
+                            session.setdefault("state", {})["user_details_known"] = True
+                        if meta.get("user_network_id"):
+                            session.setdefault("state", {})["user_network_id"] = meta.get("user_network_id")
+                        try:
+                            follow_up_manager.set_session_data(session_id, session)
+                        except Exception:
+                            follow_up_manager.sessions[session_id] = session
+                        # don't forward meta to client
+                        continue
+                    except Exception:
+                        # fallthrough and forward if something goes wrong
+                        pass
+
+                yield chunk
+                
+                # If upstream emits structured dict events, prefer those for accumulation
+                if isinstance(chunk, dict):
+                    if chunk.get("status") == "chunk":
+                        text_chunk = str(chunk.get("chunk", "")) or ""
+                        main_response += text_chunk
+                    # Don't accumulate form_trigger or other special events
                 else:
                     text_chunk = str(chunk)
-
-                if not text_chunk:
-                    continue
-
-                # Keep a concatenated copy for history
-                main_response += text_chunk
-                # Do not yield chunk to UI, only accumulate for history
-
-            # Final completion event with formatted full response
-            formatted_full_response = format_response(main_response, latest_query, conversation_history)
-            yield {"status": "complete_chunk", "chunk": formatted_full_response}
+                    if text_chunk:
+                        main_response += text_chunk
 
             # Persist assistant message to session history
             if main_response:

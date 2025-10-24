@@ -152,7 +152,7 @@ async def get_root_prompts():
 async def post_send_message_stream(
     req: SentMessage, follow_up_manager: FollowUpManager = Depends(get_follow_up_manager)
 ):
-    """Delegate to helper implementation for streaming chat."""
+    """Streaming chat endpoint with hybrid form-trigger behavior."""
     return await helpers.send_message_stream(req, follow_up_manager)
 
 
