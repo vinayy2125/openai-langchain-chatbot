@@ -1,18 +1,15 @@
 import json
 import re
-import os
 import tiktoken
-from pydantic import SecretStr
 from typing import List, Generator
 from functools import lru_cache
 from langchain_openai import ChatOpenAI
-from datetime import datetime
-from app.core.prompts import key_generate_prompt, Requirements, final_response_prompt
 from app.logger import get_logger
-from app.core.redis_context import get_redis_context_chunks
 from app.core.utils import generate_llm_response
-
 from app.core.response_formatter import format_response
+from app.core.redis_context import get_redis_context_chunks
+from app.core.prompts import key_generate_prompt, final_response_prompt
+
 logger = get_logger("chatbot")
 
 
@@ -34,70 +31,32 @@ class ContextOptimizer:
 
 
 class OptimizedChatbot:
-    """
-    Streaming-only chatbot service with optimized context handling.
-    """
+    def __init__(self, llm=None, model: str = "gpt-4o"):
+        """Initialize OptimizedChatbot.
 
-    def __init__(self, llm, model: str = "gpt-4o"):
-        self.llm = llm
+        Parameters:
+        - llm: optional external LLM client object to use (must implement .invoke or content access). If provided, it will be used as self.query_llm.
+        - model: model name to instantiate a default ChatOpenAI if llm is not provided.
+        """
         self.model = model
-        self.follow_ups = {}
-        self.session_data = {}
-        self.conversation_history = {}
+        # Initialize a ContextOptimizer to centralize encoding and limits
         self.context_optimizer = ContextOptimizer(model)
-        self.response_cache = {}
-        self.generated_followups = []  
+        self.encoding = self.context_optimizer.encoding
+        self.model_limits = self.context_optimizer.model_limits
+        self.context_limit = self.context_optimizer.context_limit
 
-        api_key = os.getenv("OPENAI_API_KEY")
-        self.query_llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0.3,
-            api_key=SecretStr(api_key) if api_key else None,
-        )
-        logger.info(
-            "Initialized OptimizedChatbot with GPT-4o-mini for query processing"
-        )
-        self.requirement_categories = Requirements.requirement_categories
-        self.collected_requirements: dict[str, dict] = {}
+        self.query_llm = llm if llm is not None else ChatOpenAI(model=model)
 
-        self.requirement_categories = Requirements.requirement_categories
+    def get_detailed_response(self, query: str, chat_history: List[tuple], session_id: str, stream: bool = True):
+        from app.api.v1.helpers import get_user_details_known_from_db    #Do Not Move Outside funtion
 
-        self.conversation_state = {} 
+        """Generate a detailed response for a query and stream structured events.
 
-
-    def reset_follow_up_count(self, session_id: str):
-        """Reset the follow-up count for a session, useful when switching prompts."""
-        if session_id in self.conversation_state:
-            self.conversation_state[session_id]["follow_up_count"] = 0
-            return True
-        return False
-
-    def get_session_data(self, session_id: str) -> dict:
-        """Get session data for a given session ID."""
-        return self.session_data.get(session_id, {})
-
-    def get_detailed_response(
-        self,
-        query: str,
-        chat_history: list,
-        session_id: str = "default",
-        stream: bool = True,
-    ) -> Generator:
-
+        Yields dict events used by the API layer: {status: 'chunk'|'complete_chunk'|'form_trigger', 'chunk': ...}
+        """
         try:
             try:
-                search_keys = self._generate_search_keys(query) or []
-                logger.info("Generated search keys for query: %s", search_keys)
-            except Exception as e:
-                logger.warning("Search-key generation failed, continuing without keys: %s", e)
-                search_keys = []
-
-            try:
-
-                if search_keys:
-                    context_chunks = get_redis_context_chunks(session_id, query, [], top_n=4)
-                else:
-                    context_chunks = get_redis_context_chunks(session_id, query, [], top_n=4)
+                context_chunks = get_redis_context_chunks(session_id, query, [], top_n=4)
             except Exception as e:
                 logger.warning("Redis context retrieval failed, using empty context: %s", e)
                 context_chunks = []
@@ -107,30 +66,29 @@ class OptimizedChatbot:
             logger.info(f"[Chatbot] Redis Context Retrieved: {len(context)} characters, {len(context_chunks) if context_chunks else 0} chunks")
             logger.info(f"[Chatbot] Chat History: {len(chat_history)} messages")
 
-            # Construct the unified final response prompt using centralized template
+            # Construct prompt
             history_str = history or ""
-            prompt = final_response_prompt(prompt_context=context, conversation_summary=history_str, query=query)
-            logger.info("[Chatbot] Prompt prepared from final_response_prompt")
-            try:
-                # Use the centralized helper which creates proper message objects
+            user_details_known = get_user_details_known_from_db(session_id)
+            logger.info(f"[Chatbot] user_details_known (DB) = {user_details_known} for session {session_id}")
+            prompt = final_response_prompt(prompt_context=context, conversation_summary=history_str, query=query, user_details_known=user_details_known)
+            logger.info(f"[Chatbot] Prompt prepared from final_response_prompt (user_details_known={user_details_known})")
 
+            try:
+                # Primary path: centralized helper that returns a final text
                 final_text = generate_llm_response(prompt)
 
-                import json
                 funnel_stage = ""
                 response_text = ""
                 safe_final_text = final_text if isinstance(final_text, str) else ""
-                
+
                 # Extract JSON from markdown code blocks if present
-                def extract_json_from_markdown(text):
-                    """Extract JSON content from markdown code blocks"""
-                    # Pattern to match ```json ... ``` or ``` ... ``` blocks
+                def extract_json_from_markdown(txt: str) -> str:
                     json_pattern = r'```(?:json)?\s*\n?(.*?)\n?```'
-                    match = re.search(json_pattern, text, re.DOTALL)
+                    match = re.search(json_pattern, txt, re.DOTALL)
                     if match:
                         return match.group(1).strip()
-                    return text.strip()
-                
+                    return txt.strip()
+
                 try:
                     # Try to extract JSON from markdown first
                     cleaned_json = extract_json_from_markdown(safe_final_text)
@@ -139,6 +97,9 @@ class OptimizedChatbot:
                     logger.info(f"[Chatbot] Parsed JSON object: {llm_json}")
                     response_text = llm_json.get("response", "") or ""
                     funnel_stage = (llm_json.get("funnel_stage", "") or "").lower()
+                    # New optional fields to signal backend/session
+                    user_details_known = bool(llm_json.get("user_details_known", False))
+                    user_network_id = llm_json.get("user_network_id") if llm_json.get("user_network_id") else None
                     logger.info(f"[Chatbot] Extracted response_text: '{response_text}'")
                     logger.info(f"[Chatbot] Extracted funnel_stage: '{funnel_stage}' (original: '{llm_json.get('funnel_stage', '')}')")
                 except Exception as json_exc:
@@ -149,20 +110,31 @@ class OptimizedChatbot:
                 logger.info(f"[Chatbot] Final LLM output length={len(safe_final_text)}; preview: {safe_final_text}")
                 logger.info(f"[Chatbot] Parsed funnel_stage: '{funnel_stage}' (type: {type(funnel_stage)})")
 
-                # Stream the main response chunk
-                cleaned = self._clean_response_formatting(str(response_text))
-                # Remove any FORM_TRIGGER text that might be in the response
-                cleaned = cleaned.replace("FORM_TRIGGER", "").strip()
+                # Stream the main response chunk (minimal cleaning, preserve LLM output)
+                cleaned = str(response_text or "").replace("FORM_TRIGGER", "").strip()
                 formatted = format_response(cleaned, query, None)
                 if formatted:
                     yield {"status": "chunk", "chunk": formatted}
                 yield {"status": "complete_chunk", "chunk": ""}
 
+                # Emit a backend meta event so upstream can update session state once
+                meta = {"status": "meta", "chunk": {"user_details_known": user_details_known}}
+                if user_network_id:
+                    meta["chunk"]["user_network_id"] = user_network_id
+                # Only emit meta event if any value is present
+                if meta["chunk"].get("user_details_known") or meta["chunk"].get("user_network_id"):
+                    yield meta
+
                 # Funnel stage handling for form trigger (backend can use this value)
                 logger.info(f"[Chatbot] Checking funnel stage for form trigger: '{funnel_stage}' == 'action'? {funnel_stage == 'action'}")
-                if funnel_stage == "action":
-                    logger.info("[Chatbot] FORM TRIGGER ACTIVATED!")
+                # Defensive: only emit form_trigger if form_shown is not already set
+                user_details_known_db = get_user_details_known_from_db(session_id)
+                logger.info(f"[Chatbot] DB value: user_details_known={user_details_known_db} for session {session_id}")
+                if funnel_stage == "action" and not user_details_known_db:
+                    logger.info("[Chatbot] FORM TRIGGER ACTIVATED! (user_details_known is False)")
                     yield {"status": "form_trigger", "chunk": ""}
+                elif funnel_stage == "action" and user_details_known_db:
+                    logger.info("[Chatbot] Funnel stage is action but user_details_known is True; not emitting trigger again.")
                 else:
                     logger.info(f"[Chatbot] Form trigger NOT activated. Funnel stage is: '{funnel_stage}'")
 
@@ -174,68 +146,12 @@ class OptimizedChatbot:
             logger.exception("[Chatbot] Redis-based response generation failed")
             yield from self._fallback_response_stream("I couldn't generate a response right now.")
 
+
     def _fallback_response_stream(self, query: str) -> Generator[str, None, None]:
         """Fallback response when enhanced flow fails"""
         fallback_message = f"I understand you're asking about: {query}. Let me provide a general response based on my knowledge."
         yield fallback_message
 
-    def _clean_response_formatting(self, text: str) -> str:
-
-        if not text:
-            return ""
-
-        # Normalize newlines
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-
-        # Remove unwanted leading headers
-        unwanted_headers = [
-            r"^#{1,6}\s*Quick Overview.*?\n",
-            r"^#{1,6}\s*Overview of.*?\n",
-            r"^#{1,6}\s*About.*?\n",
-            r"^#{1,6}\s*Introduction.*?\n",
-            r"^#{1,6}\s*Implementation\s+Approach.*?\n",
-            r"^#{1,6}\s*Next\s+Steps.*?\n",
-        ]
-        for pattern in unwanted_headers:
-            text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.MULTILINE)
-
-        text = re.sub(r"(?<!\*) {2,}(?!\*)", " ", text)
-        text = re.sub(r" +\n", "\n", text)
-        text = re.sub(r"\n +(?![#*-])", "\n", text)
-        text = re.sub(r"([.!?:;,])([ \t]+)", r"\1 ", text)
-        text = re.sub(r"(\n)(#{1,3})\s+", r"\1\2 ", text)
-        text = re.sub(r"(\n)([-*•])\s+", r"\1\2 ", text)
-        text = re.sub(r"(\n)(\d+\.)\s+", r"\1\2 ", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        text = re.sub(r"\*\*\s*(.*?)\s*\*\*", r"**\1**", text, flags=re.DOTALL)
-        text = re.sub(r"`\s*(.*?)\s*`", r"`\1`", text)
-        text = re.sub(r"\b(?:[A-Za-z]\s+){2,}[A-Za-z]\b", lambda m: re.sub(r"\s+", "", m.group(0)), text)
-        text = re.sub(r"(?<=\S)[ \t]*-[ \t]*(?=\S)", "-", text)
-
-        def _fix_protocol(m):
-            scheme = m.group(1)
-            rest = m.group(2)
-            # remove internal whitespace in the URL-like segment
-            cleaned = re.sub(r"\s+", "", rest)
-            return f"{scheme}://{cleaned}"
-
-        text = re.sub(r"(https?)\s*:\s*/\s*/\s*([^\s)]+)", _fix_protocol, text, flags=re.IGNORECASE)
-
-        # Clean up markdown links where URL parts have spaces (conservative)
-        def _fix_link(m):
-            label = m.group(1).strip()
-            url = re.sub(r"\s+", "", m.group(2))
-            return f"[{label}]({url})"
-
-        text = re.sub(r"\[\s*(.*?)\s*\]\s*\(\s*([^\)]+)\s*\)", _fix_link, text)
-        text = re.sub(r"([A-Za-z0-9])\s+\.\s+([A-Za-z]{2,})", r"\1.\2", text)
-        text = re.sub(r"([A-Za-z0-9/._-])\s+/\s+([A-Za-z0-9/._-])", r"\1/\2", text)
-        text = re.sub(r"(\S)(\*\*[^\*]+\*\*)", r"\1 \2", text)
-        text = re.sub(r"(\S)(`[^`]+`)", r"\1 \2", text)
-        text = re.sub(r":\s*([-*•]\s+)", r":\n\1", text)
-        text = re.sub(r"(?m)^[ \t]*([-*•])\s*", r"\1 ", text)
-
-        return text.strip()
 
     def _generate_search_keys(self, query: str) -> List[str]:
         try:
