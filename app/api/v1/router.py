@@ -163,7 +163,10 @@ async def update_user(session_id: str, user: UserCreate):
     try:
         # Pass the full Pydantic model to the helper for partial updates
         await helpers.update_user_by_session(session_id, user)
-        return {"status": "success", "message": "User updated successfully", "session_id": session_id}
+        # Delete the last user message from the DB for this session
+        deleted_id = helpers.delete_last_user_message(session_id)
+        logger.info(f"Deleted last user message id: {deleted_id} for session_id: {session_id}")
+        return {"status": "success", "message": "User updated successfully", "session_id": session_id, "deleted_message_id": deleted_id}
     except HTTPException as http_ex:
         raise http_ex
     except Exception as e:
