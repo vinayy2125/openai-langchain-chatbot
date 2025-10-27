@@ -33,6 +33,7 @@ SSE_HEADERS = {
 # --- Form Trigger Logic (modular, reused by send_message_stream) ---
 def is_prompt_trigger(response: str) -> bool:
     """Detect actionable cues in prompt response for form triggering."""
+    logger.info(f"[is_prompt_trigger] Checking response for action cues.")
     action_cues = [
         "Would you like help scheduling a call?",
         "Can I have your best email",
@@ -40,7 +41,9 @@ def is_prompt_trigger(response: str) -> bool:
         "Can we connect for a meeting",
         # Add more cues as needed
     ]
-    return any(cue.lower() in response.lower() for cue in action_cues)
+    result = any(cue.lower() in response.lower() for cue in action_cues)
+    logger.debug(f"[is_prompt_trigger] Result: {result}")
+    return result
 import re
 
 
@@ -53,24 +56,29 @@ def should_trigger_form(session_data: dict, user_message: str, prompt_response: 
     - If user_details_known is False, trigger form based on prompt cues or intent (conversation length).
     """
     # Always check user_details_known from DB for the session's user_id
-    import psycopg2
-    import os
+    logger.info(f"[should_trigger_form] Called for session_id={session_data.get('session_id')}")
+
     session_id = session_data.get("session_id")
     user_details_known = get_user_details_known_from_db(session_id) if session_id else False
+    logger.debug(f"[should_trigger_form] user_details_known={user_details_known}")
     if user_details_known:
+        logger.info(f"[should_trigger_form] User details known, not triggering form.")
         return False
     # Only trigger form if user_details_known is False
     if prompt_response and is_prompt_trigger(prompt_response):
+        logger.info(f"[should_trigger_form] Prompt response triggered form.")
         return True
     user_msgs = [m for m in session_data.get("conversation_history", []) if m.get("role") == "user"]
+    logger.debug(f"[should_trigger_form] user_msgs count={len(user_msgs)} form_shown={session_data.get('form_shown', False)}")
     if len(user_msgs) >= 10 and not session_data.get("form_shown", False):
+        logger.info(f"[should_trigger_form] Conversation length triggered form.")
         return True
+    logger.info(f"[should_trigger_form] No form trigger conditions met.")
     return False
 
 def get_user_details_known_from_db(session_id: str) -> bool:
     """Fetch user_details_known from the database for the user associated with the session."""
-    import psycopg2
-    import os
+    logger.info(f"[get_user_details_known_from_db] Fetching user_details_known for session_id={session_id}")
     try:
         conn = psycopg2.connect(
             dbname=os.getenv("DB_NAME"),
@@ -92,32 +100,41 @@ def get_user_details_known_from_db(session_id: str) -> bool:
         row = cursor.fetchone()
         cursor.close()
         conn.close()
+        logger.debug(f"[get_user_details_known_from_db] DB row: {row}")
         if row and row[0]:
+            logger.info(f"[get_user_details_known_from_db] user_details_known=True for session_id={session_id}")
             return bool(row[0])
     except Exception as e:
-        logger.warning(f"DB error fetching user_details_known for session {session_id}: {e}")
+        logger.warning(f"[get_user_details_known_from_db] DB error for session {session_id}: {e}")
+    logger.info(f"[get_user_details_known_from_db] user_details_known=False for session_id={session_id}")
     return False
 
 def mark_form_shown(session_data: dict):
+    logger.info(f"[mark_form_shown] Marking form_shown=True for session_id={session_data.get('session_id')}")
     session_data["form_shown"] = True
     return session_data
 
 
 def is_valid_ip(ip_str: str) -> bool:
     # Very small regex-based validation for IPv4 and IPv6-like patterns (best-effort)
+    logger.info(f"[is_valid_ip] Validating IP: {ip_str}")
     if not ip_str:
+        logger.debug("[is_valid_ip] IP string is empty.")
         return False
-    ip_str = str(ip_str).strip()
     ip_str = str(ip_str).strip()
     ipv4_re = r"^((25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(25[0-5]|2[0-4]\d|[01]?\d?\d)$"
     ipv6_re = r"^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$"
     try:
         if re.match(ipv4_re, ip_str):
+            logger.debug("[is_valid_ip] Valid IPv4.")
             return True
         if re.match(ipv6_re, ip_str):
+            logger.debug("[is_valid_ip] Valid IPv6.")
             return True
-    except Exception:
+    except Exception as e:
+        logger.error(f"[is_valid_ip] Exception: {e}")
         return False
+    logger.debug("[is_valid_ip] IP is not valid.")
     return False
 
 
@@ -402,9 +419,11 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
 async def send_message_stream(
     req: SentMessage, follow_up_manager: FollowUpManager = Depends(get_follow_up_manager)
 ):
+    logger.info(f"[send_message_stream] Called for session_id={getattr(req, 'session_id', None)}")
     try:
         session_id = req.session_id
         if not session_id:
+            logger.error("[send_message_stream] Invalid session_id provided.")
             raise HTTPException(status_code=422, detail="Invalid session_id provided")
 
         # Lazy init ChatRouter
@@ -412,15 +431,17 @@ async def send_message_stream(
         if "chat_router" not in globals():
             chat_router = None
         if chat_router is None:
-            # Initialize ChatRouter without similarity_fn
+            logger.info("[send_message_stream] Initializing ChatRouter.")
             chat_router = ChatRouter(follow_up_manager)
 
         session_data = follow_up_manager.get_session_data(session_id)
+        logger.debug(f"[send_message_stream] session_data: {session_data}")
         is_new = not session_data or not session_data.get("prompt_context")
 
         # --- First-time session setup ---
         form_triggered = False
         if is_new:
+            logger.info(f"[send_message_stream] First-time session setup for session_id={session_id}")
             prompt_context = None
             prompt_id_str = None
             if req.prompt_id:
@@ -432,10 +453,13 @@ async def send_message_stream(
                     )
                     prompt_context = prompt_db["prompt_text"]
                     prompt_id_str = str(req.prompt_id)
+                    logger.info(f"[send_message_stream] Initialized session with prompt_id={prompt_id_str}")
                 except (ValueError, HTTPException):
+                    logger.warning(f"[send_message_stream] Invalid prompt_id or error initializing session with prompt.")
                     prompt_context = (req.query or "").strip()
             else:
                 prompt_context = (req.query or "").strip() or "General assistance"
+                logger.info(f"[send_message_stream] Using default prompt_context: {prompt_context}")
 
             follow_up_manager.initialize_session(
                 session_id=session_id,
@@ -447,22 +471,30 @@ async def send_message_stream(
                     fn = getattr(follow_up_manager.chatbot, "reset_follow_up_count", None)
                     if callable(fn):
                         fn(session_id)
+                        logger.info(f"[send_message_stream] Reset follow up count for session_id={session_id}")
                 except Exception:
-                    logger.debug("chatbot.reset_follow_up_count not available or failed; continuing")
+                    logger.debug("[send_message_stream] chatbot.reset_follow_up_count not available or failed; continuing")
             session_data = follow_up_manager.get_session_data(session_id)
         else:
             if req.prompt_id and str(req.prompt_id) != str(session_data.get("prompt_id")):
                 logger.warning(
-                    f"Ignoring new prompt_id {req.prompt_id} for existing session {session_id}; "
+                    f"[send_message_stream] Ignoring new prompt_id {req.prompt_id} for existing session {session_id}; "
                     f"continuing with original {session_data.get('prompt_id')}"
                 )
 
-        conversation_history = follow_up_manager.get_conversation_history(session_id)
-        prompt_context = session_data.get("prompt_context")
+        # Always add the latest user message to conversation history before generating response
         user_message = req.query.strip() if req.query else ""
+        if user_message:
+            follow_up_manager.add_to_conversation_history(session_id, "user", user_message)
+            logger.info(f"[send_message_stream] Added user message to conversation history: {user_message}")
+        conversation_history = follow_up_manager.get_conversation_history(session_id)
+        logger.debug(f"[send_message_stream] conversation_history: {conversation_history}")
+        prompt_context = session_data.get("prompt_context")
+        logger.info(f"[send_message_stream] user_message: {user_message}")
 
         # --- Decide if more follow-ups are needed ---
         if not follow_up_manager.check_requirements(session_id):
+            logger.info(f"[send_message_stream] Requirements not met, streaming follow up.")
             async def stream_follow_up():
                 yield "data: " + json.dumps(
                     {"status": "processing", "message": "Preparing response..."}
@@ -485,6 +517,7 @@ async def send_message_stream(
                     else:
                         status = "complete_chunk"
                         chunk = str(evt)
+                    logger.debug(f"[send_message_stream][stream_follow_up] status={status}, chunk={chunk}")
                     if chunk is None or (str(chunk).strip() == "" and status != "form_trigger"):
                         continue
                     if status == "form_trigger":
@@ -503,9 +536,10 @@ async def send_message_stream(
                                     follow_up_manager.set_session_data(session_id, sd)
                                 except Exception:
                                     follow_up_manager.sessions[session_id] = sd
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.error(f"[send_message_stream][stream_follow_up] Error marking form_shown: {e}")
                         yield "data: " + json.dumps({"status": status, "chunk": ""}) + "\n\n"
+                        logger.info(f"[send_message_stream][stream_follow_up] Form triggered, ending stream.")
                         return
                 # Otherwise, yield normal chunks
                 for status, chunk in events:
@@ -513,6 +547,7 @@ async def send_message_stream(
                 # After streaming, save the user and assistant message if present, but NOT if form was triggered
                 if not form_triggered:
                     if req.query:
+                        logger.info(f"[send_message_stream][stream_follow_up] Saving user message.")
                         await save_message(
                             MessageCreate(
                                 content=req.query.strip(),
@@ -522,10 +557,9 @@ async def send_message_stream(
                                 follow_up_to=None,
                             )
                         )
-                        follow_up_manager.add_to_conversation_history(
-                            session_id, "user", req.query.strip()
-                        )
+                        # User message already added to conversation history above
                     if assistant_response.strip():
+                        logger.info(f"[send_message_stream][stream_follow_up] Saving assistant response.")
                         await save_message(
                             MessageCreate(
                                 content=assistant_response.strip(),
@@ -539,6 +573,7 @@ async def send_message_stream(
             return StreamingResponse(stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS)
 
         # --- Requirements captured: full response streaming ---
+        logger.info(f"[send_message_stream] Requirements met, streaming full response.")
         async def generate_full_response_stream():
             # Inform client generation is starting
             yield "data: " + json.dumps(
@@ -561,6 +596,7 @@ async def send_message_stream(
                 else:
                     status = "complete_chunk"
                     chunk = str(evt)
+                logger.debug(f"[send_message_stream][generate_full_response_stream] status={status}, chunk={chunk}")
                 if chunk is None or (str(chunk).strip() == "" and status != "form_trigger"):
                     continue
                 events.append((status, chunk))
@@ -575,9 +611,10 @@ async def send_message_stream(
                                 follow_up_manager.set_session_data(session_id, sd)
                             except Exception:
                                 follow_up_manager.sessions[session_id] = sd
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.error(f"[send_message_stream][generate_full_response_stream] Error marking form_shown: {e}")
                     yield "data: " + json.dumps({"status": status, "chunk": ""}) + "\n\n"
+                    logger.info(f"[send_message_stream][generate_full_response_stream] Form triggered, ending stream.")
                     return
             # Otherwise, yield normal chunks
             final_response = None
@@ -587,6 +624,7 @@ async def send_message_stream(
                     final_response = chunk
             # After streaming, save the assistant message if present
             if final_response:
+                logger.info(f"[send_message_stream][generate_full_response_stream] Saving assistant response.")
                 await save_message(
                     MessageCreate(
                         content=final_response.strip(),
@@ -599,7 +637,7 @@ async def send_message_stream(
 
         return StreamingResponse(generate_full_response_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
     except Exception as e:
-        logger.error(f"Unexpected error in send_message_stream: {str(e)}")
+        logger.error(f"[send_message_stream] Unexpected error: {str(e)}")
         raise
 
 # Internal async function to fetch root prompts
