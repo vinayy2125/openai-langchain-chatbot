@@ -525,7 +525,7 @@ async def send_message_stream(
                     if status in ("chunk", "complete_chunk") and chunk:
                         assistant_response += chunk
                     events.append((status, chunk))
-                # If any event is form_trigger, only yield that
+                # If any event is form_trigger, only yield that and save ONLY the user message
                 for status, chunk in events:
                     if status == "form_trigger":
                         try:
@@ -538,13 +538,25 @@ async def send_message_stream(
                                     follow_up_manager.sessions[session_id] = sd
                         except Exception as e:
                             logger.error(f"[send_message_stream][stream_follow_up] Error marking form_shown: {e}")
+                        # Always save the user message before returning for form_trigger
+                        if req.query:
+                            logger.info(f"[send_message_stream][stream_follow_up] Saving user message (form_trigger).")
+                            await save_message(
+                                MessageCreate(
+                                    content=req.query.strip(),
+                                    role="user",
+                                    session_id=session_id,
+                                    reply_to=None,
+                                    follow_up_to=None,
+                                )
+                            )
                         yield "data: " + json.dumps({"status": status, "chunk": ""}) + "\n\n"
                         logger.info(f"[send_message_stream][stream_follow_up] Form triggered, ending stream.")
                         return
                 # Otherwise, yield normal chunks
                 for status, chunk in events:
                     yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
-                # After streaming, save the user and assistant message if present, but NOT if form was triggered
+                # After streaming, save both user and assistant message ONLY if form was NOT triggered
                 if not form_triggered:
                     if req.query:
                         logger.info(f"[send_message_stream][stream_follow_up] Saving user message.")
@@ -557,7 +569,6 @@ async def send_message_stream(
                                 follow_up_to=None,
                             )
                         )
-                        # User message already added to conversation history above
                     if assistant_response.strip():
                         logger.info(f"[send_message_stream][stream_follow_up] Saving assistant response.")
                         await save_message(
@@ -600,7 +611,7 @@ async def send_message_stream(
                 if chunk is None or (str(chunk).strip() == "" and status != "form_trigger"):
                     continue
                 events.append((status, chunk))
-            # If any event is form_trigger, only yield that
+            # If any event is form_trigger, only yield that and save ONLY the user message
             for status, chunk in events:
                 if status == "form_trigger":
                     try:
@@ -613,6 +624,18 @@ async def send_message_stream(
                                 follow_up_manager.sessions[session_id] = sd
                     except Exception as e:
                         logger.error(f"[send_message_stream][generate_full_response_stream] Error marking form_shown: {e}")
+                    # Always save the user message before returning for form_trigger
+                    if req.query:
+                        logger.info(f"[send_message_stream][generate_full_response_stream] Saving user message (form_trigger).")
+                        await save_message(
+                            MessageCreate(
+                                content=req.query.strip(),
+                                role="user",
+                                session_id=session_id,
+                                reply_to=None,
+                                follow_up_to=None,
+                            )
+                        )
                     yield "data: " + json.dumps({"status": status, "chunk": ""}) + "\n\n"
                     logger.info(f"[send_message_stream][generate_full_response_stream] Form triggered, ending stream.")
                     return
@@ -622,18 +645,19 @@ async def send_message_stream(
                 yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
                 if status == "complete_chunk":
                     final_response = chunk
-            # After streaming, save the assistant message if present
-            if final_response:
-                logger.info(f"[send_message_stream][generate_full_response_stream] Saving assistant response.")
-                await save_message(
-                    MessageCreate(
-                        content=final_response.strip(),
-                        role="assistant",
-                        session_id=str(session_id),
-                        reply_to=None,
-                        follow_up_to=None,
+            # After streaming, save the assistant message ONLY if form was NOT triggered
+            if not any(status == "form_trigger" for status, _ in events):
+                if final_response:
+                    logger.info(f"[send_message_stream][generate_full_response_stream] Saving assistant response.")
+                    await save_message(
+                        MessageCreate(
+                            content=final_response.strip(),
+                            role="assistant",
+                            session_id=str(session_id),
+                            reply_to=None,
+                            follow_up_to=None,
+                        )
                     )
-                )
 
         return StreamingResponse(generate_full_response_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
     except Exception as e:
@@ -734,3 +758,34 @@ async def fetch_root_prompts():
             cursor.close()
         if conn:
             conn.close()
+
+def delete_last_user_message(session_id: str):
+    """Delete the last user message for a session from the database."""
+    conn = get_db_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            DELETE FROM messages
+            WHERE id = (
+                SELECT id FROM messages
+                WHERE session_id = %s AND role = 'user'
+                ORDER BY created_at DESC
+                LIMIT 1
+            )
+            RETURNING id
+            """,
+            (str(session_id),)
+        )
+        deleted = cursor.fetchone()
+        conn.commit()
+        logger.info(f"[delete_last_user_message] Deleted message id: {deleted[0] if deleted else None} for session_id={session_id}")
+        return deleted[0] if deleted else None
+    except Exception as e:
+        logger.error(f"[delete_last_user_message] Error deleting last user message for session_id={session_id}: {e}")
+        if conn:
+            conn.rollback()
+        return None
+    finally:
+        cursor.close()
+        conn.close()
