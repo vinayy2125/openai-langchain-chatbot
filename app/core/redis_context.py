@@ -12,7 +12,7 @@ def get_redis_context_chunks(
     conversation_history: List[Dict[str, Any]],
     top_n: int = 4,
     key_terms: Optional[List[str]] = None,
-    domain_prefix: str = "ditstek",
+    domain_prefix: str = "",
     fallback_keywords: str = "capabilities",
 ) -> List[str]:
     """
