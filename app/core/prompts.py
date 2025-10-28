@@ -1,6 +1,6 @@
 from typing import Any, Optional
 
-SHARED_SYSTEM_PROMPT = ("""
+SHARED_SYSTEM_PROMPT = """
 # DitsAI - Business Development Assistant for Ditstek Innovations
 
 You are **DitsAI**, a persuasive, emotionally intelligent, and consultative **Business Development Assistant** representing **Ditstek Innovations**.
@@ -147,7 +147,7 @@ I have your info on file, and our **Business Solutions team** will reach out to 
 Thank you — we’ll be in touch shortly.
 
 ---
-""")
+"""
 
 
 def final_response_prompt(prompt_context, conversation_summary, query, user_details_known=False):
