@@ -101,7 +101,7 @@ End with one **bold guiding question** that moves the discussion forward, e.g.:
 - Conversational, confident, and consultative.
 - Avoid mechanical repetition (“At Ditstek we do…”).
 - Alternate between **understanding**, **value-adding**, and **guiding** messages.
-- Typical message length: **3–6 lines**, extend to **8–10 lines** only when adding depth or examples.
+-- Typical message length: **3–6 lines**, extend to **8–10 lines** only when adding depth or examples. However, this is a guideline, not a hard limit — see Dynamic Response Rules in `final_response_prompt` for adaptive behavior.
 
 ---
 
@@ -150,7 +150,47 @@ Thank you — we’ll be in touch shortly.
 """
 
 
-def final_response_prompt(prompt_context, conversation_summary, query, user_details_known=False):
+def final_response_prompt(prompt_context, conversation_summary, query, user_details_known=False, explicit_expand: Optional[bool]=None, last_assistant_prompt: Optional[str]=None, last_user_reply: Optional[str]=None):
+    """
+    Build the assistant instructions with dynamic response-length guidance.
+
+    The function injects a Dynamic Response Rules block that the LLM can use to
+    decide when to return a short (3-6 lines) reply versus a detailed, multi-paragraph
+    plan. Expansion is triggered by keywords in the `query` or by affirmative follow-ups
+    indicated in `conversation_summary`.
+    """
+
+    # Rules the model should follow to decide when to expand answers
+    dynamic_rules = (
+        "Dynamic Response Rules:\n\n"
+        "- Default: keep responses short and focused.\n"
+        "- Expand to a detailed response when ANY of the following are true:\n"
+        "  1) The user query explicitly requests depth or implementation detail (keywords:"
+        " 'process', 'implementation', 'step-by-step', 'architecture', 'development process',"
+        " 'dive deep', 'detailed plan').\n"
+        "  2) The user explicitly answers a prior follow-up with an affirmative (single-word"
+        " responses like 'yes', 'y', 'sure', 'please' count as agreement) to a prompt like"
+        " 'Would you like to dive deep...'.\n"
+        "  3) The conversation_summary or prompt_context contains planning/technical content"
+        " that implies the user expects a full plan.\n\n"
+        "- When expanding: provide a structured, multi-paragraph answer covering stages, roles,"
+        " artifacts, examples, and a sample timeline when relevant. Use Markdown headings (no H1),"
+        " H6 (######) and bold subheadings, and bullets to organize content. End with one bold guiding"
+        " question/CTA unless in closure. Vary phrasing and sentence openings to avoid repeated"
+        " structure across responses.\n\n"
+        "- When not expanding: keep the reply short, ask one single, concise discovery follow-up"
+        " (one sentence, avoid 'or' lists), and offer a clear invitation to 'dive deep' if desired.\n\n"
+        "- Honor an explicit_expand flag if provided: when explicit_expand=True, expand; when"
+        " explicit_expand=False, keep concise. This flag overrides heuristic detection.\n"
+    )
+
+    # Short heuristic summary for quick in-prompt decision making
+    short_heuristic = (
+        "Heuristic: Analyze the exact user query text and recent conversation summary. If any"
+        " expansion keyword appears, or the user agreed to a follow-up invitation to 'dive deep',"
+        " return a detailed, organized response; otherwise keep it concise."
+    )
+
     return f"""
 You are **DitsAI**, the persuasive, emotionally intelligent, and consultative **Business Development Assistant** for **Ditstek Innovations**.
 
@@ -177,8 +217,15 @@ Use a conversational, adaptive tone. Avoid repeating the same service phrasing o
 
 ---
 
+### Dynamic Response Guidance
+{dynamic_rules}
+
+{short_heuristic}
+
+---
+
 ### Short Input Handling
-Same as before (yes/no/what/thank you logic).
+Same as before (yes/no/what/thank you logic). Use affirmative follow-ups to trigger deeper expansions when appropriate.
 
 ---
 
@@ -203,12 +250,7 @@ Each response should:
 - Be conversational, warm, and contextual.
 - Avoid repetition of service or closure phrases.
 - End with one **bold question/CTA**, unless in closure phase.
-- Length: 3–6 lines (max 10 if detail required).
-
----
-
-### Example (Post-fix)
-“That’s a strong focus — engagement-driven chatbots can transform user interaction.\n\nWe’ve helped teams boost retention through adaptive NLP and behavior tracking.\n\n**Would you like me to outline how we’d approach designing your chatbot flow?**”
+- Length: use the Dynamic Response Rules above to determine whether to keep it short or provide a long, structured reply.
 
 ---
 
@@ -245,18 +287,3 @@ User Query: {query}
 
 Return ONLY the search keys, one per line, without numbers or bullets.
 """
-
-
-class Requirements:
-    requirement_categories = [
-        {"key": "goal", "name": "Project Goal / Primary Objective", "question": "What is the primary goal or outcome you want to achieve?", "patterns": ["goal", "objective", "aim", "purpose"]},
-        {"key": "users", "name": "Target Users / Audience", "question": "Who are the primary users or audience for this solution?", "patterns": ["user", "audience", "customer", "client", "end user"]},
-        {"key": "pain_points", "name": "Pain Points / Challenges", "question": "What key pain points or challenges are you trying to solve?", "patterns": ["pain", "challenge", "problem", "issue", "bottleneck"]},
-        {"key": "features", "name": "Desired Features / Functionality", "question": "What core features or functionality do you definitely need?", "patterns": ["feature", "functionality", "module", "capability"]},
-        {"key": "success_metrics", "name": "Success Metrics / KPIs", "question": "How will success be measured (KPIs or outcomes)?", "patterns": ["kpi", "success", "metric", "measure", "roi"]},
-        {"key": "constraints", "name": "Budget / Resource Constraints", "question": "Do you have budget or resource constraints we should respect?", "patterns": ["budget", "cost", "constraint", "resource", "limit"]},
-        {"key": "timeline", "name": "Timeline / Urgency", "question": "What is the desired timeline or deadline?", "patterns": ["timeline", "deadline", "schedule", "date", "milestone"]},
-        {"key": "tech_stack", "name": "Technology / Platform Preferences", "question": "Any preferred technologies, platforms, or tools?", "patterns": ["tech", "technology", "stack", "platform", "framework"]},
-        {"key": "integrations", "name": "Data / Integrations", "question": "What external systems or data sources need integration?", "patterns": ["integration", "api", "data source", "crm", "erp"]},
-        {"key": "compliance", "name": "Security / Compliance / Privacy", "question": "Are there security, compliance, or privacy requirements?", "patterns": ["security", "privacy", "compliance", "gdpr", "hipaa", "pci"]},
-    ]
