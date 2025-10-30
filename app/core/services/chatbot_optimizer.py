@@ -48,103 +48,100 @@ class OptimizedChatbot:
         self.query_llm = llm if llm is not None else ChatOpenAI(model=model)
 
     def get_detailed_response(self, query: str, chat_history: List[tuple], session_id: str, stream: bool = True):
-        from app.api.v1.helpers import get_user_details_known_from_db    #Do Not Move Outside funtion
+        from app.api.v1.helpers import get_user_details_known_from_db  # Do Not Move Outside Function
 
-        """Generate a detailed response for a query and stream structured events.
-
-        Yields dict events used by the API layer: {status: 'chunk'|'complete_chunk'|'form_trigger', 'chunk': ...}
+        """
+        Generate a detailed response for a query and stream structured events.
+        Yields dict events used by the API layer: 
+        {status: 'chunk'|'complete_chunk'|'form_trigger'|'meta', 'chunk': ...}
         """
         try:
+            # Step 1: Retrieve Redis context
             try:
                 context_chunks = get_redis_context_chunks(session_id, query, [], top_n=4)
             except Exception as e:
                 logger.warning("Redis context retrieval failed, using empty context: %s", e)
                 context_chunks = []
 
-            context = "\n\n---\n\n".join([str(chunk) for chunk in (context_chunks or [])])
+            context = "\n\n---\n\n".join(map(str, context_chunks or []))
             history = self._format_history(chat_history)
-            logger.info(f"[Chatbot] Redis Context Retrieved: {len(context)} characters, {len(context_chunks) if context_chunks else 0} chunks")
+            logger.info(f"[Chatbot] Redis Context Retrieved: {len(context)} chars, {len(context_chunks)} chunks")
             logger.info(f"[Chatbot] Chat History: {len(chat_history)} messages")
 
-            # Construct prompt
-            history_str = history or ""
+            # Step 2: Prepare prompt
             user_details_known = get_user_details_known_from_db(session_id)
             logger.info(f"[Chatbot] user_details_known (DB) = {user_details_known} for session {session_id}")
-            prompt = final_response_prompt(prompt_context=context, conversation_summary=history_str, query=query, user_details_known=user_details_known)
-            logger.info(f"[Chatbot] Prompt prepared from final_response_prompt (user_details_known={user_details_known})")
+
+            prompt = final_response_prompt(
+                prompt_context=context,
+                conversation_summary=history or "",
+                query=query,
+                user_details_known=user_details_known,
+            )
+            logger.info(f"[Chatbot] Prompt prepared (user_details_known={user_details_known})")
+
+            # Step 3: Generate response from LLM
+            try:
+                final_text = generate_llm_response(prompt)
+                safe_final_text = final_text if isinstance(final_text, str) else ""
+            except Exception as llm_exc:
+                logger.exception(f"[Chatbot] LLM call failed: {llm_exc}")
+                yield from self._fallback_response_stream("I couldn't generate a response right now.")
+                return
+
+            # Step 4: Parse LLM JSON output (if present)
+            funnel_stage = ""
+            response_text = ""
+
+            def extract_json_from_markdown(txt: str) -> str:
+                pattern = r'```(?:json)?\s*\n?(.*?)\n?```'
+                match = re.search(pattern, txt, re.DOTALL)
+                return match.group(1).strip() if match else txt.strip()
 
             try:
-                # Primary path: centralized helper that returns a final text
-                final_text = generate_llm_response(prompt)
+                cleaned_json = extract_json_from_markdown(safe_final_text)
+                llm_json = json.loads(cleaned_json)
+                response_text = llm_json.get("response", "") or ""
+                funnel_stage = (llm_json.get("funnel_stage", "") or "").lower()
+                user_details_known = bool(llm_json.get("user_details_known", False))
+                user_network_id = llm_json.get("user_network_id") or None
+                logger.info(f"[Chatbot] Parsed JSON: {llm_json}")
+            except Exception as json_exc:
+                logger.warning(f"[Chatbot] Failed to parse LLM output as JSON: {json_exc}")
+                response_text = safe_final_text
+                user_network_id = None
 
-                funnel_stage = ""
-                response_text = ""
-                safe_final_text = final_text if isinstance(final_text, str) else ""
+            logger.info(f"[Chatbot] Final output len={len(safe_final_text)}, funnel_stage='{funnel_stage}'")
 
-                # Extract JSON from markdown code blocks if present
-                def extract_json_from_markdown(txt: str) -> str:
-                    json_pattern = r'```(?:json)?\s*\n?(.*?)\n?```'
-                    match = re.search(json_pattern, txt, re.DOTALL)
-                    if match:
-                        return match.group(1).strip()
-                    return txt.strip()
+            # Step 5: Stream formatted response
+            cleaned = (response_text or "").replace("FORM_TRIGGER", "").strip()
+            formatted = format_response(cleaned, query, None)
+            if formatted:
+                yield {"status": "chunk", "chunk": formatted}
+            yield {"status": "complete_chunk", "chunk": ""}
 
-                try:
-                    # Try to extract JSON from markdown first
-                    cleaned_json = extract_json_from_markdown(safe_final_text)
-                    logger.info(f"[Chatbot] Cleaned JSON for parsing: {cleaned_json}")
-                    llm_json = json.loads(cleaned_json)
-                    logger.info(f"[Chatbot] Parsed JSON object: {llm_json}")
-                    response_text = llm_json.get("response", "") or ""
-                    funnel_stage = (llm_json.get("funnel_stage", "") or "").lower()
-                    # New optional fields to signal backend/session
-                    user_details_known = bool(llm_json.get("user_details_known", False))
-                    user_network_id = llm_json.get("user_network_id") if llm_json.get("user_network_id") else None
-                    logger.info(f"[Chatbot] Extracted response_text: '{response_text}'")
-                    logger.info(f"[Chatbot] Extracted funnel_stage: '{funnel_stage}' (original: '{llm_json.get('funnel_stage', '')}')")
-                except Exception as json_exc:
-                    logger.error(f"[Chatbot] Failed to parse LLM output as JSON: {json_exc}")
-                    logger.info(f"[Chatbot] Raw LLM output: {safe_final_text}")
-                    response_text = safe_final_text
+            # Step 6: Emit meta update if present
+            meta_chunk = {
+                "user_details_known": user_details_known,
+                **({"user_network_id": user_network_id} if user_network_id else {}),
+            }
+            if meta_chunk:
+                yield {"status": "meta", "chunk": meta_chunk}
 
-                logger.info(f"[Chatbot] Final LLM output length={len(safe_final_text)}; preview: {safe_final_text}")
-                logger.info(f"[Chatbot] Parsed funnel_stage: '{funnel_stage}' (type: {type(funnel_stage)})")
+            # Step 7: Funnel stage handling (form trigger)
+            user_details_known_db = get_user_details_known_from_db(session_id)
+            trigger_form = funnel_stage == "action" and not user_details_known_db
 
-                # Stream the main response chunk (minimal cleaning, preserve LLM output)
-                cleaned = str(response_text or "").replace("FORM_TRIGGER", "").strip()
-                formatted = format_response(cleaned, query, None)
-                if formatted:
-                    yield {"status": "chunk", "chunk": formatted}
-                yield {"status": "complete_chunk", "chunk": ""}
+            if trigger_form:
+                logger.info("[Chatbot] FORM TRIGGER ACTIVATED! (user_details_known=False)")
+                yield {"status": "form_trigger", "chunk": ""}
+            else:
+                logger.info(f"[Chatbot] No form trigger. funnel_stage={funnel_stage}, user_details_known={user_details_known_db}")
 
-                # Emit a backend meta event so upstream can update session state once
-                meta = {"status": "meta", "chunk": {"user_details_known": user_details_known}}
-                if user_network_id:
-                    meta["chunk"]["user_network_id"] = user_network_id
-                # Only emit meta event if any value is present
-                if meta["chunk"].get("user_details_known") or meta["chunk"].get("user_network_id"):
-                    yield meta
-
-                # Funnel stage handling for form trigger (backend can use this value)
-                logger.info(f"[Chatbot] Checking funnel stage for form trigger: '{funnel_stage}' == 'action'? {funnel_stage == 'action'}")
-                # Defensive: only emit form_trigger if form_shown is not already set
-                user_details_known_db = get_user_details_known_from_db(session_id)
-                logger.info(f"[Chatbot] DB value: user_details_known={user_details_known_db} for session {session_id}")
-                if funnel_stage == "action" and not user_details_known_db:
-                    logger.info("[Chatbot] FORM TRIGGER ACTIVATED! (user_details_known is False)")
-                    yield {"status": "form_trigger", "chunk": ""}
-                elif funnel_stage == "action" and user_details_known_db:
-                    logger.info("[Chatbot] Funnel stage is action but user_details_known is True; not emitting trigger again.")
-                else:
-                    logger.info(f"[Chatbot] Form trigger NOT activated. Funnel stage is: '{funnel_stage}'")
-
-            except Exception as llm_exc:
-                logger.exception(f"[Chatbot] LLM call failed with exception: {llm_exc}")
-                # Use a safer, shorter fallback message instead of echoing entire prompt
-                yield from self._fallback_response_stream("I couldn't generate a response right now.")
         except Exception as e:
             logger.exception("[Chatbot] Redis-based response generation failed")
             yield from self._fallback_response_stream("I couldn't generate a response right now.")
+
 
 
     def _fallback_response_stream(self, query: str) -> Generator[str, None, None]:
