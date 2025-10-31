@@ -1,9 +1,10 @@
-import json
+import re
 import os
+import json
+import psycopg2
 from typing import Dict, Any, List, Optional
 from fastapi.responses import StreamingResponse
 from uuid import UUID
-import psycopg2
 from app.logger import get_logger
 from fastapi import HTTPException, Depends
 from app.api.deps import get_follow_up_manager
@@ -16,6 +17,7 @@ from app.api.v1.models import (
 )
 from app.api.v1.models import UserCreate
 from app.core.nested_follow_up_manager import FollowUpManager
+from app.core.services.email_sender import send_closure_email
 from fastapi import HTTPException
 from datetime import datetime
 from app.api.v1.models import PromptType
@@ -44,7 +46,6 @@ def is_prompt_trigger(response: str) -> bool:
     result = any(cue.lower() in response.lower() for cue in action_cues)
     logger.debug(f"[is_prompt_trigger] Result: {result}")
     return result
-import re
 
 
 
@@ -518,8 +519,10 @@ async def send_message_stream(
                         status = "complete_chunk"
                         chunk = str(evt)
                     logger.debug(f"[send_message_stream][stream_follow_up] status={status}, chunk={chunk}")
-                    if chunk is None or (str(chunk).strip() == "" and status != "form_trigger"):
-                        continue
+                    
+                    # Keep empty chunks for terminal events like form_trigger and end_chat
+                    if chunk is None or (str(chunk).strip() == "" and status not in ("form_trigger", "end_chat")):
+                        logger.debug(f"[send_message_stream][stream_follow_up] Skipping empty/None chunk for status={status}")
                     if status == "form_trigger":
                         form_triggered = True
                     if status in ("chunk", "complete_chunk") and chunk:
@@ -608,7 +611,9 @@ async def send_message_stream(
                     status = "complete_chunk"
                     chunk = str(evt)
                 logger.debug(f"[send_message_stream][generate_full_response_stream] status={status}, chunk={chunk}")
-                if chunk is None or (str(chunk).strip() == "" and status != "form_trigger"):
+                # Keep empty chunks for terminal events like form_trigger and end_chat
+                if chunk is None or (str(chunk).strip() == "" and status not in ("form_trigger", "end_chat")):
+                    logger.debug(f"[send_message_stream][generate_full_response_stream] Skipping empty/None chunk for status={status}")
                     continue
                 events.append((status, chunk))
             # If any event is form_trigger, only yield that and save ONLY the user message
@@ -639,12 +644,25 @@ async def send_message_stream(
                     yield "data: " + json.dumps({"status": status, "chunk": ""}) + "\n\n"
                     logger.info(f"[send_message_stream][generate_full_response_stream] Form triggered, ending stream.")
                     return
-            # Otherwise, yield normal chunks
+            # Otherwise, yield all normal chunks, but if end_chat is present, yield it last and end the stream
             final_response = None
+            end_chat_found = False
+            end_chat_chunk = None
             for status, chunk in events:
+                if status == "end_chat":
+                    end_chat_found = True
+                    end_chat_chunk = chunk
+                    continue  # Don't yield now, yield after all other chunks
+                logger.debug(f"[send_message_stream][generate_full_response_stream] Sending to client: status={status}, chunk_preview={str(chunk)[:200]}")
                 yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
                 if status == "complete_chunk":
                     final_response = chunk
+            if end_chat_found:
+                logger.debug(f"[send_message_stream][generate_full_response_stream] Sending end_chat to client: chunk_preview={str(end_chat_chunk)[:200]}")
+                yield "data: " + json.dumps({"status": "end_chat", "chunk": end_chat_chunk}) + "\n\n"
+                logger.info(f"[send_message_stream][generate_full_response_stream] end_chat triggered, ending stream.")
+                return
+            
             # After streaming, save the assistant message ONLY if form was NOT triggered
             if not any(status == "form_trigger" for status, _ in events):
                 if final_response:
@@ -789,3 +807,71 @@ def delete_last_user_message(session_id: str):
     finally:
         cursor.close()
         conn.close()
+        
+async def end_session_helper(session_id: str):
+    """End a session and trigger closure email in the background if conditions are met."""
+    import threading
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        # 1. Check is_active for the session
+        cursor.execute(
+            """
+            SELECT is_active, user_id FROM sessions WHERE session_id = %s
+            """,
+            (str(session_id),)
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Session not found")
+        is_active, user_id = row
+        # 2. If is_active is True, set to False
+        if is_active:
+            cursor.execute(
+                """
+                UPDATE sessions SET is_active = FALSE WHERE session_id = %s
+                """,
+                (str(session_id),)
+            )
+            conn.commit()
+            is_active = False
+        # 3. Check user_details_known for the user
+        cursor.execute(
+            """
+            SELECT user_details_known FROM users WHERE id = %s
+            """,
+            (str(user_id),)
+        )
+        user_row = cursor.fetchone()
+        if not user_row:
+            raise HTTPException(status_code=404, detail="User not found")
+        user_details_known = user_row[0]
+        # 4. If is_active is False and user_details_known is True, trigger closure email in background
+        def trigger_email():
+            try:
+                send_closure_email(session_id)
+            except Exception as e:
+                logger.error(f"Error sending closure email: {e}")
+        if (is_active is False) and (user_details_known is True):
+            threading.Thread(target=trigger_email, daemon=True).start()
+        # Return minimal response
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "is_active": is_active,
+            "user_details_known": user_details_known
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Error in end_session_helper: {e}")
+        raise HTTPException(status_code=500, detail="Error ending session")
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()

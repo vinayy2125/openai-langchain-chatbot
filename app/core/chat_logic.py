@@ -2,6 +2,10 @@ import json
 from app.logger import get_logger
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from app.core.nested_follow_up_manager import FollowUpManager
+ # session_manager import removed
+from app.core.services.email_sender import send_closure_email
+from app.config import get_redis
+import threading
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -93,6 +97,35 @@ async def build_chatbot_response(
             # Persist assistant message to session history
             if main_response:
                 follow_up_manager.add_to_conversation_history(session_id, "assistant", main_response)
+
+            # After saving assistant message, check if session should be closed and send email once.
+            try:
+                session = follow_up_manager.get_session_data(session_id)
+                state = session.setdefault("state", {})
+                # If already marked inactive, skip
+                if state.get("is_active") is False:
+                    pass
+                else:
+                    # Check for closure condition: user_details_known True
+                    if state.get("user_details_known"):
+                        reason = "user_details_known"
+                        # idempotently mark session closed
+                        try:
+                            # session closure logic removed; email trigger will be handled on funnel_stage/user_details_known
+                            # Only trigger sending email if this process claimed the closure (avoid duplicate attempts)
+                            # Directly trigger email send on user_details_known or funnel_stage == 'action'
+                            def _bg_send():
+                                try:
+                                    send_closure_email(session_id, follow_up_manager, reason=reason, redis_client=get_redis)
+                                except Exception:
+                                    logger.exception("[chat_logic] background send_closure_email failed")
+
+                            t = threading.Thread(target=_bg_send, daemon=True)
+                            t.start()
+                        except Exception as e:
+                            logger.exception(f"[chat_logic] Failed to end session: {e}")
+            except Exception as e:
+                logger.exception(f"[chat_logic] Post-response closure check failed: {e}")
 
         except Exception as e:
             logger.exception("[ChatLogic] Unified response generation failed: %s", e)

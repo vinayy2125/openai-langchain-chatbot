@@ -65,10 +65,14 @@ class OptimizedChatbot:
 
             context = "\n\n---\n\n".join(map(str, context_chunks or []))
             history = self._format_history(chat_history)
+            count = len(chat_history)
             logger.info(f"[Chatbot] Redis Context Retrieved: {len(context)} chars, {len(context_chunks)} chunks")
             logger.info(f"[Chatbot] Chat History: {len(chat_history)} messages")
+            
+            # 1. Yield processing chunk
+            yield {"status": "processing", "message": "Preparing response..."}
 
-            # Step 2: Prepare prompt
+            # 2. Generate and yield response chunk
             user_details_known = get_user_details_known_from_db(session_id)
             logger.info(f"[Chatbot] user_details_known (DB) = {user_details_known} for session {session_id}")
 
@@ -76,6 +80,7 @@ class OptimizedChatbot:
                 prompt_context=context,
                 conversation_summary=history or "",
                 query=query,
+                count=count,
                 user_details_known=user_details_known,
             )
             logger.info(f"[Chatbot] Prompt prepared (user_details_known={user_details_known})")
@@ -118,6 +123,13 @@ class OptimizedChatbot:
             formatted = format_response(cleaned, query, None)
             if formatted:
                 yield {"status": "chunk", "chunk": formatted}
+                                # 3. Yield end_chat trigger as the third chunk if user message count >= 3
+                if count >= 50:
+                    logger.info(f"[Chatbot] [DEBUG] Yielding end_chat chunk: user_message_count={count}")
+                    print(f"[DEBUG] Yielding end_chat chunk: user_message_count={count}")
+                    # Use a small non-empty marker so clients that drop empty chunks still receive the event
+                    yield {"status": "end_chat", "chunk": ""}
+ 
             yield {"status": "complete_chunk", "chunk": ""}
 
             # Step 6: Emit meta update if present

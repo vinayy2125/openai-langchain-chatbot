@@ -150,7 +150,7 @@ Thank you — we’ll be in touch shortly.
 """
 
 
-def final_response_prompt(prompt_context, conversation_summary, query, user_details_known=False, explicit_expand: Optional[bool]=None, last_assistant_prompt: Optional[str]=None, last_user_reply: Optional[str]=None):
+def final_response_prompt(prompt_context, conversation_summary, query, count, user_details_known=False, explicit_expand: Optional[bool]=None, last_assistant_prompt: Optional[str]=None, last_user_reply: Optional[str]=None):
     """
     Build the assistant instructions with dynamic response-length guidance.
 
@@ -259,6 +259,11 @@ Inputs:
 - Conversation Summary: {conversation_summary}
 - User Query: {query}
 - User Details Known: {user_details_known}
+- Message Count = {count}
+ 
+### Important Guidelines:
+- If the Message Count is greater than 18 and user_details_known is False, set the funnel_stage to "Action" regardless of other factors.
+- If the Message Count is 18 or fewer, use the existing funnel_stage logic based on user intent and context.
 """
 
 
