@@ -516,7 +516,7 @@ async def send_message_stream(
                         status = evt.get("status", "unknown")
                         chunk = evt.get("chunk", "")
                     else:
-                        status = "complete_chunk"
+                        status = "unknown"
                         chunk = str(evt)
                     logger.debug(f"[send_message_stream][stream_follow_up] status={status}, chunk={chunk}")
                     
@@ -525,7 +525,7 @@ async def send_message_stream(
                         logger.debug(f"[send_message_stream][stream_follow_up] Skipping empty/None chunk for status={status}")
                     if status == "form_trigger":
                         form_triggered = True
-                    if status in ("chunk", "complete_chunk") and chunk:
+                    if status == "chunk" and chunk:
                         assistant_response += chunk
                     events.append((status, chunk))
                 # If any event is form_trigger, only yield that and save ONLY the user message
@@ -608,7 +608,7 @@ async def send_message_stream(
                     status = evt.get("status", "unknown")
                     chunk = evt.get("chunk", "")
                 else:
-                    status = "complete_chunk"
+                    status = "unknown"
                     chunk = str(evt)
                 logger.debug(f"[send_message_stream][generate_full_response_stream] status={status}, chunk={chunk}")
                 # Keep empty chunks for terminal events like form_trigger and end_chat
@@ -655,8 +655,6 @@ async def send_message_stream(
                     continue  # Don't yield now, yield after all other chunks
                 logger.debug(f"[send_message_stream][generate_full_response_stream] Sending to client: status={status}, chunk_preview={str(chunk)[:200]}")
                 yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
-                if status == "complete_chunk":
-                    final_response = chunk
             if end_chat_found:
                 logger.debug(f"[send_message_stream][generate_full_response_stream] Sending end_chat to client: chunk_preview={str(end_chat_chunk)[:200]}")
                 yield "data: " + json.dumps({"status": "end_chat", "chunk": end_chat_chunk}) + "\n\n"
@@ -695,8 +693,8 @@ async def fetch_root_prompts():
         desired_order = [
             "See our Work",
             "Start a Project",
-            "Talk to our team",
-            "Explore DITS Services",
+            "Talk to Dits team",
+            "Explore Dits Services",
         ]
         all_prompt_texts = [greeting_text] + desired_order + [bottom_hint_text]
 
