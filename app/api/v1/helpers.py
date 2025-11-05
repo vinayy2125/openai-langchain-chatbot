@@ -1,3 +1,55 @@
+def delete_message_by_id(message_id: str):
+    """Delete a message by its id from the database."""
+    conn = get_db_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            DELETE FROM messages WHERE id = %s
+            """,
+            (str(message_id),)
+        )
+        conn.commit()
+        logger.info(f"[delete_message_by_id] Deleted message id: {message_id}")
+        return True
+    except Exception as e:
+        logger.error(f"[delete_message_by_id] Error deleting message id={message_id}: {e}")
+        if conn:
+            conn.rollback()
+        return False
+    finally:
+        cursor.close()
+        conn.close()
+def delete_last_assistant_message(session_id: str):
+    """Delete the last assistant message for a session from the database."""
+    conn = get_db_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            DELETE FROM messages
+            WHERE id = (
+                SELECT id FROM messages
+                WHERE session_id = %s AND role = 'assistant'
+                ORDER BY created_at DESC
+                LIMIT 1
+            )
+            RETURNING id
+            """,
+            (str(session_id),)
+        )
+        deleted = cursor.fetchone()
+        conn.commit()
+        logger.info(f"[delete_last_assistant_message] Deleted assistant message id: {deleted[0] if deleted else None} for session_id={session_id}")
+        return deleted[0] if deleted else None
+    except Exception as e:
+        logger.error(f"[delete_last_assistant_message] Error deleting last assistant message for session_id={session_id}: {e}")
+        if conn:
+            conn.rollback()
+        return None
+    finally:
+        cursor.close()
+        conn.close()
 import re
 import os
 import json
@@ -8,7 +60,6 @@ from uuid import UUID
 from app.logger import get_logger
 from fastapi import HTTPException, Depends
 from app.api.deps import get_follow_up_manager
-from app.core.services.thread_router import ChatRouter
 from app.core.chat_logic import build_chatbot_response
 from app.api.v1.models import (
     MessageCreate,
@@ -421,266 +472,138 @@ async def send_message_stream(
     req: SentMessage, follow_up_manager: FollowUpManager = Depends(get_follow_up_manager)
 ):
     logger.info(f"[send_message_stream] Called for session_id={getattr(req, 'session_id', None)}")
-    try:
-        session_id = req.session_id
-        if not session_id:
-            logger.error("[send_message_stream] Invalid session_id provided.")
-            raise HTTPException(status_code=422, detail="Invalid session_id provided")
 
-        # Lazy init ChatRouter
-        global chat_router
-        if "chat_router" not in globals():
-            chat_router = None
-        if chat_router is None:
-            logger.info("[send_message_stream] Initializing ChatRouter.")
-            chat_router = ChatRouter(follow_up_manager)
+    # Extract required variables from req or context
+    session_id = getattr(req, "session_id", None)
+    conversation_history = getattr(req, "conversation_history", [])
+    # Prefer an explicit query if provided by the client. This ensures the follow-up
+    # flow has a usable latest_query for Redis context retrieval even when
+    # conversation_history or prompt_context are empty.
+    prompt_context = getattr(req, "query", None) or getattr(req, "prompt_context", None)
 
-        session_data = follow_up_manager.get_session_data(session_id)
-        logger.debug(f"[send_message_stream] session_data: {session_data}")
-        is_new = not session_data or not session_data.get("prompt_context")
+    # --- Unified streaming logic: yield processing event once, then stream follow-up or final response ---
 
-        # --- First-time session setup ---
-        form_triggered = False
-        if is_new:
-            logger.info(f"[send_message_stream] First-time session setup for session_id={session_id}")
-            prompt_context = None
-            prompt_id_str = None
-            if req.prompt_id:
-                try:
-                    _ = UUID(str(req.prompt_id))
-                    session_uuid = session_id if isinstance(session_id, UUID) else UUID(str(session_id))
-                    prompt_db = await initialize_session_with_prompt(
-                        UUID(str(session_id)), UUID(str(req.prompt_id))
-                    )
-                    prompt_context = prompt_db["prompt_text"]
-                    prompt_id_str = str(req.prompt_id)
-                    logger.info(f"[send_message_stream] Initialized session with prompt_id={prompt_id_str}")
-                except (ValueError, HTTPException):
-                    logger.warning(f"[send_message_stream] Invalid prompt_id or error initializing session with prompt.")
-                    prompt_context = (req.query or "").strip()
-            else:
-                prompt_context = (req.query or "").strip() or "General assistance"
-                logger.info(f"[send_message_stream] Using default prompt_context: {prompt_context}")
+    async def stream_response():
+        yield "data: " + json.dumps({"status": "processing", "message": "Preparing response..."}) + "\n\n"
+        if session_id is None or not isinstance(session_id, str):
+            logger.error("[send_message_stream] session_id is missing or not a string.")
+            raise HTTPException(status_code=400, detail="session_id is required and must be a string")
 
-            follow_up_manager.initialize_session(
+        # Save user message if present
+        if req.query:
+            user_msg = MessageCreate(
                 session_id=session_id,
-                prompt_id=prompt_id_str,
-                prompt_context=prompt_context,
+                content=req.query,
+                role="user",
+                reply_to=None,
+                follow_up_to=None,
+                follow_up_depth=0,
+                metadata={}
             )
-            if prompt_id_str:
-                try:
-                    fn = getattr(follow_up_manager.chatbot, "reset_follow_up_count", None)
-                    if callable(fn):
-                        fn(session_id)
-                        logger.info(f"[send_message_stream] Reset follow up count for session_id={session_id}")
-                except Exception:
-                    logger.debug("[send_message_stream] chatbot.reset_follow_up_count not available or failed; continuing")
-            session_data = follow_up_manager.get_session_data(session_id)
-        else:
-            if req.prompt_id and str(req.prompt_id) != str(session_data.get("prompt_id")):
-                logger.warning(
-                    f"[send_message_stream] Ignoring new prompt_id {req.prompt_id} for existing session {session_id}; "
-                    f"continuing with original {session_data.get('prompt_id')}"
-                )
+            try:
+                await save_message(user_msg)
+            except Exception as e:
+                logger.warning(f"Failed to save user message: {e}")
 
-        # Always add the latest user message to conversation history before generating response
-        user_message = req.query.strip() if req.query else ""
-        if user_message:
-            follow_up_manager.add_to_conversation_history(session_id, "user", user_message)
-            logger.info(f"[send_message_stream] Added user message to conversation history: {user_message}")
-        conversation_history = follow_up_manager.get_conversation_history(session_id)
-        logger.debug(f"[send_message_stream] conversation_history: {conversation_history}")
-        prompt_context = session_data.get("prompt_context")
-        logger.info(f"[send_message_stream] user_message: {user_message}")
-
-        # --- Decide if more follow-ups are needed ---
         if not follow_up_manager.check_requirements(session_id):
             logger.info(f"[send_message_stream] Requirements not met, streaming follow up.")
-            async def stream_follow_up():
-                yield "data: " + json.dumps(
-                    {"status": "processing", "message": "Preparing response..."}
-                ) + "\n\n"
-
-                # Accumulate all assistant response chunks
-                assistant_response = ""
-                events = []
-                form_triggered = False
-                async for evt in build_chatbot_response(
-                    session_id=session_id,
-                    follow_up_manager=follow_up_manager,
-                    conversation_history=conversation_history,
-                    prompt_context=prompt_context,
-                    mode="follow_up",
-                ):
-                    if isinstance(evt, dict):
-                        status = evt.get("status", "unknown")
-                        chunk = evt.get("chunk", "")
-                    else:
-                        status = "unknown"
-                        chunk = str(evt)
-                    logger.debug(f"[send_message_stream][stream_follow_up] status={status}, chunk={chunk}")
-                    
-                    # Keep empty chunks for terminal events like form_trigger and end_chat
-                    if chunk is None or (str(chunk).strip() == "" and status not in ("form_trigger", "end_chat")):
-                        logger.debug(f"[send_message_stream][stream_follow_up] Skipping empty/None chunk for status={status}")
-                    if status == "form_trigger":
-                        form_triggered = True
-                    if status == "chunk" and chunk:
-                        assistant_response += chunk
-                    events.append((status, chunk))
-                # If any event is form_trigger, only yield that and save ONLY the user message
-                for status, chunk in events:
-                    if status == "form_trigger":
-                        try:
-                            sd = follow_up_manager.get_session_data(session_id)
-                            if not sd.get("form_shown", False):
-                                sd = mark_form_shown(sd)
-                                try:
-                                    follow_up_manager.set_session_data(session_id, sd)
-                                except Exception:
-                                    follow_up_manager.sessions[session_id] = sd
-                        except Exception as e:
-                            logger.error(f"[send_message_stream][stream_follow_up] Error marking form_shown: {e}")
-                        # Always save the user message before returning for form_trigger
-                        if req.query:
-                            logger.info(f"[send_message_stream][stream_follow_up] Saving user message (form_trigger).")
-                            await save_message(
-                                MessageCreate(
-                                    content=req.query.strip(),
-                                    role="user",
-                                    session_id=session_id,
-                                    reply_to=None,
-                                    follow_up_to=None,
-                                )
-                            )
-                        yield "data: " + json.dumps({"status": status, "chunk": ""}) + "\n\n"
-                        logger.info(f"[send_message_stream][stream_follow_up] Form triggered, ending stream.")
-                        return
-                # Otherwise, yield normal chunks
-                for status, chunk in events:
-                    yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
-                # After streaming, save both user and assistant message ONLY if form was NOT triggered
-                if not form_triggered:
-                    if req.query:
-                        logger.info(f"[send_message_stream][stream_follow_up] Saving user message.")
-                        await save_message(
-                            MessageCreate(
-                                content=req.query.strip(),
-                                role="user",
-                                session_id=session_id,
-                                reply_to=None,
-                                follow_up_to=None,
-                            )
-                        )
-                    if assistant_response.strip():
-                        logger.info(f"[send_message_stream][stream_follow_up] Saving assistant response.")
-                        await save_message(
-                            MessageCreate(
-                                content=assistant_response.strip(),
-                                role="assistant",
-                                session_id=str(session_id),
-                                reply_to=None,
-                                follow_up_to=None,
-                            )
-                        )
-
-            return StreamingResponse(stream_follow_up(), media_type="text/event-stream", headers=SSE_HEADERS)
-
-        # --- Requirements captured: full response streaming ---
-        logger.info(f"[send_message_stream] Requirements met, streaming full response.")
-        async def generate_full_response_stream():
-            # Inform client generation is starting
-            yield "data: " + json.dumps(
-                {"status": "processing", "message": "Generating comprehensive response..."}
-            ) + "\n\n"
-
-            final_response = None
-            # Collect all events first
-            events = []
+            session_ended = False
+            form_triggered = False
+            # Buffer events to check for form_trigger
+            buffered_events = []
             async for evt in build_chatbot_response(
                 session_id=session_id,
                 follow_up_manager=follow_up_manager,
                 conversation_history=conversation_history,
                 prompt_context=prompt_context,
-                mode="complete",
+                mode="follow_up",
             ):
+                buffered_events.append(evt)
+            # Iterate and yield, skipping last assistant chunk if next is form_trigger
+            for i, evt in enumerate(buffered_events):
+                assistant_content = None
                 if isinstance(evt, dict):
                     status = evt.get("status", "unknown")
                     chunk = evt.get("chunk", "")
+                    assistant_content = chunk
+                    if status == "end_chat":
+                        session_ended = True
+                    if status == "form_trigger":
+                        form_triggered = True
                 else:
                     status = "unknown"
                     chunk = str(evt)
-                logger.debug(f"[send_message_stream][generate_full_response_stream] status={status}, chunk={chunk}")
-                # Keep empty chunks for terminal events like form_trigger and end_chat
-                if chunk is None or (str(chunk).strip() == "" and status not in ("form_trigger", "end_chat")):
-                    logger.debug(f"[send_message_stream][generate_full_response_stream] Skipping empty/None chunk for status={status}")
-                    continue
-                events.append((status, chunk))
-            # If any event is form_trigger, only yield that and save ONLY the user message
-            for status, chunk in events:
-                if status == "form_trigger":
-                    try:
-                        sd = follow_up_manager.get_session_data(session_id)
-                        if not sd.get("form_shown", False):
-                            sd = mark_form_shown(sd)
-                            try:
-                                follow_up_manager.set_session_data(session_id, sd)
-                            except Exception:
-                                follow_up_manager.sessions[session_id] = sd
-                    except Exception as e:
-                        logger.error(f"[send_message_stream][generate_full_response_stream] Error marking form_shown: {e}")
-                    # Always save the user message before returning for form_trigger
-                    if req.query:
-                        logger.info(f"[send_message_stream][generate_full_response_stream] Saving user message (form_trigger).")
-                        await save_message(
-                            MessageCreate(
-                                content=req.query.strip(),
-                                role="user",
-                                session_id=session_id,
-                                reply_to=None,
-                                follow_up_to=None,
-                            )
-                        )
-                    yield "data: " + json.dumps({"status": status, "chunk": ""}) + "\n\n"
-                    logger.info(f"[send_message_stream][generate_full_response_stream] Form triggered, ending stream.")
-                    return
-            # Otherwise, yield all normal chunks, but if end_chat is present, yield it last and end the stream
-            final_response = None
-            end_chat_found = False
-            end_chat_chunk = None
-            for status, chunk in events:
-                if status == "end_chat":
-                    end_chat_found = True
-                    end_chat_chunk = chunk
-                    continue  # Don't yield now, yield after all other chunks
-                logger.debug(f"[send_message_stream][generate_full_response_stream] Sending to client: status={status}, chunk_preview={str(chunk)[:200]}")
-                yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
-            if end_chat_found:
-                logger.debug(f"[send_message_stream][generate_full_response_stream] Sending end_chat to client: chunk_preview={str(end_chat_chunk)[:200]}")
-                yield "data: " + json.dumps({"status": "end_chat", "chunk": end_chat_chunk}) + "\n\n"
-                logger.info(f"[send_message_stream][generate_full_response_stream] end_chat triggered, ending stream.")
-                return
-            
-            # After streaming, save the assistant message ONLY if form was NOT triggered
-            if not any(status == "form_trigger" for status, _ in events):
-                if final_response:
-                    logger.info(f"[send_message_stream][generate_full_response_stream] Saving assistant response.")
-                    await save_message(
-                        MessageCreate(
-                            content=final_response.strip(),
-                            role="assistant",
-                            session_id=str(session_id),
-                            reply_to=None,
-                            follow_up_to=None,
-                        )
+                    assistant_content = chunk
+                # If next event is form_trigger, skip saving and yielding this assistant chunk
+                if status == "chunk" and i + 1 < len(buffered_events):
+                    next_evt = buffered_events[i + 1]
+                    next_status = next_evt.get("status", "unknown") if isinstance(next_evt, dict) else "unknown"
+                    if next_status == "form_trigger":
+                        continue
+                if assistant_content and status in ["chunk", "form_trigger"]:
+                    assistant_msg = MessageCreate(
+                        session_id=session_id,
+                        content=assistant_content,
+                        role="assistant",
+                        reply_to=None,
+                        follow_up_to=None,
+                        follow_up_depth=0,
+                        metadata={}
                     )
+                    try:
+                        await save_message(assistant_msg)
+                    except Exception as e:
+                        logger.warning(f"Failed to save assistant message: {e}")
+                yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
+            # If session ended, update is_active flag in DB
+            if session_ended:
+                try:
+                    conn = get_db_conn()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        UPDATE sessions SET is_active = FALSE WHERE session_id = %s
+                        """,
+                        (str(session_id),)
+                    )
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    logger.info(f"[send_message_stream] Updated is_active to FALSE for ended session_id={session_id}")
+                except Exception as e:
+                    logger.error(f"[send_message_stream] Failed to update is_active for ended session_id={session_id}: {e}")
+        else:
+            logger.info(f"[send_message_stream] Requirements met, streaming full response.")
+            from app.core.services.chatbot_optimizer import OptimizedChatbot
+            chatbot = OptimizedChatbot()
+            query = req.query or ""
+            chat_history = []
+            for msg in conversation_history:
+                if isinstance(msg, dict):
+                    chat_history.append((msg.get('role', ''), msg.get('content', '')))
+                elif isinstance(msg, (list, tuple)) and len(msg) == 2:
+                    chat_history.append(tuple(msg))
+            async for event in chatbot.get_detailed_response(query=query, chat_history=chat_history, session_id=session_id, stream=True):
+                assistant_content = event.get("chunk") if isinstance(event, dict) else str(event)
+                if assistant_content:
+                    assistant_msg = MessageCreate(
+                        session_id=session_id,
+                        content=assistant_content,
+                        role="assistant",
+                        reply_to=None,
+                        follow_up_to=None,
+                        follow_up_depth=0,
+                        metadata={}
+                    )
+                    try:
+                        await save_message(assistant_msg)
+                    except Exception as e:
+                        logger.warning(f"Failed to save assistant message: {e}")
+                yield "data: " + json.dumps(event) + "\n\n"
 
-        return StreamingResponse(generate_full_response_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
-    except Exception as e:
-        logger.error(f"[send_message_stream] Unexpected error: {str(e)}")
-        raise
+    return StreamingResponse(stream_response(), media_type="text/event-stream", headers=SSE_HEADERS)
 
-# Internal async function to fetch root prompts
+
 async def fetch_root_prompts():
     conn = None
     cursor = None
