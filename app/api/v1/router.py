@@ -1,24 +1,21 @@
-import logging
+from app.logger import get_logger
 from fastapi import APIRouter, HTTPException, Depends
 from uuid import UUID
-from typing import List
 from .models import (
     UserCreate,
     UserRegisterResponse,
     SentMessage,
-    HistoryResponse,
-    Prompt,
-    PromptType,
+    HistoryResponse
 )
 from .helpers import (
-    get_messages_for_session,
+    get_messages_for_session
 )
 from . import helpers
 from app.db.base import get_db_conn
 from app.api.deps import get_follow_up_manager
-
-# Get logger
-logger = logging.getLogger(__name__)
+from app.core.nested_follow_up_manager import FollowUpManager
+# Get centralized logger
+logger = get_logger(__name__)
 
 # Create router
 router = APIRouter(prefix="/api/v1", tags=["v1"])
@@ -30,7 +27,6 @@ SSE_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "*",
 }
-
 
 # User Management Routes
 @router.post("/user/register", response_model=UserRegisterResponse)
@@ -87,6 +83,8 @@ async def register_user(user: UserCreate):
             conn.close()
 
 
+
+
 # Message History Route
 
 @router.get("/chat/{session_id}/messages", response_model=HistoryResponse)
@@ -95,28 +93,42 @@ async def get_chat_messages(session_id: str):
     try:
         session_uuid = UUID(session_id)
         messages = await get_messages_for_session(session_uuid)
-        if not messages:
-            raise HTTPException(
-                status_code=404, detail="No messages found for this session"
-            )
 
+        # Get root prompts (greeting/options/hint)
+        root_prompts = None
         formatted_messages = []
-        for message in messages:
-            ts = message.created_at
-            if hasattr(ts, "isoformat"):
-                timestamp = ts.isoformat()
-            else:
-                timestamp = str(ts) if ts else None
-            formatted_messages.append(
-                {
-                    "role": message.role,
-                    "message": message.content,
-                    "timestamp": timestamp,
-                }
-            )
-        return HistoryResponse(session_id=session_id, messages=formatted_messages)
-    except HTTPException as e:
-        raise e
+        try:
+            root_prompts = await helpers.fetch_root_prompts()
+            logger.info(f"Fetched root prompts: {root_prompts}")
+        except Exception as e:
+            logger.error(f"Error fetching root prompts for chat messages: {str(e)}")
+            root_prompts = None
+
+        if messages:
+            for message in messages:
+                ts = message.created_at
+                if hasattr(ts, "isoformat"):
+                    timestamp = ts.isoformat()
+                else:
+                    timestamp = str(ts) if ts else None
+                # Return raw markdown/plain text as stored in DB
+                formatted_messages.append(
+                    {
+                        "id": message.id,
+                        "role": message.role,
+                        "message": message.content,
+                        "timestamp": timestamp,
+                        "reply_to": message.reply_to,
+                        "follow_up_to": message.follow_up_to,
+                        "metadata": message.metadata,
+                    }
+                )
+
+        return {
+            "root_prompts": root_prompts,
+            "session_id": session_id,
+            "messages": formatted_messages
+        }
     except Exception as e:
         logger.error(f"Error retrieving chat messages: {str(e)}")
         raise HTTPException(status_code=500, detail="Error retrieving chat messages")
@@ -130,67 +142,36 @@ async def health_check():
 
 
 # Prompt Routes
-@router.get("/prompts/root", response_model=List[Prompt])
+@router.get("/prompts/root")
 async def get_root_prompts():
     """Fetch top-level prompts."""
-    conn = None
-    cursor = None
-    try:
-        conn = get_db_conn()
-        cursor = conn.cursor()
-
-        # Fetch prompts with all required fields
-        cursor.execute(
-            """
-            SELECT 
-                id::text,
-                prompt_text,
-                response_text,
-                display_order,
-                created_at,
-                updated_at
-            FROM prompts
-            WHERE parent_id IS NULL
-            ORDER BY display_order ASC
-        """
-        )
-        rows = cursor.fetchall()
-
-        if not rows:
-            return []
-
-        # Convert to Prompt models with all required fields
-        prompts = [
-            Prompt(
-                id=row[0],
-                prompt_text=row[1],
-                response_text=row[2] if row[2] is not None else "",
-                display_order=row[3],
-                type=PromptType.ROOT,
-                created_at=row[4],
-                updated_at=row[5],
-            )
-            for row in rows
-        ]
-
-        return prompts
-
-    except Exception as e:
-        logger.error(f"Error fetching root prompts: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching prompts: {str(e)}")
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+    return await helpers.fetch_root_prompts()
 
 
 @router.post("/chat/send-stream")
 async def post_send_message_stream(
-    req: SentMessage, follow_up_manager=Depends(get_follow_up_manager)
+    req: SentMessage, follow_up_manager: FollowUpManager = Depends(get_follow_up_manager)
 ):
-    """Delegate to helper implementation for streaming chat."""
+    """Streaming chat endpoint with hybrid form-trigger behavior."""
     return await helpers.send_message_stream(req, follow_up_manager)
+
+
+# Update user details (PATCH) - now keyed by session_id per register flow
+@router.patch("/user/{session_id}")
+async def update_user(session_id: str, user: UserCreate):
+    """Update user's browser and IP information by session_id using helper."""
+    try:
+        # Pass the full Pydantic model to the helper for partial updates
+        await helpers.update_user_by_session(session_id, user)
+        # Delete the last user message from the DB for this session
+        deleted_id = helpers.delete_last_user_message(session_id)
+        logger.info(f"Deleted last user message id: {deleted_id} for session_id: {session_id}")
+        return {"status": "success", "message": "User updated successfully", "session_id": session_id, "deleted_message_id": deleted_id}
+    except HTTPException as http_ex:
+        raise http_ex
+    except Exception as e:
+        logger.error(f"Error in update_user route: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error updating user")
 
 
 

@@ -1,12 +1,10 @@
 from datetime import datetime
 from enum import Enum
-from app.db.base import get_db_conn
 from typing import List, Optional, Dict, Any
 from pydantic import (
     Field,
     BaseModel,
     ConfigDict,
-    model_validator,
 )
 class PromptType(str, Enum):
     ROOT = "root"
@@ -35,8 +33,10 @@ class UserCreate(BaseModel):
     username: Optional[str] = None
     email: Optional[str] = None
     mobile: Optional[str] = None
-    browser: str
-    ip: str
+    browser: Optional[str] = None
+    ip: Optional[str] = None
+    user_details_known: bool = Field(default=False)
+    
 
 class MessageBase(BaseModel):
     content: str = Field(..., description="Message content")
@@ -82,41 +82,11 @@ class SentMessage(BaseModel):
         default=False, description="Whether to generate detailed responses"
     )
 
-    @model_validator(mode="after")
-    def validate_prompt_or_query_for_new_session(self) -> "SentMessage":
-        """Allow starting a session with either a prompt_id or an initial query.
-        Only raise if neither is provided for a brand-new DB session."""
-        
-
-        conn = get_db_conn()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                "SELECT id FROM sessions WHERE session_id = %s", (self.session_id,)
-            )
-            session_exists = cursor.fetchone() is not None
-            if not session_exists and not (
-                self.prompt_id or (self.query and self.query.strip())
-            ):
-                raise ValueError("prompt_id or initial query required to start session")
-            return self
-        finally:
-            cursor.close()
-
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "query": "How can I help you?",
-                "session_id": "550e8400-e29b-41d4-a716-446655440000",
-                "prompt_id": "some-prompt-id",  # Added this to example
-                "stream": True,
-                "detailed": False,
-            }
-        }
-    )
-
 class HistoryResponse(BaseModel):
     session_id: str = Field(..., description="UUID of the chat session")
+    root_prompts: Dict[str, Any] = Field(
+        ..., description="Dictionary of root prompts in the conversation"
+    )
     messages: List[Dict[str, Any]] = Field(
         ..., description="List of messages in the conversation"
     )

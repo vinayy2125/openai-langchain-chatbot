@@ -8,13 +8,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 
 import yaml
-from redis.commands.search.field import TextField, VectorField, TagField
+from app.logger import get_logger
 from redis.commands.search.index_definition import IndexDefinition, IndexType
+from redis.commands.search.field import TagField, TextField, VectorField
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 
 from app.config import get_redis
 from core_services.embedding_utils import get_embedding
 
+# Configure logging
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -40,13 +42,10 @@ def create_index_from_yaml(yaml_path: str):
         logger.error("❌ No 'fields' found in YAML.")
         return
 
-    # get_redis in config returns a connected redis client instance
-    r = get_redis
-
     # Check if required Redis modules are loaded
     try:
         # Use separate args; some redis-py versions expect the command and args separately
-        modules = r.execute_command('MODULE', 'LIST')
+        modules = get_redis.execute_command('MODULE', 'LIST')
         # modules is typically a list of module-info arrays; make a safe string representation
         modules_normalized = []
         for mod in modules:
@@ -88,7 +87,7 @@ def create_index_from_yaml(yaml_path: str):
     # Check if index exists
     index_exists = False
     try:
-        r.ft(index_name).info()
+        get_redis.ft(index_name).info()
         logger.info(f"🔍 Index '{index_name}' already exists")
         index_exists = True
     except ResponseError as e:
@@ -148,7 +147,7 @@ def create_index_from_yaml(yaml_path: str):
 
     try:
         definition = IndexDefinition(prefix=[prefix], index_type=IndexType.JSON)
-        r.ft(index_name).create_index(redis_schema, definition=definition)
+        get_redis.ft(index_name).create_index(redis_schema, definition=definition)
         logger.info(f"✅ Created RediSearch index '{index_name}' on prefix '{prefix}'")
         return True
     except Exception as e:
@@ -203,10 +202,8 @@ def embed_chunk_with_id(index: int, chunk_text: str, session_id: str) -> Dict[st
 def store_chunk_document(chunk_id: str, data: Dict[str, Any]) -> bool:
     """Store a single chunk as a Redis JSON document."""
     try:
-        r = get_redis
-        # Verify RedisJSON functionality
         key = f"chunk:{chunk_id}"
-        r.json().set(key, "$", data)
+        get_redis.json().set(key, "$", data)
         return True
     except ResponseError as e:
         if "unknown command" in str(e).lower():
