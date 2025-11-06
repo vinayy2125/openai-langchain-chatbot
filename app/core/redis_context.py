@@ -28,6 +28,25 @@ def get_redis_context_chunks(
     key_terms = key_terms or default_key_terms
 
     q = (query or "").strip()
+    # If the explicit query is empty, try to derive a reasonable search term
+    # from recent user messages in the conversation_history. If that also
+    # yields nothing, fall back to the provided fallback_keywords so the
+    # similarity search is never executed with an empty query.
+    if not q and conversation_history:
+        try:
+            for item in reversed(conversation_history):
+                if isinstance(item, dict) and item.get("role") == "user":
+                    content = (item.get("content") or "").strip()
+                    if content:
+                        q = content[:300]
+                        break
+        except Exception:
+            q = q
+
+    if not q:
+        logger.info("[RedisContext] Empty query; using fallback keywords for search.")
+        q = fallback_keywords or "capabilities"
+
     search_terms = q.lower()
 
     # Heuristics to infer intent: prefer business/interest intent over technical

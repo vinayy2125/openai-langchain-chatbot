@@ -90,3 +90,4 @@ class HistoryResponse(BaseModel):
     messages: List[Dict[str, Any]] = Field(
         ..., description="List of messages in the conversation"
     )
+    is_active: bool = Field(..., description="Whether the session is currently active")
