@@ -8,7 +8,6 @@ logger = get_logger(__name__)
 
 
 load_dotenv()
-logger.info(f"OPENAI_API_KEY being used: {os.getenv('OPENAI_API_KEY')}")
 
 # Define LLM instance here so it always exists
 # ChatOpenAI will read the API key from the environment (OPENAI_API_KEY) loaded via load_dotenv()
