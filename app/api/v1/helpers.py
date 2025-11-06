@@ -1,55 +1,3 @@
-def delete_message_by_id(message_id: str):
-    """Delete a message by its id from the database."""
-    conn = get_db_conn()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            DELETE FROM messages WHERE id = %s
-            """,
-            (str(message_id),)
-        )
-        conn.commit()
-        logger.info(f"[delete_message_by_id] Deleted message id: {message_id}")
-        return True
-    except Exception as e:
-        logger.error(f"[delete_message_by_id] Error deleting message id={message_id}: {e}")
-        if conn:
-            conn.rollback()
-        return False
-    finally:
-        cursor.close()
-        conn.close()
-def delete_last_assistant_message(session_id: str):
-    """Delete the last assistant message for a session from the database."""
-    conn = get_db_conn()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            DELETE FROM messages
-            WHERE id = (
-                SELECT id FROM messages
-                WHERE session_id = %s AND role = 'assistant'
-                ORDER BY created_at DESC
-                LIMIT 1
-            )
-            RETURNING id
-            """,
-            (str(session_id),)
-        )
-        deleted = cursor.fetchone()
-        conn.commit()
-        logger.info(f"[delete_last_assistant_message] Deleted assistant message id: {deleted[0] if deleted else None} for session_id={session_id}")
-        return deleted[0] if deleted else None
-    except Exception as e:
-        logger.error(f"[delete_last_assistant_message] Error deleting last assistant message for session_id={session_id}: {e}")
-        if conn:
-            conn.rollback()
-        return None
-    finally:
-        cursor.close()
-        conn.close()
 import re
 import os
 import json
@@ -540,7 +488,8 @@ async def send_message_stream(
                     next_status = next_evt.get("status", "unknown") if isinstance(next_evt, dict) else "unknown"
                     if next_status == "form_trigger":
                         continue
-                if assistant_content and status in ["chunk", "form_trigger"]:
+                # Persist assistant messages for regular chunks, form triggers, and end_chat
+                if assistant_content and status in ["chunk", "form_trigger", "end_chat"]:
                     assistant_msg = MessageCreate(
                         session_id=session_id,
                         content=assistant_content,
@@ -730,7 +679,12 @@ def delete_last_user_message(session_id: str):
         conn.close()
         
 async def end_session_helper(session_id: str):
-    """End a session and trigger closure email in the background if conditions are met."""
+    """
+    End a session and trigger closure email in the background ONLY IF:
+    - user_details_known flag is True
+    - user session has been ended (is_active is False)
+    If both conditions are true, then and only then send the email.
+    """
     import threading
     conn = None
     cursor = None
@@ -769,14 +723,16 @@ async def end_session_helper(session_id: str):
         if not user_row:
             raise HTTPException(status_code=404, detail="User not found")
         user_details_known = user_row[0]
-        # 4. If is_active is False and user_details_known is True, trigger closure email in background
-        def trigger_email():
-            try:
-                send_closure_email(session_id)
-            except Exception as e:
-                logger.error(f"Error sending closure email: {e}")
+        # 4. Trigger closure email ONLY if BOTH conditions are met
         if (is_active is False) and (user_details_known is True):
+            def trigger_email():
+                try:
+                    send_closure_email(session_id)
+                except Exception as e:
+                    logger.error(f"Error sending closure email: {e}")
             threading.Thread(target=trigger_email, daemon=True).start()
+        else:
+            logger.info(f"[end_session_helper] Email NOT triggered: is_active={is_active}, user_details_known={user_details_known}")
         # Return minimal response
         return {
             "status": "success",
@@ -796,3 +752,5 @@ async def end_session_helper(session_id: str):
             cursor.close()
         if conn:
             conn.close()
+            
+        
