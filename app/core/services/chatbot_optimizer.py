@@ -177,7 +177,7 @@ class OptimizedChatbot:
             formatted = format_response(cleaned, query, None)
             if formatted:
                 yield {"status": "chunk", "chunk": formatted}
-                if count >= 10:
+                if count >= 50:
                     logger.info(f"[Chatbot] [DEBUG] Yielding end_chat chunk: user_message_count={count}")
                     print(f"[DEBUG] Yielding end_chat chunk: user_message_count={count}")
                     yield {"status": "end_chat", "chunk": "Our sales team will reach out within 1 business day, Thank you for your interest in Ditstek innovations."}
