@@ -9,11 +9,21 @@ def format_response(
 ) -> str:
     # Simple formatter: preserve the full AI response and paragraph breaks, do not modify content.
     resp_text = response.strip()
-    # Normalize multiple blank lines to a single blank line between paragraphs
-    paragraphs = [p.strip() for p in re.split(r"\n{2,}", resp_text) if p.strip()]
-    if not paragraphs:
-        return resp_text
-    paragraph_block = "\n\n".join(paragraphs)
+    # Improved normalization: avoid splitting markdown lists and headers
+    # Only split paragraphs that are not part of a markdown list or header
+    lines = resp_text.splitlines()
+    new_paragraphs = []
+    buffer = []
+    for line in lines:
+        if line.strip() == "":
+            if buffer:
+                new_paragraphs.append("\n".join(buffer))
+                buffer = []
+        else:
+            buffer.append(line)
+    if buffer:
+        new_paragraphs.append("\n".join(buffer))
+    paragraph_block = "\n\n".join(new_paragraphs)
     # Fix common markdown token splits that occur when LLM output is chunked.
     paragraph_block = re.sub(r"\*\s+\*", "**", paragraph_block)
     paragraph_block = re.sub(r"_\s+_", "__", paragraph_block)
