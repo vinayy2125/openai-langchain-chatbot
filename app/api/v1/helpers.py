@@ -437,7 +437,7 @@ async def send_message_stream(
             logger.error("[send_message_stream] session_id is missing or not a string.")
             raise HTTPException(status_code=400, detail="session_id is required and must be a string")
 
-        # Save user message if present
+        # Save user message if present and add to conversation history
         if req.query:
             user_msg = MessageCreate(
                 session_id=session_id,
@@ -450,6 +450,8 @@ async def send_message_stream(
             )
             try:
                 await save_message(user_msg)
+                # Add user message to conversation history in follow_up_manager
+                follow_up_manager.add_to_conversation_history(session_id, "user", req.query)
             except Exception as e:
                 logger.warning(f"Failed to save user message: {e}")
 
@@ -457,8 +459,9 @@ async def send_message_stream(
             logger.info(f"[send_message_stream] Requirements not met, streaming follow up.")
             session_ended = False
             form_triggered = False
-            # Buffer events to check for form_trigger
+            # Buffer events to check for form_trigger and collect complete response
             buffered_events = []
+            complete_assistant_response = ""
             async for evt in build_chatbot_response(
                 session_id=session_id,
                 follow_up_manager=follow_up_manager,
@@ -474,6 +477,8 @@ async def send_message_stream(
                     status = evt.get("status", "unknown")
                     chunk = evt.get("chunk", "")
                     assistant_content = chunk
+                    if status == "chunk":
+                        complete_assistant_response += chunk  # Build complete response - preserve all characters including markdown
                     if status == "end_chat":
                         session_ended = True
                     if status == "form_trigger":
@@ -482,6 +487,7 @@ async def send_message_stream(
                     status = "unknown"
                     chunk = str(evt)
                     assistant_content = chunk
+                    complete_assistant_response += chunk  # Add non-dict chunks too - preserve all formatting
                 # If next event is form_trigger, skip saving and yielding this assistant chunk
                 if status == "chunk" and i + 1 < len(buffered_events):
                     next_evt = buffered_events[i + 1]
@@ -501,6 +507,8 @@ async def send_message_stream(
                     )
                     try:
                         await save_message(assistant_msg)
+                        # Only add complete responses to conversation history (not chunks)
+                        # This will be handled after the stream completes to avoid chunked entries
                     except Exception as e:
                         logger.warning(f"Failed to save assistant message: {e}")
                 yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
@@ -521,20 +529,46 @@ async def send_message_stream(
                     logger.info(f"[send_message_stream] Updated is_active to FALSE for ended session_id={session_id}")
                 except Exception as e:
                     logger.error(f"[send_message_stream] Failed to update is_active for ended session_id={session_id}: {e}")
+            
+            # Add complete assistant response to conversation history after follow-up flow
+            if complete_assistant_response:
+                try:
+                    # Debug markdown preservation in follow-up flow
+                    has_markdown = any(marker in complete_assistant_response for marker in ["**", "*", "_", "#", "-", "`", "```"])
+                    if has_markdown:
+                        logger.info(f"[FOLLOW_UP_FLOW] Response contains markdown: {complete_assistant_response[:200]}...")
+                    
+                    logger.info(f"[FOLLOW_UP_FLOW] Adding complete response to conversation history: {len(complete_assistant_response)} chars")
+                    follow_up_manager.add_to_conversation_history(session_id, "assistant", complete_assistant_response)
+                    
+                    # Log both user and assistant messages together for confirmation
+                    if req.query:  # Only log if we have a user query
+                        follow_up_manager.log_conversation_entry(session_id, req.query, complete_assistant_response)
+                except Exception as e:
+                    logger.warning(f"Failed to add complete follow-up response to conversation history: {e}")
         else:
             logger.info(f"[send_message_stream] Requirements met, streaming full response.")
             from app.core.services.chatbot_optimizer import OptimizedChatbot
             chatbot = OptimizedChatbot()
             query = req.query or ""
+            
+            # Add user message to conversation history for optimized flow as well
+            if query:
+                try:
+                    follow_up_manager.add_to_conversation_history(session_id, "user", query)
+                except Exception as e:
+                    logger.warning(f"Failed to add user message to conversation history in optimized flow: {e}")
             chat_history = []
             for msg in conversation_history:
                 if isinstance(msg, dict):
                     chat_history.append((msg.get('role', ''), msg.get('content', '')))
                 elif isinstance(msg, (list, tuple)) and len(msg) == 2:
                     chat_history.append(tuple(msg))
+            full_assistant_response = ""
             async for event in chatbot.get_detailed_response(query=query, chat_history=chat_history, session_id=session_id, stream=True):
                 assistant_content = event.get("chunk") if isinstance(event, dict) else str(event)
                 if assistant_content:
+                    full_assistant_response += assistant_content  # Preserve all characters including markdown formatting
                     assistant_msg = MessageCreate(
                         session_id=session_id,
                         content=assistant_content,
@@ -549,6 +583,23 @@ async def send_message_stream(
                     except Exception as e:
                         logger.warning(f"Failed to save assistant message: {e}")
                 yield "data: " + json.dumps(event) + "\n\n"
+            
+            # After streaming is complete, add complete response to conversation history
+            if full_assistant_response:
+                try:
+                    # Debug markdown preservation in optimized flow
+                    has_markdown = any(marker in full_assistant_response for marker in ["**", "*", "_", "#", "-", "`", "```"])
+                    if has_markdown:
+                        logger.info(f"[OPTIMIZED_FLOW] Response contains markdown: {full_assistant_response[:200]}...")
+                    
+                    logger.info(f"[OPTIMIZED_FLOW] Adding complete response to conversation history: {len(full_assistant_response)} chars")
+                    follow_up_manager.add_to_conversation_history(session_id, "assistant", full_assistant_response)
+                    
+                    # Log both user and assistant messages together for confirmation
+                    if query:  # Only log if we have a user query
+                        follow_up_manager.log_conversation_entry(session_id, query, full_assistant_response)
+                except Exception as e:
+                    logger.warning(f"Failed to add complete response to conversation history: {e}")
 
     return StreamingResponse(stream_response(), media_type="text/event-stream", headers=SSE_HEADERS)
 

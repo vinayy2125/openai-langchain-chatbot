@@ -42,7 +42,7 @@ def generate_llm_response(prompt):
             messages = [SystemMessage(content=SHARED_SYSTEM_PROMPT), HumanMessage(content=str(prompt).strip())]
 
         try:
-            model_name = getattr(llm, 'model_name', None) or getattr(llm, 'model', 'gpt-4o')
+            model_name = getattr(llm, 'model', 'gpt-4o')
             local_llm = ChatOpenAI(
                 model=model_name,
                 temperature=getattr(llm, 'temperature', 0.7),

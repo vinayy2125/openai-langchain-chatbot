@@ -12,10 +12,6 @@ from app.core.prompts import key_generate_prompt, final_response_prompt
 
 logger = get_logger("chatbot")
 
-
-
-
-
 class ContextOptimizer:
     """
     Handles context optimization to fit within model token limits
@@ -61,18 +57,8 @@ class OptimizedChatbot:
         try:
             # Step 1: Retrieve Redis context
             try:
-                # Convert incoming chat_history (list of tuples) to the dict shape
-                # expected by get_redis_context_chunks so it can augment the
-                # search query with recent user messages.
-                conversation_history_for_redis = []
-                if chat_history:
-                    try:
-                        for role, content in chat_history:
-                            conversation_history_for_redis.append({"role": role, "content": content})
-                    except Exception:
-                        # If chat_history isn't iterable of tuples, ignore and pass empty
-                        conversation_history_for_redis = []
-
+                # chat_history is now always a list of dicts with 'role' and 'content'
+                conversation_history_for_redis = chat_history or []
                 context_chunks = get_redis_context_chunks(session_id, query, conversation_history_for_redis, top_n=4)
             except Exception as e:
                 logger.warning("Redis context retrieval failed, using empty context: %s", e)
@@ -80,6 +66,10 @@ class OptimizedChatbot:
 
             context = "\n\n---\n\n".join(map(str, context_chunks or []))
             history = self._format_history(chat_history)
+            logger.info(f"[Chatbot] Enhanced Conversation Summary generated ({len(history)} chars) for {len(chat_history)} messages")
+            logger.info(f"[COMPLETE_CONVERSATION_HISTORY] Session: {session_id}")
+            logger.info(f"[COMPLETE_CONVERSATION_HISTORY] Raw chat_history being passed to LLM: {chat_history}")
+            logger.info(f"[COMPLETE_CONVERSATION_HISTORY] Formatted conversation summary for LLM:\n{history}")
             count = len(chat_history)
             logger.info(f"[Chatbot] Redis Context Retrieved: {len(context)} chars, {len(context_chunks)} chunks")
             logger.info(f"[Chatbot] Chat History: {len(chat_history)} messages")
@@ -221,7 +211,44 @@ class OptimizedChatbot:
 
 
     def _format_history(self, chat_history: list) -> str:
-        return "\n".join(
-            f"{'User' if role == 'user' else 'Assistant'}: {msg}"
-            for role, msg in chat_history
-        )
+        """
+        Format chat history for LLM with enhanced conversation flow context.
+        Includes timestamps when available and structures the conversation for better understanding.
+        """
+        if not chat_history:
+            return ""
+        
+        formatted = []
+        conversation_count = 0
+        
+        # Count actual conversation pairs for context
+        user_msgs = [msg for msg in chat_history if msg.get('role', '').lower() == 'user']
+        assistant_msgs = [msg for msg in chat_history if msg.get('role', '').lower() == 'assistant']
+        conversation_count = min(len(user_msgs), len(assistant_msgs))
+        
+        # Add conversation flow summary at the top
+        if conversation_count > 0:
+            formatted.append(f"=== CONVERSATION FLOW ({conversation_count} exchanges, {len(chat_history)} total messages) ===")
+        
+        # Format each message with enhanced context
+        for i, msg in enumerate(chat_history):
+            role = msg.get('role', '').lower()
+            content = msg.get('content', '')
+            timestamp = msg.get('timestamp', '')
+            
+            # Add timestamp if available
+            time_info = f" [{timestamp}]" if timestamp else ""
+            
+            if role == 'user':
+                formatted.append(f"User{time_info}: {content}")
+            elif role == 'assistant':
+                formatted.append(f"Assistant{time_info}: {content}")
+            else:
+                # In case of unknown role, include as-is for debugging
+                formatted.append(f"{role.capitalize()}{time_info}: {content}")
+        
+        # Add conversation context summary at the end
+        if conversation_count > 0:
+            formatted.append(f"=== END CONVERSATION FLOW ===")
+        
+        return "\n".join(formatted)
