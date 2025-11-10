@@ -25,15 +25,11 @@ async def build_chatbot_response(
             yield f"{json.dumps({'error': 'Session not found'})}\n\n"
             return
 
-        # Get the latest user query from conversation history; if the incoming
-        # request omitted conversation_history, fall back to the server-side
-        # stored session history so Redis context retrieval can use recent user
-        # messages when available.
-        latest_query = ""
-        # Resolve history centrally via FollowUpManager to keep behavior
-        # consistent across the codebase.
+        # Always resolve and use the full conversation history (user and assistant messages)
         conversation_history = follow_up_manager.resolve_history(session_id, conversation_history)
-
+        logger.info(f"[CHAT_LOGIC] Resolved conversation history before LLM call: {len(conversation_history)} messages")
+        logger.info(f"[CHAT_LOGIC] Complete conversation history for session {session_id}: {conversation_history}")
+        latest_query = ""
         for msg in reversed(conversation_history or []):
             if msg.get("role") == "user":
                 latest_query = msg.get("content", "")
@@ -69,7 +65,7 @@ async def build_chatbot_response(
         try:
             response_stream = follow_up_manager.chatbot.get_detailed_response(
                 query=latest_query,
-                chat_history=[(msg.get("role"), msg.get("content")) for msg in (conversation_history or [])],
+                chat_history=conversation_history,
                 session_id=session_id,
                 stream=True,
             )

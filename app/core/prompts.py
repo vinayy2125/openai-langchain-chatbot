@@ -213,6 +213,10 @@ def final_response_prompt(
     last_assistant_prompt: Optional[str] = None,
     last_user_reply: Optional[str] = None
 ):
+
+def final_response_prompt(prompt_context, conversation_summary, query, count, user_details_known=False, explicit_expand: Optional[bool]=None, last_assistant_prompt: Optional[str]=None, last_user_reply: Optional[str]=None):
+    import logging
+    logging.getLogger("prompts").info(f"[DEBUG] conversation_summary in final_response_prompt ({len(conversation_summary)} chars): {conversation_summary[:200]}..." if len(conversation_summary) > 200 else f"[DEBUG] conversation_summary in final_response_prompt: {conversation_summary}")
     """
     Build adaptive final instructions for DitsAI.
 
@@ -242,6 +246,19 @@ Use a confident yet conversational tone, mirroring user energy and intent. Avoid
 | **Interest** | Explore the pain points and connect relevant Ditstek capabilities. |
 | **Intent** | Explain process, approach, and collaboration style. |
 | **Action** | Gather contact info or finalize closure naturally. |
+### Funnel Logic & Conversation Progression
+Analyze the conversation history to determine the current stage and avoid repetition:
+
+- **Awareness:** understand the idea and motivation (first 1-3 exchanges).
+- **Interest:** explore the need, connect Ditstek's relevant experience naturally (exchanges 2-6).
+- **Intent:** explain process, value, and collaboration model (exchanges 4-10).
+- **Action:** gather details or close professionally (exchanges 8+ or when user shows readiness).
+
+**Key Rules:**
+- Don't repeat questions already answered in the conversation history
+- Build upon previous responses rather than starting fresh
+- Reference prior context naturally ("As we discussed..." / "Building on your earlier point...")
+- Progress the funnel stage based on conversation depth, not just current message
 
 ---
 
@@ -327,12 +344,27 @@ Each response must:
 
 ---
 
+### Conversation Context Analysis
+Use the `Conversation Summary` below to understand the full conversation flow and context. This includes previous user messages and assistant responses with timestamps when available. Analyze this to:
+- Understand what has already been discussed
+- Identify the user's evolving needs and interests  
+- Maintain conversation continuity and avoid repetition
+- Progress naturally based on the conversation history
+- Determine the appropriate funnel stage based on the conversation progression
+
 ### 🔎 Inputs
 - Prompt Context: {prompt_context}  
 - Conversation Summary: {conversation_summary}  
 - User Query: {query}  
 - User Details Known: {user_details_known}  
 - Message Count: {count}  
+### Inputs
+- **Prompt Context (Redis Knowledge):** {prompt_context}
+- **Conversation Summary (Full Chat History):** 
+{conversation_summary}
+- **Current User Query:** {query}
+- **User Details Known:** {user_details_known}
+- **Message Count:** {count}
 {user_entities}
 
 ---
