@@ -7,15 +7,12 @@ from fastapi.responses import StreamingResponse
 from uuid import UUID
 from app.logger import get_logger
 from fastapi import HTTPException, Depends
-from app.api.deps import get_follow_up_manager
-from app.core.chat_logic import build_chatbot_response
 from app.api.v1.models import (
     MessageCreate,
     Message,
     SentMessage,
 )
 from app.api.v1.models import UserCreate
-from app.core.nested_follow_up_manager import FollowUpManager
 from app.core.services.email_sender import send_closure_email
 from fastapi import HTTPException
 from datetime import datetime
@@ -225,21 +222,8 @@ async def update_user_by_session(session_id: str, user: UserCreate):
             conn.commit()
             logger.info(f"[update_user_by_session] User updated successfully for user_id={user_id}")
 
-        # Always set user_details_known = True in session state
-        try:
-            from app.api.deps import get_follow_up_manager
-            follow_up_manager = get_follow_up_manager()
-            session_data = follow_up_manager.get_session_data(str(sid))
-            if session_data is not None:
-                session_data.setdefault("state", {})["user_details_known"] = True
-                try:
-                    follow_up_manager.set_session_data(str(sid), session_data)
-                    logger.info(f"[update_user_by_session] Session state updated: user_details_known=True for session_id={session_id}")
-                except Exception as session_ex:
-                    follow_up_manager.sessions[str(sid)] = session_data
-                    logger.warning(f"[update_user_by_session] Fallback session state update for session_id={session_id}: {session_ex}")
-        except Exception as e:
-            logger.warning(f"[update_user_by_session] Could not set user_details_known in session: {e}")
+        # Session state management removed - using optimized flow only
+        logger.info(f"[update_user_by_session] User details updated successfully for session_id={session_id}")
     except Exception as e:
         if conn:
             conn.rollback()
@@ -416,9 +400,7 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
         cursor.close()
         conn.close()
 
-async def send_message_stream(
-    req: SentMessage, follow_up_manager: FollowUpManager = Depends(get_follow_up_manager)
-):
+async def send_message_stream(req: SentMessage):
     logger.info(f"[send_message_stream] Called for session_id={getattr(req, 'session_id', None)}")
 
     # Extract required variables from req or context
@@ -437,7 +419,7 @@ async def send_message_stream(
             logger.error("[send_message_stream] session_id is missing or not a string.")
             raise HTTPException(status_code=400, detail="session_id is required and must be a string")
 
-        # Save user message if present and add to conversation history
+        # Save user message if present
         if req.query:
             user_msg = MessageCreate(
                 session_id=session_id,
@@ -450,211 +432,98 @@ async def send_message_stream(
             )
             try:
                 await save_message(user_msg)
-                # Add user message to conversation history in follow_up_manager
-                follow_up_manager.add_to_conversation_history(session_id, "user", req.query)
             except Exception as e:
                 logger.warning(f"Failed to save user message: {e}")
 
-        if not follow_up_manager.check_requirements(session_id):
-            logger.info(f"[send_message_stream] Requirements not met, streaming follow up.")
-            session_ended = False
-            form_triggered = False
-            # Buffer events to check for form_trigger and collect complete response
-            buffered_events = []
-            complete_assistant_response = ""
-            async for evt in build_chatbot_response(
-                session_id=session_id,
-                follow_up_manager=follow_up_manager,
-                conversation_history=conversation_history,
-                prompt_context=prompt_context,
-                mode="follow_up",
-            ):
-                buffered_events.append(evt)
-            # Iterate and yield, skipping last assistant chunk if next is form_trigger
-            for i, evt in enumerate(buffered_events):
-                assistant_content = None
-                if isinstance(evt, dict):
-                    status = evt.get("status", "unknown")
-                    chunk = evt.get("chunk", "")
-                    assistant_content = chunk
-                    if status == "chunk":
-                        # Ensure chunk is always a string before concatenating
-                        chunk_str = str(chunk) if not isinstance(chunk, str) else chunk
-                        complete_assistant_response += chunk_str  # Build complete response - preserve all characters including markdown
-                    if status == "end_chat":
-                        session_ended = True
-                    if status == "form_trigger":
-                        form_triggered = True
-                else:
-                    status = "unknown"
-                    chunk = str(evt)
-                    assistant_content = chunk
-                    # chunk is already a string here since we used str(evt)
-                    complete_assistant_response += chunk  # Add non-dict chunks too - preserve all formatting
-                # If next event is form_trigger, skip saving and yielding this assistant chunk
-                if status == "chunk" and i + 1 < len(buffered_events):
-                    next_evt = buffered_events[i + 1]
-                    next_status = next_evt.get("status", "unknown") if isinstance(next_evt, dict) else "unknown"
-                    if next_status == "form_trigger":
-                        continue
-                # Only yield the event - don't save individual chunks to database
-                # Complete response will be saved after streaming is complete
-                # Clean chunk formatting to prevent UI line break issues
-                if status == "chunk" and isinstance(chunk, str):
+        # Always use the optimized chatbot flow
+        logger.info(f"[send_message_stream] Using optimized chatbot flow.")
+        from app.core.services.chatbot_optimizer import OptimizedChatbot
+        chatbot = OptimizedChatbot()
+        query = req.query or ""
+        
+        # Get conversation history from database
+        try:
+            from uuid import UUID
+            session_uuid = UUID(session_id)
+            messages = await get_messages_for_session(session_uuid)
+            chat_history = []
+            for msg in messages:
+                if msg.role in ["user", "assistant"]:
+                    chat_history.append((msg.role, msg.content))
+            logger.info(f"[OPTIMIZED_FLOW] Using conversation history from database: {len(chat_history)} messages")
+        except Exception as e:
+            logger.warning(f"Failed to load conversation history: {e}")
+            chat_history = []
+        
+        full_assistant_response = ""
+        session_ended = False
+        async for event in chatbot.get_detailed_response(query=query, chat_history=chat_history, session_id=session_id, stream=True):
+            # Track session ending
+            if isinstance(event, dict) and event.get("status") == "end_chat":
+                session_ended = True
+            
+            # Build complete response from chunks only (not meta events)
+            if isinstance(event, dict) and event.get("status") == "chunk":
+                chunk_content = event.get("chunk", "")
+                if chunk_content:
+                    chunk_str = str(chunk_content) if not isinstance(chunk_content, str) else chunk_content
+                    full_assistant_response += chunk_str  # Preserve all characters including markdown formatting
+            elif not isinstance(event, dict):
+                # Handle non-dict events
+                full_assistant_response += str(event)
+            
+            # Clean chunk formatting to prevent UI line break issues
+            if isinstance(event, dict) and event.get("status") == "chunk":
+                chunk = event.get("chunk", "")
+                if isinstance(chunk, str) and chunk.strip():
                     # Replace double newlines and standalone newlines with spaces to prevent awkward formatting
                     cleaned_chunk = re.sub(r'\n\n+', ' ', chunk)  # Replace double+ newlines with space
-                    cleaned_chunk = re.sub(r'(?<!\n)\n(?!\n)', ' ', cleaned_chunk) if cleaned_chunk.strip() else cleaned_chunk  # Replace single newlines
-                    yield "data: " + json.dumps({"status": status, "chunk": cleaned_chunk}) + "\n\n"
-                else:
-                    yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
-            # If session ended, update is_active flag in DB
-            if session_ended:
-                try:
-                    conn = get_db_conn()
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        """
-                        UPDATE sessions SET is_active = FALSE WHERE session_id = %s
-                        """,
-                        (str(session_id),)
-                    )
-                    conn.commit()
-                    cursor.close()
-                    conn.close()
-                    logger.info(f"[send_message_stream] Updated is_active to FALSE for ended session_id={session_id}")
-                except Exception as e:
-                    logger.error(f"[send_message_stream] Failed to update is_active for ended session_id={session_id}: {e}")
+                    cleaned_chunk = re.sub(r'(?<!\n)\n(?!\n)', ' ', cleaned_chunk)  # Replace single newlines
+                    event["chunk"] = cleaned_chunk
             
-            # Save complete assistant response after follow-up flow
-            if complete_assistant_response:
-                try:
-                    # Debug markdown preservation in follow-up flow
-                    has_markdown = any(marker in complete_assistant_response for marker in ["**", "*", "_", "#", "-", "`", "```"])
-                    if has_markdown:
-                        logger.info(f"[FOLLOW_UP_FLOW] Response contains markdown: {complete_assistant_response[:200]}...")
-                    
-                    # Save complete message to database (only once)
-                    assistant_msg = MessageCreate(
-                        session_id=session_id,
-                        content=complete_assistant_response,
-                        role="assistant",
-                        reply_to=None,
-                        follow_up_to=None,
-                        follow_up_depth=0,
-                        metadata={}
-                    )
-                    await save_message(assistant_msg)
-                    
-                    logger.info(f"[FOLLOW_UP_FLOW] Adding complete response to conversation history: {len(complete_assistant_response)} chars")
-                    follow_up_manager.add_to_conversation_history(session_id, "assistant", complete_assistant_response)
-                    
-                    # Log both user and assistant messages together for confirmation
-                    if req.query:  # Only log if we have a user query
-                        follow_up_manager.log_conversation_entry(session_id, req.query, complete_assistant_response)
-                except Exception as e:
-                    logger.warning(f"Failed to add complete follow-up response to conversation history: {e}")
-        else:
-            logger.info(f"[send_message_stream] Requirements met, streaming full response.")
-            from app.core.services.chatbot_optimizer import OptimizedChatbot
-            chatbot = OptimizedChatbot()
-            query = req.query or ""
-            
-            # Add user message to conversation history for optimized flow as well
-            if query:
-                try:
-                    follow_up_manager.add_to_conversation_history(session_id, "user", query)
-                except Exception as e:
-                    logger.warning(f"Failed to add user message to conversation history in optimized flow: {e}")
-            
-            # CRITICAL FIX: Use complete conversation history from follow_up_manager, not request parameter
-            # This ensures consistent message counting for form triggers
-            complete_conversation_history = follow_up_manager.resolve_complete_history(session_id)
-            logger.info(f"[OPTIMIZED_FLOW] Using complete conversation history: {len(complete_conversation_history)} messages")
-            logger.info(f"[FORM_TRIGGER_FIX] Forced complete history resolution for accurate message counting")
-            
-            chat_history = []
-            for msg in complete_conversation_history:
-                if isinstance(msg, dict):
-                    chat_history.append((msg.get('role', ''), msg.get('content', '')))
-                elif isinstance(msg, (list, tuple)) and len(msg) == 2:
-                    chat_history.append(tuple(msg))
-            
-            logger.info(f"[OPTIMIZED_FLOW] Formatted chat_history for LLM: {len(chat_history)} messages")
-            full_assistant_response = ""
-            session_ended = False
-            async for event in chatbot.get_detailed_response(query=query, chat_history=chat_history, session_id=session_id, stream=True):
-                # Track session ending
-                if isinstance(event, dict) and event.get("status") == "end_chat":
-                    session_ended = True
+            yield "data: " + json.dumps(event) + "\n\n"
+        
+        # After streaming is complete, save complete message and handle session ending
+        if full_assistant_response:
+            try:
+                # Debug markdown preservation in optimized flow
+                has_markdown = any(marker in full_assistant_response for marker in ["**", "*", "_", "#", "-", "`", "```"])
+                if has_markdown:
+                    logger.info(f"[OPTIMIZED_FLOW] Response contains markdown: {full_assistant_response[:200]}...")
                 
-                # Build complete response from chunks only (not meta events)
-                if isinstance(event, dict) and event.get("status") == "chunk":
-                    chunk_content = event.get("chunk", "")
-                    if chunk_content:
-                        chunk_str = str(chunk_content) if not isinstance(chunk_content, str) else chunk_content
-                        full_assistant_response += chunk_str  # Preserve all characters including markdown formatting
-                elif not isinstance(event, dict):
-                    # Handle non-dict events
-                    full_assistant_response += str(event)
-                
-                # Clean chunk formatting to prevent UI line break issues
-                if isinstance(event, dict) and event.get("status") == "chunk":
-                    chunk = event.get("chunk", "")
-                    if isinstance(chunk, str) and chunk.strip():
-                        # Replace double newlines and standalone newlines with spaces to prevent awkward formatting
-                        cleaned_chunk = re.sub(r'\n\n+', ' ', chunk)  # Replace double+ newlines with space
-                        cleaned_chunk = re.sub(r'(?<!\n)\n(?!\n)', ' ', cleaned_chunk)  # Replace single newlines
-                        event["chunk"] = cleaned_chunk
-                
-                yield "data: " + json.dumps(event) + "\n\n"
-            
-            # After streaming is complete, save complete message and handle session ending
-            if full_assistant_response:
-                try:
-                    # Debug markdown preservation in optimized flow
-                    has_markdown = any(marker in full_assistant_response for marker in ["**", "*", "_", "#", "-", "`", "```"])
-                    if has_markdown:
-                        logger.info(f"[OPTIMIZED_FLOW] Response contains markdown: {full_assistant_response[:200]}...")
-                    
-                    # Save complete message to database (only once)
-                    assistant_msg = MessageCreate(
-                        session_id=session_id,
-                        content=full_assistant_response,
-                        role="assistant",
-                        reply_to=None,
-                        follow_up_to=None,
-                        follow_up_depth=0,
-                        metadata={}
-                    )
-                    await save_message(assistant_msg)
-                    
-                    logger.info(f"[OPTIMIZED_FLOW] Adding complete response to conversation history: {len(full_assistant_response)} chars")
-                    follow_up_manager.add_to_conversation_history(session_id, "assistant", full_assistant_response)
-                    
-                    # Log both user and assistant messages together for confirmation
-                    if query:  # Only log if we have a user query
-                        follow_up_manager.log_conversation_entry(session_id, query, full_assistant_response)
+                # Save complete message to database (only once)
+                assistant_msg = MessageCreate(
+                    session_id=session_id,
+                    content=full_assistant_response,
+                    role="assistant",
+                    reply_to=None,
+                    follow_up_to=None,
+                    follow_up_depth=0,
+                    metadata={}
+                )
+                await save_message(assistant_msg)
+                logger.info(f"[OPTIMIZED_FLOW] Saved complete response: {len(full_assistant_response)} chars")
                         
-                except Exception as e:
-                    logger.warning(f"Failed to save complete response to conversation history: {e}")
-            
-            # Handle session ending for optimized flow
-            if session_ended:
-                try:
-                    conn = get_db_conn()
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        """
-                        UPDATE sessions SET is_active = FALSE WHERE session_id = %s
-                        """,
-                        (str(session_id),)
-                    )
-                    conn.commit()
-                    cursor.close()
-                    conn.close()
-                    logger.info(f"[OPTIMIZED_FLOW] Updated is_active to FALSE for ended session_id={session_id}")
-                except Exception as e:
-                    logger.error(f"[OPTIMIZED_FLOW] Failed to update is_active for ended session_id={session_id}: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to save complete response: {e}")
+        
+        # Handle session ending
+        if session_ended:
+            try:
+                conn = get_db_conn()
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE sessions SET is_active = FALSE WHERE session_id = %s
+                    """,
+                    (str(session_id),)
+                )
+                conn.commit()
+                cursor.close()
+                conn.close()
+                logger.info(f"[OPTIMIZED_FLOW] Updated is_active to FALSE for ended session_id={session_id}")
+            except Exception as e:
+                logger.error(f"[OPTIMIZED_FLOW] Failed to update is_active for ended session_id={session_id}: {e}")
 
     return StreamingResponse(stream_response(), media_type="text/event-stream", headers=SSE_HEADERS)
 
