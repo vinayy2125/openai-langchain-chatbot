@@ -57,8 +57,16 @@ class OptimizedChatbot:
         try:
             # Step 1: Retrieve Redis context
             try:
-                # chat_history is now always a list of dicts with 'role' and 'content'
-                conversation_history_for_redis = chat_history or []
+                # Convert chat_history to proper format for Redis context retrieval
+                conversation_history_for_redis = []
+                for msg in (chat_history or []):
+                    if isinstance(msg, dict):
+                        conversation_history_for_redis.append(msg)
+                    elif isinstance(msg, (list, tuple)) and len(msg) >= 2:
+                        conversation_history_for_redis.append({
+                            "role": msg[0],
+                            "content": msg[1]
+                        })
                 context_chunks = get_redis_context_chunks(session_id, query, conversation_history_for_redis, top_n=4)
             except Exception as e:
                 logger.warning("Redis context retrieval failed, using empty context: %s", e)
@@ -66,13 +74,19 @@ class OptimizedChatbot:
 
             context = "\n\n---\n\n".join(map(str, context_chunks or []))
             history = self._format_history(chat_history)
-            logger.info(f"[Chatbot] Enhanced Conversation Summary generated ({len(history)} chars) for {len(chat_history)} messages")
+            count = len(chat_history)
+            logger.info(f"[Chatbot] Enhanced Conversation Summary generated ({len(history)} chars) for {count} messages")
             logger.info(f"[COMPLETE_CONVERSATION_HISTORY] Session: {session_id}")
             logger.info(f"[COMPLETE_CONVERSATION_HISTORY] Raw chat_history being passed to LLM: {chat_history}")
             logger.info(f"[COMPLETE_CONVERSATION_HISTORY] Formatted conversation summary for LLM:\n{history}")
-            count = len(chat_history)
+            logger.info(f"[MESSAGE_COUNT_DEBUG] Final message count for form trigger logic: {count}")
             logger.info(f"[Chatbot] Redis Context Retrieved: {len(context)} chars, {len(context_chunks)} chunks")
-            logger.info(f"[Chatbot] Chat History: {len(chat_history)} messages")
+            logger.info(f"[Chatbot] Chat History: {count} messages")
+            
+            # Additional debug info for message count validation
+            user_messages = [msg for msg in conversation_history_for_redis if msg.get('role') == 'user']
+            assistant_messages = [msg for msg in conversation_history_for_redis if msg.get('role') == 'assistant'] 
+            logger.info(f"[MESSAGE_COUNT_BREAKDOWN] Total: {count}, User: {len(user_messages)}, Assistant: {len(assistant_messages)}")
 
             # 1. Yield processing chunk
             yield {"status": "processing", "message": "Preparing response..."}
@@ -147,7 +161,9 @@ class OptimizedChatbot:
                 funnel_stage = (llm_json.get("funnel_stage", "") or "").lower()
                 user_details_known = bool(llm_json.get("user_details_known", False))
                 user_network_id = llm_json.get("user_network_id") or None
+                conversation_closure = bool(llm_json.get("conversation_closure", False))
                 logger.info(f"[Chatbot] Parsed JSON: {llm_json}")
+                logger.info(f"[DYNAMIC_CLOSURE] LLM detected conversation_closure={conversation_closure} for query: '{query}'")
             except Exception as json_exc:
                 logger.warning(f"[Chatbot] Failed to parse LLM output as JSON: {json_exc}")
                 # As a best-effort, try to extract a user-facing 'response' field
@@ -159,12 +175,37 @@ class OptimizedChatbot:
                 else:
                     response_text = safe_final_text
                 user_network_id = None
+                conversation_closure = False  # Default to no closure on parsing error
 
-            logger.info(f"[Chatbot] Final output len={len(safe_final_text)}, funnel_stage='{funnel_stage}'")
+            logger.info(f"[Chatbot] Final output len={len(safe_final_text)}, funnel_stage='{funnel_stage}', closure={conversation_closure}")
+            if 'llm_json' in locals():
+                logger.info(f"[LLM_DEBUG] Raw LLM JSON response: {llm_json}")  # Debug what LLM actually returns
 
-            # Step 5: Stream formatted response
+            # Step 5: Handle dynamic conversation closure
+            if conversation_closure:
+                logger.info(f"[DYNAMIC_CLOSURE] LLM detected conversation closure intent - triggering end_chat")
+                # Format the closure response
+                closure_response = format_response(response_text or "Thank you for your interest! Have a great day!", query, None)
+                yield {"status": "chunk", "chunk": closure_response}
+                yield {"status": "end_chat", "chunk": ""}
+                return
+
+            # Step 6: Stream formatted response
             cleaned = (response_text or "").replace("FORM_TRIGGER", "").strip()
+            
+            # Debug markdown preservation
+            has_markdown_before = any(marker in cleaned for marker in ["**", "*", "_", "#", "-", "`", "```"])
+            if has_markdown_before:
+                logger.info(f"[MARKDOWN_DEBUG] Raw response contains markdown: {cleaned[:100]}...")
+            
             formatted = format_response(cleaned, query, None)
+            
+            if has_markdown_before:
+                has_markdown_after = any(marker in formatted for marker in ["**", "*", "_", "#", "-", "`", "```"])
+                logger.info(f"[MARKDOWN_DEBUG] Formatted response markdown preserved: {has_markdown_after}")
+                if not has_markdown_after:
+                    logger.warning(f"[MARKDOWN_WARNING] Markdown lost during formatting!")
+            
             if formatted:
                 yield {"status": "chunk", "chunk": formatted}
                 if count >= 50:
@@ -172,7 +213,7 @@ class OptimizedChatbot:
                     print(f"[DEBUG] Yielding end_chat chunk: user_message_count={count}")
                     yield {"status": "end_chat", "chunk": "Our sales team will reach out within 1 business day, Thank you for your interest in Ditstek innovations."}
 
-            # Step 6: Emit meta update if present
+            # Step 7: Emit meta update if present
             meta_chunk = {
                 "user_details_known": user_details_known,
                 **({"user_network_id": user_network_id} if user_network_id else {}),
@@ -180,22 +221,49 @@ class OptimizedChatbot:
             if meta_chunk:
                 yield {"status": "meta", "chunk": meta_chunk}
 
-            # Step 7: Funnel stage handling (form trigger)
+            # Step 8: Enhanced Funnel stage handling (form trigger)
             user_details_known_db = get_user_details_known_from_db(session_id)
-            trigger_form = funnel_stage == "action" and not user_details_known_db
+            
+            # Enhanced debugging for form trigger logic
+            logger.info(f"[FORM_DEBUG] session_id={session_id}, funnel_stage='{funnel_stage}', message_count={count}, user_details_known={user_details_known_db}")
+            
+            # Enhanced form trigger logic for multiple funnel stages
+            trigger_form = False
+            trigger_reason = ""
+            
+            if not user_details_known_db:
+                if funnel_stage == "action":
+                    # Always trigger for Action stage
+                    trigger_form = True
+                    trigger_reason = "action_stage"
+                elif funnel_stage == "intent" and count >= 6:
+                    # Trigger for Intent stage after sufficient conversation depth
+                    trigger_form = True
+                    trigger_reason = "intent_stage_depth"
+                    logger.info(f"[FORM_DEBUG] Intent stage trigger conditions met: funnel_stage='{funnel_stage}', count={count}")
+                elif funnel_stage == "interest" and count >= 10:
+                    # Trigger for Interest stage with deeper engagement
+                    trigger_form = True
+                    trigger_reason = "interest_stage_engagement"
+                    logger.info(f"[FORM_DEBUG] Interest stage trigger conditions met: funnel_stage='{funnel_stage}', count={count}")
+                elif count >= 14:
+                    # Fallback: Force trigger after extensive conversation
+                    trigger_form = True
+                    trigger_reason = "conversation_length_fallback"
+                    logger.info(f"[FORM_DEBUG] Fallback trigger conditions met: count={count}")
+                else:
+                    logger.info(f"[FORM_DEBUG] No trigger conditions met. funnel_stage='{funnel_stage}', count={count}")
 
             if trigger_form:
-                logger.info("[Chatbot] FORM TRIGGER ACTIVATED! (user_details_known=False)")
+                logger.info(f"[Chatbot] FORM TRIGGER ACTIVATED! Reason: {trigger_reason}, funnel_stage={funnel_stage}, message_count={count}")
                 yield {"status": "form_trigger", "chunk": ""}
             else:
-                logger.info(f"[Chatbot] No form trigger. funnel_stage={funnel_stage}, user_details_known={user_details_known_db}")
+                logger.info(f"[Chatbot] No form trigger. funnel_stage={funnel_stage}, message_count={count}, user_details_known={user_details_known_db}")
 
         except Exception as e:
             logger.exception("[Chatbot] Redis-based response generation failed")
             async for fallback in self._fallback_response_stream("I couldn't generate a response right now."):
                 yield fallback
-
-
 
 
     async def _fallback_response_stream(self, query: str):
@@ -214,6 +282,7 @@ class OptimizedChatbot:
         """
         Format chat history for LLM with enhanced conversation flow context.
         Includes timestamps when available and structures the conversation for better understanding.
+        Handles both dict and tuple formats.
         """
         if not chat_history:
             return ""
@@ -221,17 +290,29 @@ class OptimizedChatbot:
         formatted = []
         conversation_count = 0
         
+        # Normalize messages to dict format for consistent processing
+        normalized_msgs = []
+        for msg in chat_history:
+            if isinstance(msg, dict):
+                normalized_msgs.append(msg)
+            elif isinstance(msg, (list, tuple)) and len(msg) >= 2:
+                normalized_msgs.append({
+                    "role": msg[0],
+                    "content": msg[1],
+                    "timestamp": msg[2] if len(msg) > 2 else ""
+                })
+        
         # Count actual conversation pairs for context
-        user_msgs = [msg for msg in chat_history if msg.get('role', '').lower() == 'user']
-        assistant_msgs = [msg for msg in chat_history if msg.get('role', '').lower() == 'assistant']
+        user_msgs = [msg for msg in normalized_msgs if msg.get('role', '').lower() == 'user']
+        assistant_msgs = [msg for msg in normalized_msgs if msg.get('role', '').lower() == 'assistant']
         conversation_count = min(len(user_msgs), len(assistant_msgs))
         
         # Add conversation flow summary at the top
         if conversation_count > 0:
-            formatted.append(f"=== CONVERSATION FLOW ({conversation_count} exchanges, {len(chat_history)} total messages) ===")
+            formatted.append(f"=== CONVERSATION FLOW ({conversation_count} exchanges, {len(normalized_msgs)} total messages) ===")
         
         # Format each message with enhanced context
-        for i, msg in enumerate(chat_history):
+        for i, msg in enumerate(normalized_msgs):
             role = msg.get('role', '').lower()
             content = msg.get('content', '')
             timestamp = msg.get('timestamp', '')
@@ -242,7 +323,16 @@ class OptimizedChatbot:
             if role == 'user':
                 formatted.append(f"User{time_info}: {content}")
             elif role == 'assistant':
-                formatted.append(f"Assistant{time_info}: {content}")
+                # Highlight questions in assistant messages to help prevent repetition
+                if '?' in content:
+                    questions = [q.strip() + '?' for q in content.split('?') if q.strip()]
+                    if questions:
+                        content_with_questions = content + f" [QUESTIONS ASKED: {'; '.join(questions[-2:])}]"  # Last 2 questions
+                        formatted.append(f"Assistant{time_info}: {content_with_questions}")
+                    else:
+                        formatted.append(f"Assistant{time_info}: {content}")
+                else:
+                    formatted.append(f"Assistant{time_info}: {content}")
             else:
                 # In case of unknown role, include as-is for debugging
                 formatted.append(f"{role.capitalize()}{time_info}: {content}")
