@@ -26,6 +26,7 @@ async def build_chatbot_response(
             return
 
         # Always resolve and use the full conversation history (user and assistant messages)
+        # Use resolve_history for general context (allows client optimization)
         conversation_history = follow_up_manager.resolve_history(session_id, conversation_history)
         logger.info(f"[CHAT_LOGIC] Resolved conversation history before LLM call: {len(conversation_history)} messages")
         logger.info(f"[CHAT_LOGIC] Complete conversation history for session {session_id}: {conversation_history}")
