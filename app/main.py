@@ -8,7 +8,7 @@ from app.core.llm_client import llm
 from app.api.v1 import router as api_v1_router
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import redis_endpoint as redis_router
-from app.core.nested_follow_up_manager import FollowUpManager
+# from app.core.nested_follow_up_manager import FollowUpManager
 from app.logger import get_logger
 from app.logger import attach_handlers_to_uvicorn
 
@@ -40,9 +40,9 @@ def create_app() -> FastAPI:
 
     logger.info("LLM client initialized successfully")
 
-    # Attach FollowUpManager to app state
-    app.state.follow_up_manager = FollowUpManager(llm)
-    logger.info("FollowUpManager initialized successfully")
+    # Attach FollowUpManager to app state - REMOVED for optimized flow only
+    # app.state.follow_up_manager = FollowUpManager(llm)
+    # logger.info("FollowUpManager initialized successfully")
 
     # Register main API router
     app.include_router(api_v1_router)
