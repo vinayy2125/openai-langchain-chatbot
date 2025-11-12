@@ -88,8 +88,8 @@ class OptimizedChatbot:
             assistant_messages = [msg for msg in conversation_history_for_redis if msg.get('role') == 'assistant'] 
             logger.info(f"[MESSAGE_COUNT_BREAKDOWN] Total: {count}, User: {len(user_messages)}, Assistant: {len(assistant_messages)}")
 
-            # 1. Yield processing chunk
-            yield {"status": "processing", "message": "Preparing response..."}
+            # 1. Yield processing chunk (handled by outer function, do not yield here)
+            # yield {"status": "processing", "message": "Preparing response..."}
 
             # 2. Generate and yield response chunk
             user_details_known = get_user_details_known_from_db(session_id)
@@ -159,7 +159,7 @@ class OptimizedChatbot:
                 llm_json = json.loads(cleaned_json)
                 response_text = llm_json.get("response", "") or ""
                 funnel_stage = (llm_json.get("funnel_stage", "") or "").lower()
-                user_details_known = bool(llm_json.get("user_details_known", False))
+                # Ignore LLM's user_details_known, always use DB value for meta chunk
                 user_network_id = llm_json.get("user_network_id") or None
                 logger.info(f"[Chatbot] Parsed JSON: {llm_json}")
             except Exception as json_exc:
@@ -182,68 +182,67 @@ class OptimizedChatbot:
 
             # Step 6: Stream formatted response
             cleaned = (response_text or "").replace("FORM_TRIGGER", "").strip()
-            
+
             # Debug markdown preservation
             has_markdown_before = any(marker in cleaned for marker in ["**", "*", "_", "#", "-", "`", "```"])
             if has_markdown_before:
                 logger.info(f"[MARKDOWN_DEBUG] Raw response contains markdown: {cleaned[:100]}...")
-            
-            formatted = format_response(cleaned, query, None)
-            
-            if has_markdown_before:
-                has_markdown_after = any(marker in formatted for marker in ["**", "*", "_", "#", "-", "`", "```"])
-                logger.info(f"[MARKDOWN_DEBUG] Formatted response markdown preserved: {has_markdown_after}")
-                if not has_markdown_after:
-                    logger.warning(f"[MARKDOWN_WARNING] Markdown lost during formatting!")
-            
-            if formatted:
-                yield {"status": "chunk", "chunk": formatted}
-                if count >= 50:
-                    logger.info(f"[Chatbot] [DEBUG] Yielding end_chat chunk: user_message_count={count}")
-                    print(f"[DEBUG] Yielding end_chat chunk: user_message_count={count}")
-                    yield {"status": "end_chat", "chunk": "Our sales team will reach out within 1 business day, Thank you for your interest in Ditstek innovations."}
 
-            # Step 7: Emit meta update if present
-            meta_chunk = {
-                "user_details_known": user_details_known,
-                **({"user_network_id": user_network_id} if user_network_id else {}),
-            }
-            if meta_chunk:
-                yield {"status": "meta", "chunk": meta_chunk}
 
-            # Step 8: Enhanced Funnel stage handling (form trigger)
+            # Step 6: Enhanced Funnel stage handling (form trigger) BEFORE yielding assistant response
             user_details_known_db = get_user_details_known_from_db(session_id)
-            
-            # Enhanced debugging for form trigger logic
             logger.info(f"[FORM_DEBUG] session_id={session_id}, funnel_stage='{funnel_stage}', message_count={count}, user_details_known={user_details_known_db}")
-            
-            # Enhanced form trigger logic for multiple funnel stages
             trigger_form = False
             trigger_reason = ""
-            
             if not user_details_known_db:
                 if funnel_stage == "action":
-                    # Always trigger for Action stage
                     trigger_form = True
                     trigger_reason = "action_stage"
                 elif funnel_stage == "intent" and count >= 3:
-                    # Trigger for Intent stage after sufficient conversation depth
                     trigger_form = True
                     trigger_reason = "intent_stage_depth"
                     logger.info(f"[FORM_DEBUG] Intent stage trigger conditions met: funnel_stage='{funnel_stage}', count={count}")
                 elif funnel_stage == "interest" and count >= 6:
-                    # Trigger for Interest stage with deeper engagement
                     trigger_form = True
                     trigger_reason = "interest_stage_engagement"
                     logger.info(f"[FORM_DEBUG] Interest stage trigger conditions met: funnel_stage='{funnel_stage}', count={count}")
                 elif count >= 12:
-                    # Fallback: Force trigger after extensive conversation
                     trigger_form = True
                     trigger_reason = "conversation_length_fallback"
                     logger.info(f"[FORM_DEBUG] Fallback trigger conditions met: count={count}")
                 else:
                     logger.info(f"[FORM_DEBUG] No trigger conditions met. funnel_stage='{funnel_stage}', count={count}")
 
+            # Only yield the assistant response if we are NOT about to trigger a form
+            if not trigger_form:
+                # Always use format_response, which now preserves markdown newlines if detected
+                formatted = format_response(cleaned, query, None)
+                if isinstance(formatted, str):
+                    formatted = formatted.replace('\\n', '\n')
+
+                if has_markdown_before:
+                    has_markdown_after = any(marker in formatted for marker in ["**", "*", "_", "#", "-", "`", "```"])
+                    logger.info(f"[MARKDOWN_DEBUG] Formatted response markdown preserved: {has_markdown_after}")
+                    if not has_markdown_after:
+                        logger.warning(f"[MARKDOWN_WARNING] Markdown lost during formatting!")
+
+                if formatted:
+                    yield {"status": "chunk", "chunk": formatted}
+                    if count >= 50:
+                        logger.info(f"[Chatbot] [DEBUG] Yielding end_chat chunk: user_message_count={count}")
+                        print(f"[DEBUG] Yielding end_chat chunk: user_message_count={count}")
+                        yield {"status": "end_chat", "chunk": "Our sales team will reach out within 1 business day, Thank you for your interest in Ditstek innovations."}
+
+            # Step 7: Emit meta update if present
+            user_details_known_db = get_user_details_known_from_db(session_id)
+            meta_chunk = {
+                "user_details_known": user_details_known_db,
+                **({"user_network_id": user_network_id} if user_network_id else {}),
+            }
+            if meta_chunk:
+                yield {"status": "meta", "chunk": meta_chunk}
+
+            # Step 8: Form trigger event (if needed)
             if trigger_form:
                 logger.info(f"[Chatbot] FORM TRIGGER ACTIVATED! Reason: {trigger_reason}, funnel_stage={funnel_stage}, message_count={count}")
                 yield {"status": "form_trigger", "chunk": ""}
