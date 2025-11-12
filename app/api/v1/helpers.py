@@ -414,6 +414,7 @@ async def send_message_stream(req: SentMessage):
     # --- Unified streaming logic: yield processing event once, then stream follow-up or final response ---
 
     async def stream_response():
+        # Only yield 'processing' once, from here (not from LLM)
         yield "data: " + json.dumps({"status": "processing", "message": "Preparing response..."}) + "\n\n"
         if session_id is None or not isinstance(session_id, str):
             logger.error("[send_message_stream] session_id is missing or not a string.")
@@ -457,11 +458,22 @@ async def send_message_stream(req: SentMessage):
         
         full_assistant_response = ""
         session_ended = False
+        # Detect short/affirmative user responses to avoid repetition
+        short_affirmatives = {"no", "no thanks", "no thank you", "thanks", "thank you", "ok", "okay", "fine", "all set", "got it", "bye", "goodbye"}
+        user_input = (req.query or "").strip().lower()
+        is_short_affirmative = user_input in short_affirmatives
+
+        if is_short_affirmative:
+            # Yield a single closing message and stop
+            closing_message = "Thank you for confirming. If you need anything else, feel free to reach out!"
+            event = {"status": "chunk", "chunk": closing_message}
+            yield "data: " + json.dumps(event) + "\n\n"
+            return
+
         async for event in chatbot.get_detailed_response(query=query, chat_history=chat_history, session_id=session_id, stream=True):
             # Track session ending
             if isinstance(event, dict) and event.get("status") == "end_chat":
                 session_ended = True
-            
             # Build complete response from chunks only (not meta events)
             if isinstance(event, dict) and event.get("status") == "chunk":
                 chunk_content = event.get("chunk", "")
@@ -471,16 +483,7 @@ async def send_message_stream(req: SentMessage):
             elif not isinstance(event, dict):
                 # Handle non-dict events
                 full_assistant_response += str(event)
-            
-            # Clean chunk formatting to prevent UI line break issues
-            if isinstance(event, dict) and event.get("status") == "chunk":
-                chunk = event.get("chunk", "")
-                if isinstance(chunk, str) and chunk.strip():
-                    # Replace double newlines and standalone newlines with spaces to prevent awkward formatting
-                    cleaned_chunk = re.sub(r'\n\n+', ' ', chunk)  # Replace double+ newlines with space
-                    cleaned_chunk = re.sub(r'(?<!\n)\n(?!\n)', ' ', cleaned_chunk)  # Replace single newlines
-                    event["chunk"] = cleaned_chunk
-            
+            # Do NOT flatten or clean newlines; preserve markdown as-is
             yield "data: " + json.dumps(event) + "\n\n"
         
         # After streaming is complete, save complete message and handle session ending
