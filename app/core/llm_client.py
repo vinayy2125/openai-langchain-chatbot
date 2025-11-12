@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 # Configure logger
 logger = get_logger(__name__)
 
+
 load_dotenv()
 
 # Define LLM instance here so it always exists

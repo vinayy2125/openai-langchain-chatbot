@@ -12,6 +12,26 @@ class FollowUpManager:
 		self.sessions = {}  
 		self.chatbot = OptimizedChatbot(llm=llm)  
 
+	def resolve_history(self, session_id: str, incoming_history: List[Dict[str, str]] | None = None) -> List[Dict[str, str]]:
+		"""
+		Return the most appropriate conversation history to use for processing.
+		Priority:
+		1. incoming_history if provided and non-empty
+		2. server-side stored session history
+		3. empty list
+		This centralizes the fallback logic so callers can always pass a
+		`conversation_history` and expect consistent behavior.
+		"""
+		try:
+			if incoming_history:
+				return incoming_history
+			session = self.get_session_data(session_id)
+			if session:
+				return session.get("conversation_history", []) or []
+		except Exception:
+			logger.exception(f"[FollowUpManager] Failed to resolve history for session {session_id}")
+		return []
+
 	def initialize_session(self, session_id, prompt_id, prompt_context):
 		"""Initialize session with prompt context and conversation history"""
 		self.sessions[session_id] = {

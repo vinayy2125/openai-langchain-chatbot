@@ -2,6 +2,9 @@ import json
 from app.logger import get_logger
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from app.core.nested_follow_up_manager import FollowUpManager
+ # session_manager import removed
+import threading
+
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -22,29 +25,60 @@ async def build_chatbot_response(
             yield f"{json.dumps({'error': 'Session not found'})}\n\n"
             return
 
-        # Get the latest user query from conversation history
+        # Get the latest user query from conversation history; if the incoming
+        # request omitted conversation_history, fall back to the server-side
+        # stored session history so Redis context retrieval can use recent user
+        # messages when available.
         latest_query = ""
-        if conversation_history:
-            for msg in reversed(conversation_history):
-                if msg.get("role") == "user":
-                    latest_query = msg.get("content", "")
-                    break
+        # Resolve history centrally via FollowUpManager to keep behavior
+        # consistent across the codebase.
+        conversation_history = follow_up_manager.resolve_history(session_id, conversation_history)
+
+        for msg in reversed(conversation_history or []):
+            if msg.get("role") == "user":
+                latest_query = msg.get("content", "")
+                break
+
         if not latest_query and prompt_context:
-            latest_query = prompt_context.split("\n")[0][:140]
+            # Smarter prompt_context handling:
+            # - split into non-empty lines
+            # - prefer the first substantive line (length > 20 and not a simple heading like 'Goals:')
+            # - otherwise join the first up to 3 lines to form a concise query
+            try:
+                lines = [l.strip() for l in prompt_context.splitlines() if l.strip()]
+                chosen = None
+                for line in lines:
+                    # skip short headings that end with ':' or are very short
+                    if len(line) > 20 and not line.endswith(":"):
+                        chosen = line
+                        break
+                if not chosen and lines:
+                    # pick the longest line as a fallback
+                    chosen = max(lines, key=lambda s: len(s))
+
+                if chosen:
+                    latest_query = chosen[:300]
+                else:
+                    # join first few lines (up to 3) to make a composite query
+                    latest_query = " ".join(lines[:3])[:300]
+            except Exception:
+                latest_query = prompt_context.split("\n")[0][:140]
+
+        logger.info(f"[build_chatbot_response] Using latest_query='{latest_query}' prompt_context_provided={'yes' if prompt_context else 'no'} prompt_context_lines={len(prompt_context.splitlines()) if prompt_context else 0}")
 
         try:
             response_stream = follow_up_manager.chatbot.get_detailed_response(
                 query=latest_query,
-                chat_history=[(msg["role"], msg["content"]) for msg in (conversation_history or [])],
+                chat_history=[(msg.get("role"), msg.get("content")) for msg in (conversation_history or [])],
                 session_id=session_id,
                 stream=True,
             )
 
             main_response = ""
-            for chunk in response_stream:
+            end_chat_triggered = False
+            async for chunk in response_stream:
                 if not chunk:
                     continue
-                
                 # Forward all events to the caller (including form_trigger)
                 # If upstream emits session-level metadata, persist it in manager
                 if isinstance(chunk, dict) and chunk.get("status") == "meta":
@@ -77,8 +111,11 @@ async def build_chatbot_response(
                         # fallthrough and forward if something goes wrong
                         pass
 
+                if isinstance(chunk, dict) and chunk.get("status") == "end_chat":
+                    end_chat_triggered = True
+
                 yield chunk
-                
+
                 # If upstream emits structured dict events, prefer those for accumulation
                 if isinstance(chunk, dict):
                     if chunk.get("status") == "chunk":
@@ -93,6 +130,31 @@ async def build_chatbot_response(
             # Persist assistant message to session history
             if main_response:
                 follow_up_manager.add_to_conversation_history(session_id, "assistant", main_response)
+
+            # After saving assistant message, check if session should be closed and send email only on end_chat status.
+            try:
+                session = follow_up_manager.get_session_data(session_id)
+                state = session.setdefault("state", {})
+                # Only close session and trigger email if status=end_chat was yielded in the response
+                if end_chat_triggered:
+                    if state.get("is_active") is not False:
+                        # Check for closure condition: user_details_known True
+                        if state.get("user_details_known"):
+                            reason = "user_details_known"
+                            try:
+                                def _bg_send():
+                                    try:
+                                        import asyncio
+                                        from app.api.v1.helpers import end_session_helper
+                                        asyncio.run(end_session_helper(session_id))
+                                    except Exception:
+                                        logger.exception("[chat_logic] background send_closure_email failed")
+                                t = threading.Thread(target=_bg_send, daemon=True)
+                                t.start()
+                            except Exception as e:
+                                logger.exception(f"[chat_logic] Failed to end session: {e}")
+            except Exception as e:
+                logger.exception(f"[chat_logic] Post-response closure check failed: {e}")
 
         except Exception as e:
             logger.exception("[ChatLogic] Unified response generation failed: %s", e)
