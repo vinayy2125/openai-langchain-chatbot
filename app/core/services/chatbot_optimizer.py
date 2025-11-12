@@ -30,6 +30,17 @@ class ContextOptimizer:
 
 
 class OptimizedChatbot:
+    def _is_too_similar(self, last_response: str, new_response: str, threshold: float = 0.9) -> bool:
+        """
+        Returns True if the new response is too similar to the last one (using a simple ratio).
+        """
+        if not last_response or not new_response:
+            return False
+        import difflib
+        ratio = difflib.SequenceMatcher(None, last_response.strip().lower(), new_response.strip().lower()).ratio()
+        return ratio >= threshold
+    
+    
     def __init__(self, llm=None, model: str = "gpt-4o"):
         """Initialize OptimizedChatbot.
 
@@ -54,6 +65,15 @@ class OptimizedChatbot:
         Yields dict events used by the API layer: 
         {status: 'chunk'|'form_trigger'|'meta', 'chunk': ...}
         """
+        # Track last assistant response for anti-repetition
+        last_assistant_response = None
+        for msg in reversed(chat_history or []):
+            if isinstance(msg, dict) and msg.get('role') == 'assistant':
+                last_assistant_response = msg.get('content')
+                break
+            elif isinstance(msg, (list, tuple)) and len(msg) >= 2 and msg[0] == 'assistant':
+                last_assistant_response = msg[1]
+                break
         try:
             # Step 1: Retrieve Redis context
             try:
@@ -220,26 +240,34 @@ class OptimizedChatbot:
                 if isinstance(formatted, str):
                     formatted = formatted.replace('\\n', '\n')
 
+                # Anti-repetition: compare with last assistant response
+                if last_assistant_response and isinstance(last_assistant_response, str):
+                    if self._is_too_similar(last_assistant_response, formatted):
+                        logger.warning("[ANTI-REPETITION] New response is too similar to last assistant response. Consider regenerating or expanding.")
+                        # Optionally, you could modify the response here, e.g., append a clarifying question or ask for more specifics
+                        formatted += "\n\n(Can you share more details or specify what you'd like to know next?)"
+
                 if has_markdown_before:
                     has_markdown_after = any(marker in formatted for marker in ["**", "*", "_", "#", "-", "`", "```"])
                     logger.info(f"[MARKDOWN_DEBUG] Formatted response markdown preserved: {has_markdown_after}")
                     if not has_markdown_after:
                         logger.warning(f"[MARKDOWN_WARNING] Markdown lost during formatting!")
 
-                if formatted:
+                # Only yield a chunk if it is non-empty and not just whitespace
+                if formatted and formatted.strip():
                     yield {"status": "chunk", "chunk": formatted}
                     if count >= 50:
                         logger.info(f"[Chatbot] [DEBUG] Yielding end_chat chunk: user_message_count={count}")
                         print(f"[DEBUG] Yielding end_chat chunk: user_message_count={count}")
                         yield {"status": "end_chat", "chunk": "Our sales team will reach out within 1 business day, Thank you for your interest in Ditstek innovations."}
 
-            # Step 7: Emit meta update if present
+            # Step 7: Emit meta update if present, but skip if form_trigger is about to be yielded
             user_details_known_db = get_user_details_known_from_db(session_id)
             meta_chunk = {
                 "user_details_known": user_details_known_db,
                 **({"user_network_id": user_network_id} if user_network_id else {}),
             }
-            if meta_chunk:
+            if not trigger_form and meta_chunk:
                 yield {"status": "meta", "chunk": meta_chunk}
 
             # Step 8: Form trigger event (if needed)
