@@ -371,26 +371,7 @@ def final_response_prompt(prompt_context, conversation_summary, query, count, us
   - Polite rejections ("not interested", "maybe later")
   - Short affirmative responses after information sharing ("ok", "good", "fine")
   
-  **Context Analysis for Closure:**
-  - User seems satisfied with information received
-  - User has declined further assistance multiple times
-  - Conversation has reached natural conclusion point
-  - User query indicates they're wrapping up
-  - Previous responses covered their main concerns
-  
-  **When closure is detected, set: `"conversation_closure": true`**
-  
-  **Closure Response Guidelines:**
-  1. Acknowledge gracefully and professionally
-  2. Confirm any next steps if contact details were provided  
-  3. End warmly without additional questions or CTAs
-  4. Respond naturally and appropriately to the closure context
-  
-  **When user_details_known=True (Post-form closure):**
-  1. Thank the user warmly and acknowledge receipt.  
-  2. Confirm info briefly and state next step (*team follow-up*).  
-  3. End with one **final bold question** for last files or inputs.  
-  4. Never repeat closure phrasing once done.
+
 
   ---
 
@@ -398,8 +379,7 @@ def final_response_prompt(prompt_context, conversation_summary, query, count, us
   Return ONLY valid JSON in this exact format:
   {{
     "response": "<markdown-formatted conversational reply>",
-    "funnel_stage": "Awareness", 
-    "conversation_closure": false
+    "funnel_stage": "Awareness"
   }}
 
   **CRITICAL FORMATTING RULES FOR RESPONSE:**
@@ -431,7 +411,6 @@ def final_response_prompt(prompt_context, conversation_summary, query, count, us
      - Reference specific **industries** where appropriate
 
   **Valid funnel_stage values:** "Awareness", "Interest", "Intent", or "Action"
-  **conversation_closure:** Set to `true` ONLY when user clearly indicates they want to end the conversation
 
   Each response must be **contextual, enthusiastic, and value-focused** while maintaining natural conversation flow.
 

@@ -161,9 +161,7 @@ class OptimizedChatbot:
                 funnel_stage = (llm_json.get("funnel_stage", "") or "").lower()
                 user_details_known = bool(llm_json.get("user_details_known", False))
                 user_network_id = llm_json.get("user_network_id") or None
-                conversation_closure = bool(llm_json.get("conversation_closure", False))
                 logger.info(f"[Chatbot] Parsed JSON: {llm_json}")
-                logger.info(f"[DYNAMIC_CLOSURE] LLM detected conversation_closure={conversation_closure} for query: '{query}'")
             except Exception as json_exc:
                 logger.warning(f"[Chatbot] Failed to parse LLM output as JSON: {json_exc}")
                 # As a best-effort, try to extract a user-facing 'response' field
@@ -175,20 +173,12 @@ class OptimizedChatbot:
                 else:
                     response_text = safe_final_text
                 user_network_id = None
-                conversation_closure = False  # Default to no closure on parsing error
 
-            logger.info(f"[Chatbot] Final output len={len(safe_final_text)}, funnel_stage='{funnel_stage}', closure={conversation_closure}")
+            logger.info(f"[Chatbot] Final output len={len(safe_final_text)}, funnel_stage='{funnel_stage}'")
             if 'llm_json' in locals():
                 logger.info(f"[LLM_DEBUG] Raw LLM JSON response: {llm_json}")  # Debug what LLM actually returns
 
-            # Step 5: Handle dynamic conversation closure
-            if conversation_closure:
-                logger.info(f"[DYNAMIC_CLOSURE] LLM detected conversation closure intent - triggering end_chat")
-                # Format the closure response
-                closure_response = format_response(response_text or "Thank you for your interest! Have a great day!", query, None)
-                yield {"status": "chunk", "chunk": closure_response}
-                yield {"status": "end_chat", "chunk": ""}
-                return
+            # Step 5: Continue with regular response flow
 
             # Step 6: Stream formatted response
             cleaned = (response_text or "").replace("FORM_TRIGGER", "").strip()
@@ -236,17 +226,17 @@ class OptimizedChatbot:
                     # Always trigger for Action stage
                     trigger_form = True
                     trigger_reason = "action_stage"
-                elif funnel_stage == "intent" and count >= 6:
+                elif funnel_stage == "intent" and count >= 3:
                     # Trigger for Intent stage after sufficient conversation depth
                     trigger_form = True
                     trigger_reason = "intent_stage_depth"
                     logger.info(f"[FORM_DEBUG] Intent stage trigger conditions met: funnel_stage='{funnel_stage}', count={count}")
-                elif funnel_stage == "interest" and count >= 10:
+                elif funnel_stage == "interest" and count >= 6:
                     # Trigger for Interest stage with deeper engagement
                     trigger_form = True
                     trigger_reason = "interest_stage_engagement"
                     logger.info(f"[FORM_DEBUG] Interest stage trigger conditions met: funnel_stage='{funnel_stage}', count={count}")
-                elif count >= 14:
+                elif count >= 12:
                     # Fallback: Force trigger after extensive conversation
                     trigger_form = True
                     trigger_reason = "conversation_length_fallback"
