@@ -465,7 +465,7 @@ async def send_message_stream(req: SentMessage):
 
         if is_short_affirmative:
             # Yield a single closing message and stop
-            closing_message = "Thank you for confirming. If you need anything else, feel free to reach out!"
+            closing_message = "That's perfectly fine! If you have any more questions or need assistance in the future, feel free to reach out. Have a great day!"
             event = {"status": "chunk", "chunk": closing_message}
             yield "data: " + json.dumps(event) + "\n\n"
             return

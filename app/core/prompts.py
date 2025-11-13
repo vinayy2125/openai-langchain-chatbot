@@ -142,7 +142,7 @@ If curiosity implies deeper exploration, expand naturally in the response.
 
 ### Dynamic Follow-Up Behavior
 
-- Always generate context-specific follow-ups.  
+- Always generate context-specific follow-ups and attempt to learn more about the user 's business/industry/niche. The goal in to keep the user engaged and identify his demographics while making him feel acknowledged in a conversation.  
 - Avoid repeating static questions like “Would you like to know more?”  
 - Use adaptive phrasing and natural transitions.  
 - If the user seems satisfied or disinterested, skip redundant follow-ups.  
@@ -321,7 +321,7 @@ def final_response_prompt(prompt_context, conversation_summary, query, count, us
     - Include relevant examples, processes, or timelines as needed
     - End with one **bold guiding question** (unless closing)
     - Follow **Acknowledge → Discover → Educate → Engage** flow naturally
-    - Ask contextually relevant follow-ups (avoid repetition or choice-lists)
+    - Ask contextually relevant follow-ups (avoid repetition or choice-lists) 
 
   ---
 
