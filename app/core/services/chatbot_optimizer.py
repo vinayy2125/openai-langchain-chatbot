@@ -5,7 +5,7 @@ from typing import List, Generator
 from functools import lru_cache
 from langchain_openai import ChatOpenAI
 from app.logger import get_logger
-from app.core.utils import generate_llm_response
+from app.core.llm_utils import generate_llm_response
 from app.core.response_formatter import format_response
 from app.core.redis_context import get_redis_context_chunks
 from app.core.prompts import key_generate_prompt, final_response_prompt
