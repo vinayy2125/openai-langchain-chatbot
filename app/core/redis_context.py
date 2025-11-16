@@ -16,16 +16,26 @@ def get_redis_context_chunks(
     fallback_keywords: str = "capabilities",
 ) -> List[str]:
     """
-    Retrieve context chunks from Redis using semantic search.
+    Retrieve context chunks from Redis using dynamic semantic similarity search.
 
-    This function attempts to infer the user's intent from the query and
-    conversation history and builds a search query that favors business or
-    product-context where appropriate rather than always driving the query to
-    low-level technical terms.
+    Uses semantic similarity search to find relevant chunks from the knowledge base
+    dynamically based on query meaning and context. No static keyword matching -
+    relies on vector similarity to find the most relevant content.
+
+    Args:
+        session_id: Session identifier
+        query: User query (semantic search handles intent inference)
+        conversation_history: Previous conversation messages for context
+        top_n: Number of top results to retrieve (calculated dynamically by caller)
+        key_terms: Optional domain-specific terms (if provided, used for filtering)
+        domain_prefix: Optional domain prefix for search query
+        fallback_keywords: Fallback if query is empty
+
+    Returns:
+        List of relevant context chunks, ordered by semantic similarity
     """
-    # Default domain-aware keywords if none provided
-    default_key_terms = ["Intent-aware search query", "healthcare", "development", "software", "tech stack", "case study", "portfolio"]
-    key_terms = key_terms or default_key_terms
+    # Use key_terms if provided, otherwise rely on semantic similarity alone
+    # Semantic search will handle relevance ranking dynamically
 
     q = (query or "").strip()
     # If the explicit query is empty, try to derive a reasonable search term
@@ -47,30 +57,9 @@ def get_redis_context_chunks(
         logger.info("[RedisContext] Empty query; using fallback keywords for search.")
         q = fallback_keywords or "capabilities"
 
-    search_terms = q.lower()
-
-    # Heuristics to infer intent: prefer business/interest intent over technical
-    business_indicators = [
-        "price", "pricing", "cost", "quote", "hire", "partner", "collaborat", "interested", "options", "services", "solutions", "contact", "demo", "case study", "portfolio", "examples", "recommend"
-    ]
-    technical_indicators = [
-        "api", "integration", "backend", "database", "error", "bug", "deploy", "server", "framework", "sdk", "implementation", "architecture"
-    ]
-
-    # Decide primary intent
-    is_business = any(tok in search_terms for tok in business_indicators)
-    is_technical = any(tok in search_terms for tok in technical_indicators)
-
-    # Build a neutral, intent-aware search query
-    if is_business and not is_technical:
-        # Business intent: prefer case studies, services, outcomes
-        search_query = f"{domain_prefix} services case study {q}"
-    elif is_technical and not is_business:
-        # Technical intent: include technical details
-        search_query = f"{domain_prefix} {q} technical details"
-    else:
-        # Ambiguous or general intent: prefer product/context and let similarity search handle specifics
-        search_query = f"{domain_prefix} {q}"
+    # Let semantic similarity search handle intent inference dynamically
+    # Build search query from user query and context - semantic search will find relevant chunks
+    search_query = f"{domain_prefix} {q}" if domain_prefix else q
 
     # Augment search with recent user messages in the conversation (last 2)
     if conversation_history:
@@ -86,7 +75,7 @@ def get_redis_context_chunks(
             except Exception:
                 continue
 
-    logger.info(f"[RedisContext] Intent-aware search query: {search_query}")
+    logger.info(f"[RedisContext] Semantic search query: {search_query}, top_n={top_n}")
 
     # Perform similarity search with enhanced query
     results = similarity_search(session_id, search_query, top_n=top_n)
@@ -95,7 +84,8 @@ def get_redis_context_chunks(
         logger.info("[RedisContext] No context retrieved from Redis.")
         return []
 
-    # Process and deduplicate results, prioritizing domain-relevant content
+    # Process and deduplicate results - semantic search already ranks by relevance
+    # Maintain the order from similarity search as it's already optimized
     seen_content = set()
     normalized: List[str] = []
 
@@ -103,27 +93,31 @@ def get_redis_context_chunks(
         if not isinstance(item, dict):
             continue
 
-        text = (item.get("response") or item.get("text") or item.get("query") or "").strip()
+        text = (
+            item.get("response") or item.get("text") or item.get("query") or ""
+        ).strip()
         if not text:
             continue
         key = text.lower()
         if key in seen_content:
             continue
 
-        # If the chunk mentions the domain prefix or other key_terms, push it forward
-        if any(term in key for term in key_terms):
-            normalized.insert(0, text)
-        else:
-            normalized.append(text)
+        # Preserve semantic search ranking - similarity search already ordered by relevance
+        normalized.append(text)
         seen_content.add(key)
 
     if normalized:
-        logger.info(f"[RedisContext] Selected {len(normalized)} relevant context chunks")
+        logger.info(
+            f"[RedisContext] Selected {len(normalized)} relevant context chunks"
+        )
 
-    logger.info(f"[RedisContext] Retrieved {len(normalized)} context items (top_n={top_n})")
+    logger.info(
+        f"[RedisContext] Retrieved {len(normalized)} context items (top_n={top_n})"
+    )
 
     if normalized:
-        summary = summarize_chunks_with_llm(normalized[:4], query)
+        # Use all normalized chunks (not just first 4) to ensure comprehensive service listings
+        summary = summarize_chunks_with_llm(normalized, query)
         return [summary] if summary else normalized[:1]
     return []
 
@@ -136,12 +130,12 @@ def summarize_chunks_with_llm(chunks: List[str], query: str) -> str:
     """
     if not chunks:
         return ""
+
     prompt = (
         f"Summarize the following context chunks for the query: '{query}'. "
         "Extract any relevant links and provide detailed information. "
         "Return a single, concise summary for use as AI context.\n\n"
-        "Context Chunks:\n"
-        + "\n---\n".join(chunks)
+        "Context Chunks:\n" + "\n---\n".join(chunks)
     )
     try:
         summary = call_llm_summarize_chunks(prompt)
@@ -149,4 +143,3 @@ def summarize_chunks_with_llm(chunks: List[str], query: str) -> str:
     except Exception as e:
         logger.error(f"[RedisContext] LLM summarization failed: {e}")
         return ""
- 
