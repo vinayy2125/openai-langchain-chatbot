@@ -1,17 +1,12 @@
 import os
-import psycopg2
-from database_setup import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from app.db.base import get_db_conn
 
 MIGRATIONS_DIR = "migrations"
 
 def run_migrations():
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
+    conn = get_db_conn()
     cursor = conn.cursor()
 
     # Ensure migration history exists
