@@ -12,8 +12,6 @@ from .helpers import (
 )
 from . import helpers
 from app.db.base import get_db_conn
-from app.api.deps import get_follow_up_manager
-from app.core.nested_follow_up_manager import FollowUpManager
 # Get centralized logger
 logger = get_logger(__name__)
 
@@ -98,11 +96,9 @@ async def get_root_prompts():
 
 
 @router.post("/chat/send-stream")
-async def post_send_message_stream(
-    req: SentMessage, follow_up_manager: FollowUpManager = Depends(get_follow_up_manager)
-):
-    """Streaming chat endpoint with hybrid form-trigger behavior."""
-    return await helpers.send_message_stream(req, follow_up_manager)
+async def post_send_message_stream(req: SentMessage):
+    """Streaming chat endpoint with optimized chatbot only."""
+    return await helpers.send_message_stream(req)
 
 
 
@@ -212,3 +208,14 @@ async def get_chat_messages(session_id: str):
         logger.error(f"Error retrieving chat messages: {str(e)}")
         raise HTTPException(status_code=500, detail="Error retrieving chat messages")
 
+
+
+@router.post("/prompts/follow-up")
+async def get_follow_up_prompts(prompt: str):
+    """Fetch follow-up prompts based on a message ID."""
+    try:
+        prompts = await helpers.fetch_follow_up_prompts(prompt)
+        return prompts
+    except Exception as e:
+        logger.error(f"Error fetching follow-up prompts for message")
+        raise HTTPException(status_code=500, detail="Error fetching follow-up prompts")

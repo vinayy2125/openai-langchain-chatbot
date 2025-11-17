@@ -4,16 +4,18 @@ import os
 import uvicorn
 from fastapi import FastAPI
 from dotenv import load_dotenv
-from app.core.llm_client import llm
 from app.api.v1 import router as api_v1_router
 from fastapi.middleware.cors import CORSMiddleware
+
+# from app.core.llm_client import llm
+from app.api.v1 import router as api_v1_router
 from app.api.v1 import redis_endpoint as redis_router
-from app.core.nested_follow_up_manager import FollowUpManager
+
+# from app.core.nested_follow_up_manager import FollowUpManager
 from app.logger import get_logger
 from app.logger import attach_handlers_to_uvicorn
 
 load_dotenv()
-
 
 
 logger = get_logger("__main__")
@@ -40,9 +42,9 @@ def create_app() -> FastAPI:
 
     logger.info("LLM client initialized successfully")
 
-    # Attach FollowUpManager to app state
-    app.state.follow_up_manager = FollowUpManager(llm)
-    logger.info("FollowUpManager initialized successfully")
+    # Attach FollowUpManager to app state - REMOVED for optimized flow only
+    # app.state.follow_up_manager = FollowUpManager(llm)
+    # logger.info("FollowUpManager initialized successfully")
 
     # Register main API router
     app.include_router(api_v1_router)
@@ -52,6 +54,7 @@ def create_app() -> FastAPI:
     logger.info("Redis endpoints registered")
 
     return app
+
 
 # Main function to start the server
 def main():
@@ -69,7 +72,9 @@ def main():
     try:
         attach_handlers_to_uvicorn()
     except Exception:
-        logger.exception("Failed to attach handlers to uvicorn; continuing with default logging configuration")
+        logger.exception(
+            "Failed to attach handlers to uvicorn; continuing with default logging configuration"
+        )
 
     # Run the Uvicorn server
     uvicorn.run(
@@ -81,7 +86,6 @@ def main():
         log_level="info",
     )
 
+
 if __name__ == "__main__":
     main()
-
- 
