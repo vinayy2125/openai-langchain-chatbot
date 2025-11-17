@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional, Union
 
-from app.core.llm_client import llm
-from app.core.prompts import SHARED_SYSTEM_PROMPT
+from app.utils.llm_client import llm
+from app.utils.prompts import SHARED_SYSTEM_PROMPT
 from app.logger import get_logger
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI

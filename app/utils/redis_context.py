@@ -1,7 +1,7 @@
 from app.logger import get_logger
 from typing import List, Dict, Any, Optional
 from app.db.redis_vector_helper import similarity_search
-from app.core.llm_client import call_llm_summarize_chunks
+from app.utils.llm_client import call_llm_summarize_chunks
 
 logger = get_logger("chatbot")
 

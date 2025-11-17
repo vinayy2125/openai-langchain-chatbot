@@ -4,11 +4,11 @@ import tiktoken
 from functools import lru_cache
 from langchain_openai import ChatOpenAI
 from app.logger import get_logger
-from app.core.llm_utils import generate_llm_response
-from app.core.redis_context import get_redis_context_chunks
+from app.utils.llm_utils import generate_llm_response
+from app.utils.redis_context import get_redis_context_chunks
 
 # format_response is now imported only when needed (async version with URL validation)
-from app.core.prompts import final_response_prompt
+from app.utils.prompts import final_response_prompt
 
 logger = get_logger("chatbot")
 
@@ -161,7 +161,7 @@ class OptimizedChatbot:
     async def get_detailed_response(
         self, query: str, chat_history, session_id: str, stream: bool = True
     ):
-        from app.api.v1.helpers import (
+        from app.api.helpers import (
             get_user_details_known_from_db,
         )  # Do Not Move Outside Function
 
@@ -254,7 +254,7 @@ class OptimizedChatbot:
             )
 
             # Get user details for context mapping
-            from app.api.v1.helpers import get_user_details_from_db
+            from app.api.helpers import get_user_details_from_db
 
             user_details = get_user_details_from_db(session_id)
             logger.info(
@@ -275,8 +275,8 @@ class OptimizedChatbot:
                 # Save this clarification to history
                 try:
                     import asyncio
-                    from app.api.v1.models import MessageCreate
-                    from app.api.v1.helpers import save_message
+                    from app.api.models import MessageCreate
+                    from app.api.helpers import save_message
 
                     assistant_msg = MessageCreate(
                         session_id=session_id,
@@ -452,7 +452,7 @@ class OptimizedChatbot:
             # Only yield the assistant response if we are NOT about to trigger a form
             if not trigger_form:
                 # Use smart formatter - format immediately, validate URLs in background
-                from app.core.response_formatter import format_response
+                from app.utils.response_formatter import format_response
 
                 # Format response immediately (no blocking URL validation)
                 formatted = format_response(cleaned, query, None)
@@ -461,7 +461,7 @@ class OptimizedChatbot:
 
                 # Quick URL normalization (no network calls) - fix spaces in URLs
                 # Skip blocking URL validation - normalize only (fixes spaces like "real- estate")
-                from app.core.response_formatter import _normalize_url
+                from app.utils.response_formatter import _normalize_url
 
                 def normalize_urls_in_text(text):
                     url_pattern = r"\[([^\]]+)\]\(([^)]+)\)|(https?://[^\s\)]+)"
