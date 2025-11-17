@@ -158,7 +158,7 @@ Determine stage strictly from conversation_summary and engagement depth.
 - Rotate acknowledgment phrases.
 - After form submission: use name once, not at sentence start.
 
---
+---
 
 ### Response Rules – DYNAMIC STRUCTURE ADAPTATION
 - No templates. Structure determined by content.

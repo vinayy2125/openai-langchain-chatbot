@@ -454,13 +454,13 @@ async def fetch_root_prompts():
         conn = get_db_conn()
         cursor = conn.cursor()
 
-        greeting_text = "Hello! I'm **Dits AI** 👋 — your smart assistant from Ditstek Innovations.\n\n**What brings you here today?**"
+        greeting_text = "Hello! I'm **DITS AI** 👋 — your smart assistant from Ditstek Innovations.\n\n**What brings you here today?**"
         bottom_hint_text = "**Feel free to type if you're looking for something else!**"
         desired_order = [
             "See our Work",
             "Start a Project",
-            "Talk to Dits team",
-            "Explore Dits Services",
+            "Talk to DITS team",
+            "Explore DITS Services",
         ]
         all_prompt_texts = [greeting_text] + desired_order + [bottom_hint_text]
 
