@@ -116,9 +116,11 @@ def get_redis_context_chunks(
     )
 
     if normalized:
-        # Use all normalized chunks (not just first 4) to ensure comprehensive service listings
-        summary = summarize_chunks_with_llm(normalized, query)
-        return [summary] if summary else normalized[:1]
+        # Skip LLM summarization to avoid blocking - use raw chunks directly for faster response
+        # LLM summarization adds 5-10 seconds delay - return chunks directly instead
+        # Return first few chunks (limit to avoid token bloat) - main LLM will process them
+        max_chunks = min(len(normalized), 5)  # Limit to 5 chunks max for performance
+        return normalized[:max_chunks]
     return []
 
 
