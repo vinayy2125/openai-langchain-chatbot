@@ -28,50 +28,7 @@ SSE_HEADERS = {
     "Access-Control-Allow-Headers": "*",
 }
 
-# --- Form Trigger Logic (modular, reused by send_message_stream) ---
-def is_prompt_trigger(response: str) -> bool:
-    """Detect actionable cues in prompt response for form triggering."""
-    logger.info(f"[is_prompt_trigger] Checking response for action cues.")
-    action_cues = [
-        "Would you like help scheduling a call?",
-        "Can I have your best email",
-        "Would you like to discuss a proposal",
-        "Can we connect for a meeting",
-        # Add more cues as needed
-    ]
-    result = any(cue.lower() in response.lower() for cue in action_cues)
-    logger.debug(f"[is_prompt_trigger] Result: {result}")
-    return result
-
-
-
-
-def should_trigger_form(session_data: dict, user_message: str, prompt_response: Optional[str] = None) -> bool:
-    """
-    Form trigger logic:
-    - If user_details_known is True, never trigger the form.
-    - If user_details_known is False, trigger form based on prompt cues or intent (conversation length).
-    """
-    # Always check user_details_known from DB for the session's user_id
-    logger.info(f"[should_trigger_form] Called for session_id={session_data.get('session_id')}")
-
-    session_id = session_data.get("session_id")
-    user_details_known = get_user_details_known_from_db(session_id) if session_id else False
-    logger.debug(f"[should_trigger_form] user_details_known={user_details_known}")
-    if user_details_known:
-        logger.info(f"[should_trigger_form] User details known, not triggering form.")
-        return False
-    # Only trigger form if user_details_known is False
-    if prompt_response and is_prompt_trigger(prompt_response):
-        logger.info(f"[should_trigger_form] Prompt response triggered form.")
-        return True
-    user_msgs = [m for m in session_data.get("conversation_history", []) if m.get("role") == "user"]
-    logger.debug(f"[should_trigger_form] user_msgs count={len(user_msgs)} form_shown={session_data.get('form_shown', False)}")
-    if len(user_msgs) >= 10 and not session_data.get("form_shown", False):
-        logger.info(f"[should_trigger_form] Conversation length triggered form.")
-        return True
-    logger.info(f"[should_trigger_form] No form trigger conditions met.")
-    return False
+# --- Form Trigger Logic (no longer used, logic moved to prompt) ---
 
 def get_user_details_known_from_db(session_id: str) -> bool:
     """Fetch user_details_known from the database for the user associated with the session."""
@@ -105,6 +62,57 @@ def get_user_details_known_from_db(session_id: str) -> bool:
         logger.warning(f"[get_user_details_known_from_db] DB error for session {session_id}: {e}")
     logger.info(f"[get_user_details_known_from_db] user_details_known=False for session_id={session_id}")
     return False
+
+
+def get_user_details_from_db(session_id: str) -> Dict[str, Any]:
+    """Fetch user details (username, email, mobile) from the database for the user associated with the session.
+    
+    Returns a dictionary with user details if available, empty dict otherwise.
+    """
+    logger.info(f"[get_user_details_from_db] Fetching user details for session_id={session_id}")
+    try:
+        conn = psycopg2.connect(
+            dbname=os.getenv("DB_NAME"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            host=os.getenv("DB_HOST"),
+            port=os.getenv("DB_PORT"),
+            options="-c client_encoding=UTF8",
+        )
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT u.username, u.email, u.mobile, u.user_details_known 
+            FROM users u
+            JOIN sessions s ON u.id = s.user_id
+            WHERE s.session_id = %s
+            """,
+            (str(session_id),)
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if row:
+            username, email, mobile, user_details_known = row
+            user_details = {}
+            if username:
+                user_details["username"] = username
+            if email:
+                user_details["email"] = email
+            if mobile:
+                user_details["mobile"] = mobile
+            if user_details_known:
+                user_details["user_details_known"] = True
+            
+            if user_details:
+                logger.info(f"[get_user_details_from_db] Found user details for session_id={session_id}: {list(user_details.keys())}")
+                return user_details
+    except Exception as e:
+        logger.warning(f"[get_user_details_from_db] DB error for session {session_id}: {e}")
+    
+    logger.info(f"[get_user_details_from_db] No user details found for session_id={session_id}")
+    return {}
 
 def mark_form_shown(session_data: dict):
     logger.info(f"[mark_form_shown] Marking form_shown=True for session_id={session_data.get('session_id')}")
@@ -420,9 +428,10 @@ async def send_message_stream(req: SentMessage):
             logger.error("[send_message_stream] session_id is missing or not a string.")
             raise HTTPException(status_code=400, detail="session_id is required and must be a string")
 
-        # Save user message if present
+        # Prepare user message for later saving (defer to improve response time)
+        user_msg_to_save = None
         if req.query:
-            user_msg = MessageCreate(
+            user_msg_to_save = MessageCreate(
                 session_id=session_id,
                 content=req.query,
                 role="user",
@@ -431,10 +440,19 @@ async def send_message_stream(req: SentMessage):
                 follow_up_depth=0,
                 metadata={}
             )
-            try:
-                await save_message(user_msg)
-            except Exception as e:
-                logger.warning(f"Failed to save user message: {e}")
+
+        # Save user message asynchronously to improve response time
+        import asyncio
+        async def save_user_message_async():
+            if user_msg_to_save:
+                try:
+                    await save_message(user_msg_to_save)
+                except Exception as e:
+                    logger.warning(f"Failed to save user message: {e}")
+        
+        # Start user message saving in background
+        if user_msg_to_save:
+            asyncio.create_task(save_user_message_async())
 
         # Always use the optimized chatbot flow
         logger.info(f"[send_message_stream] Using optimized chatbot flow.")
@@ -442,33 +460,23 @@ async def send_message_stream(req: SentMessage):
         chatbot = OptimizedChatbot()
         query = req.query or ""
         
-        # Get conversation history from database
-        try:
-            from uuid import UUID
-            session_uuid = UUID(session_id)
-            messages = await get_messages_for_session(session_uuid)
-            chat_history = []
-            for msg in messages:
-                if msg.role in ["user", "assistant"]:
-                    chat_history.append((msg.role, msg.content))
-            logger.info(f"[OPTIMIZED_FLOW] Using conversation history from database: {len(chat_history)} messages")
-        except Exception as e:
-            logger.warning(f"Failed to load conversation history: {e}")
-            chat_history = []
+        # Use provided conversation history or get from database only if needed
+        if conversation_history:
+            chat_history = [(msg.get("role"), msg.get("content")) for msg in conversation_history if msg.get("role") in ["user", "assistant"]]
+            logger.info(f"[OPTIMIZED_FLOW] Using provided conversation history: {len(chat_history)} messages")
+        else:
+            try:
+                from uuid import UUID
+                session_uuid = UUID(session_id)
+                messages = await get_messages_for_session(session_uuid)
+                chat_history = [(msg.role, msg.content) for msg in messages if msg.role in ["user", "assistant"]]
+                logger.info(f"[OPTIMIZED_FLOW] Using conversation history from database: {len(chat_history)} messages")
+            except Exception as e:
+                logger.warning(f"Failed to load conversation history: {e}")
+                chat_history = []
         
         full_assistant_response = ""
         session_ended = False
-        # Detect short/affirmative user responses to avoid repetition
-        short_affirmatives = {"no", "no thanks", "no thank you", "thanks", "thank you", "ok", "okay", "fine", "all set", "got it", "bye", "goodbye"}
-        user_input = (req.query or "").strip().lower()
-        is_short_affirmative = user_input in short_affirmatives
-
-        if is_short_affirmative:
-            # Yield a single closing message and stop
-            closing_message = "Thank you for confirming. If you need anything else, feel free to reach out!"
-            event = {"status": "chunk", "chunk": closing_message}
-            yield "data: " + json.dumps(event) + "\n\n"
-            return
 
         async for event in chatbot.get_detailed_response(query=query, chat_history=chat_history, session_id=session_id, stream=True):
             # Track session ending
@@ -510,23 +518,26 @@ async def send_message_stream(req: SentMessage):
             except Exception as e:
                 logger.warning(f"Failed to save complete response: {e}")
         
-        # Handle session ending
+        # Handle session ending asynchronously
         if session_ended:
-            try:
-                conn = get_db_conn()
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    UPDATE sessions SET is_active = FALSE WHERE session_id = %s
-                    """,
-                    (str(session_id),)
-                )
-                conn.commit()
-                cursor.close()
-                conn.close()
-                logger.info(f"[OPTIMIZED_FLOW] Updated is_active to FALSE for ended session_id={session_id}")
-            except Exception as e:
-                logger.error(f"[OPTIMIZED_FLOW] Failed to update is_active for ended session_id={session_id}: {e}")
+            async def end_session_async():
+                try:
+                    conn = get_db_conn()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        UPDATE sessions SET is_active = FALSE WHERE session_id = %s
+                        """,
+                        (str(session_id),)
+                    )
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    logger.info(f"[OPTIMIZED_FLOW] Updated is_active to FALSE for ended session_id={session_id}")
+                except Exception as e:
+                    logger.error(f"[OPTIMIZED_FLOW] Failed to update is_active for ended session_id={session_id}: {e}")
+            
+            asyncio.create_task(end_session_async())
 
     return StreamingResponse(stream_response(), media_type="text/event-stream", headers=SSE_HEADERS)
 

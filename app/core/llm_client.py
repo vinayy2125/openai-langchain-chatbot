@@ -15,7 +15,7 @@ load_dotenv()
 llm = ChatOpenAI(
     model="gpt-4o",
     temperature=0.7,
-    api_key=SecretStr(os.getenv("OPENAI_API_KEY") or "")
+    api_key=SecretStr(os.getenv("OPENAI_API_KEY") or ""),
 )
 
 
@@ -27,8 +27,12 @@ def call_llm_summarize_chunks(prompt: str) -> str:
     try:
         logger.info("[LLMClient] Summarizing context chunks with LLM.")
         response = llm.invoke(prompt)
-        # If response is a string, return directly; if object, extract text
-        if hasattr(response, 'content'):
+        # Handle different response types with fallbacks
+        # First check if response is already a string
+        if isinstance(response, str):
+            return response
+        # Check for .content attribute (most common case)
+        if hasattr(response, "content"):
             content = response.content
             if isinstance(content, str):
                 return content
@@ -36,7 +40,11 @@ def call_llm_summarize_chunks(prompt: str) -> str:
                 # Join string elements, convert dicts to str
                 return " ".join(str(item) for item in content)
             return str(content)
+        # Fallback to .text attribute if it exists
+        if hasattr(response, "text"):
+            return response.text
+        # Final fallback: convert to string
+        return str(response)
     except Exception as e:
         logger.error(f"[LLMClient] Error summarizing chunks: {e}")
         return ""
- 
