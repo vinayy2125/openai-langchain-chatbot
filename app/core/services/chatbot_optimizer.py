@@ -451,16 +451,32 @@ class OptimizedChatbot:
 
             # Only yield the assistant response if we are NOT about to trigger a form
             if not trigger_form:
-                # Use smart formatter with URL validation
-                from app.core.response_formatter import (
-                    format_response_with_url_validation,
-                )
+                # Use smart formatter - format immediately, validate URLs in background
+                from app.core.response_formatter import format_response
 
-                formatted = await format_response_with_url_validation(
-                    cleaned, query, None
-                )
+                # Format response immediately (no blocking URL validation)
+                formatted = format_response(cleaned, query, None)
                 if isinstance(formatted, str):
                     formatted = formatted.replace("\\n", "\n")
+
+                # Quick URL normalization (no network calls) - fix spaces in URLs
+                # Skip blocking URL validation - normalize only (fixes spaces like "real- estate")
+                from app.core.response_formatter import _normalize_url
+
+                def normalize_urls_in_text(text):
+                    url_pattern = r"\[([^\]]+)\]\(([^)]+)\)|(https?://[^\s\)]+)"
+
+                    def normalize_match(match):
+                        if match.group(2):  # Markdown link
+                            normalized = _normalize_url(match.group(2))
+                            return f"[{match.group(1)}]({normalized})"
+                        elif match.group(3):  # Plain URL
+                            return _normalize_url(match.group(3))
+                        return match.group(0)
+
+                    return re.sub(url_pattern, normalize_match, text)
+
+                formatted = normalize_urls_in_text(formatted)
 
                 # Remove bold follow-up questions if user_details_known=True
                 if user_details_known_db:
