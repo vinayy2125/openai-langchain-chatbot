@@ -208,3 +208,14 @@ async def get_chat_messages(session_id: str):
         logger.error(f"Error retrieving chat messages: {str(e)}")
         raise HTTPException(status_code=500, detail="Error retrieving chat messages")
 
+
+
+@router.post("/prompts/follow-up")
+async def get_follow_up_prompts(prompt: str):
+    """Fetch follow-up prompts based on a message ID."""
+    try:
+        prompts = await helpers.fetch_follow_up_prompts(prompt)
+        return prompts
+    except Exception as e:
+        logger.error(f"Error fetching follow-up prompts for message")
+        raise HTTPException(status_code=500, detail="Error fetching follow-up prompts")
