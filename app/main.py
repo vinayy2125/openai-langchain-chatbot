@@ -4,6 +4,7 @@ import os
 import uvicorn
 from fastapi import FastAPI
 from dotenv import load_dotenv
+from app.api.v1 import router as api_v1_router
 from fastapi.middleware.cors import CORSMiddleware
 
 # from app.core.llm_client import llm

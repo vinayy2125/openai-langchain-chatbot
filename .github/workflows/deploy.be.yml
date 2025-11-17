@@ -36,6 +36,14 @@ jobs:
           echo "REDIS_PORT=" >> .env
           echo "REDIS_PASSWORD=" >> .env
           echo "HUGGINGFACEHUB_API_TOKEN=" >> .env
+          echo "SMTP_HOST=" >> .env
+          echo "SMTP_PORT=" >> .env
+          echo "SMTP_USER=" >> .env
+          echo "SMTP_PASSWORD=" >> .env
+          echo "SMTP_USE_TLS=" >> .env
+          echo "EMAIL_FROM=" >> .env
+          echo "EMAIL_TO=" >> .env
+
 
       # 3. Log in to GitHub Container Registry
       - name: Log in to GitHub Container Registry (GHCR)
@@ -77,6 +85,13 @@ jobs:
           echo "::add-mask::${{ secrets.REDIS_PORT_PROD }}"
           echo "::add-mask::${{ secrets.REDIS_PASSWORD_PROD }}"
           echo "::add-mask::${{ secrets.HF_TOKEN_PROD }}"
+          echo "::add-mask::${{ secrets.SMTP_HOST }}"
+          echo "::add-mask::${{ secrets.SMTP_PORT }}"
+          echo "::add-mask::${{ secrets.SMTP_USER }}"
+          echo "::add-mask::${{ secrets.SMTP_PASSWORD }}"
+          echo "::add-mask::${{ secrets.SMTP_USE_TLS }}"
+          echo "::add-mask::${{ secrets.EMAIL_FROM }}"
+          echo "::add-mask::${{ secrets.EMAIL_TO }}"
 
       # 7. Deploy on Droplet via SSH
       - name: SSH and Deploy on Droplet

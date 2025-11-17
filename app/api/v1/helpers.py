@@ -5,6 +5,7 @@ import psycopg2
 from typing import Dict, Any, List, Optional
 from fastapi.responses import StreamingResponse
 from uuid import UUID
+from app.core.utils import generate_llm_response
 from app.logger import get_logger
 from fastapi import HTTPException, Depends
 from app.api.v1.models import (
@@ -742,4 +743,10 @@ async def end_session_helper(session_id: str):
         if conn:
             conn.close()
             
-        
+
+
+async def fetch_follow_up_prompts(user_message:str)-> Any:
+    response = generate_llm_response(user_message)
+    if response is None:
+        raise HTTPException(status_code=500, detail="Error generating LLM response for follow-up prompts")
+    return response
