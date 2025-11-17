@@ -1,7 +1,6 @@
 import re
 import os
 import json
-import psycopg2
 from typing import Dict, Any, List, Optional, Any as AnyType
 from fastapi.responses import StreamingResponse
 from uuid import UUID
@@ -38,14 +37,7 @@ def get_user_details_known_from_db(session_id: str) -> bool:
         f"[get_user_details_known_from_db] Fetching user_details_known for session_id={session_id}"
     )
     try:
-        conn = psycopg2.connect(
-            dbname=os.getenv("DB_NAME"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT"),
-            options="-c client_encoding=UTF8",
-        )
+        conn = get_db_conn()
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -84,14 +76,7 @@ def get_user_details_from_db(session_id: str) -> Dict[str, Any]:
         f"[get_user_details_from_db] Fetching user details for session_id={session_id}"
     )
     try:
-        conn = psycopg2.connect(
-            dbname=os.getenv("DB_NAME"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT"),
-            options="-c client_encoding=UTF8",
-        )
+        conn = get_db_conn()
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -163,18 +148,6 @@ def is_valid_ip(ip_str: str) -> bool:
         return False
     logger.debug("[is_valid_ip] IP is not valid.")
     return False
-
-
-# Database connection helper
-def get_db_conn():
-    return psycopg2.connect(
-        dbname=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT"),
-        options="-c client_encoding=UTF8",
-    )
 
 
 async def update_user_by_session(session_id: str, user: UserCreate):
