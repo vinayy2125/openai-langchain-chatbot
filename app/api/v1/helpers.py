@@ -5,17 +5,15 @@ import psycopg2
 from typing import Dict, Any, List, Optional
 from fastapi.responses import StreamingResponse
 from uuid import UUID
+from app.core.utils import generate_llm_response
 from app.logger import get_logger
 from fastapi import HTTPException, Depends
-from app.api.deps import get_follow_up_manager
-from app.core.chat_logic import build_chatbot_response
 from app.api.v1.models import (
     MessageCreate,
     Message,
     SentMessage,
 )
 from app.api.v1.models import UserCreate
-from app.core.nested_follow_up_manager import FollowUpManager
 from app.core.services.email_sender import send_closure_email
 from fastapi import HTTPException
 from datetime import datetime
@@ -31,50 +29,7 @@ SSE_HEADERS = {
     "Access-Control-Allow-Headers": "*",
 }
 
-# --- Form Trigger Logic (modular, reused by send_message_stream) ---
-def is_prompt_trigger(response: str) -> bool:
-    """Detect actionable cues in prompt response for form triggering."""
-    logger.info(f"[is_prompt_trigger] Checking response for action cues.")
-    action_cues = [
-        "Would you like help scheduling a call?",
-        "Can I have your best email",
-        "Would you like to discuss a proposal",
-        "Can we connect for a meeting",
-        # Add more cues as needed
-    ]
-    result = any(cue.lower() in response.lower() for cue in action_cues)
-    logger.debug(f"[is_prompt_trigger] Result: {result}")
-    return result
-
-
-
-
-def should_trigger_form(session_data: dict, user_message: str, prompt_response: Optional[str] = None) -> bool:
-    """
-    Form trigger logic:
-    - If user_details_known is True, never trigger the form.
-    - If user_details_known is False, trigger form based on prompt cues or intent (conversation length).
-    """
-    # Always check user_details_known from DB for the session's user_id
-    logger.info(f"[should_trigger_form] Called for session_id={session_data.get('session_id')}")
-
-    session_id = session_data.get("session_id")
-    user_details_known = get_user_details_known_from_db(session_id) if session_id else False
-    logger.debug(f"[should_trigger_form] user_details_known={user_details_known}")
-    if user_details_known:
-        logger.info(f"[should_trigger_form] User details known, not triggering form.")
-        return False
-    # Only trigger form if user_details_known is False
-    if prompt_response and is_prompt_trigger(prompt_response):
-        logger.info(f"[should_trigger_form] Prompt response triggered form.")
-        return True
-    user_msgs = [m for m in session_data.get("conversation_history", []) if m.get("role") == "user"]
-    logger.debug(f"[should_trigger_form] user_msgs count={len(user_msgs)} form_shown={session_data.get('form_shown', False)}")
-    if len(user_msgs) >= 10 and not session_data.get("form_shown", False):
-        logger.info(f"[should_trigger_form] Conversation length triggered form.")
-        return True
-    logger.info(f"[should_trigger_form] No form trigger conditions met.")
-    return False
+# --- Form Trigger Logic (no longer used, logic moved to prompt) ---
 
 def get_user_details_known_from_db(session_id: str) -> bool:
     """Fetch user_details_known from the database for the user associated with the session."""
@@ -108,6 +63,57 @@ def get_user_details_known_from_db(session_id: str) -> bool:
         logger.warning(f"[get_user_details_known_from_db] DB error for session {session_id}: {e}")
     logger.info(f"[get_user_details_known_from_db] user_details_known=False for session_id={session_id}")
     return False
+
+
+def get_user_details_from_db(session_id: str) -> Dict[str, Any]:
+    """Fetch user details (username, email, mobile) from the database for the user associated with the session.
+    
+    Returns a dictionary with user details if available, empty dict otherwise.
+    """
+    logger.info(f"[get_user_details_from_db] Fetching user details for session_id={session_id}")
+    try:
+        conn = psycopg2.connect(
+            dbname=os.getenv("DB_NAME"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            host=os.getenv("DB_HOST"),
+            port=os.getenv("DB_PORT"),
+            options="-c client_encoding=UTF8",
+        )
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT u.username, u.email, u.mobile, u.user_details_known 
+            FROM users u
+            JOIN sessions s ON u.id = s.user_id
+            WHERE s.session_id = %s
+            """,
+            (str(session_id),)
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if row:
+            username, email, mobile, user_details_known = row
+            user_details = {}
+            if username:
+                user_details["username"] = username
+            if email:
+                user_details["email"] = email
+            if mobile:
+                user_details["mobile"] = mobile
+            if user_details_known:
+                user_details["user_details_known"] = True
+            
+            if user_details:
+                logger.info(f"[get_user_details_from_db] Found user details for session_id={session_id}: {list(user_details.keys())}")
+                return user_details
+    except Exception as e:
+        logger.warning(f"[get_user_details_from_db] DB error for session {session_id}: {e}")
+    
+    logger.info(f"[get_user_details_from_db] No user details found for session_id={session_id}")
+    return {}
 
 def mark_form_shown(session_data: dict):
     logger.info(f"[mark_form_shown] Marking form_shown=True for session_id={session_data.get('session_id')}")
@@ -225,21 +231,8 @@ async def update_user_by_session(session_id: str, user: UserCreate):
             conn.commit()
             logger.info(f"[update_user_by_session] User updated successfully for user_id={user_id}")
 
-        # Always set user_details_known = True in session state
-        try:
-            from app.api.deps import get_follow_up_manager
-            follow_up_manager = get_follow_up_manager()
-            session_data = follow_up_manager.get_session_data(str(sid))
-            if session_data is not None:
-                session_data.setdefault("state", {})["user_details_known"] = True
-                try:
-                    follow_up_manager.set_session_data(str(sid), session_data)
-                    logger.info(f"[update_user_by_session] Session state updated: user_details_known=True for session_id={session_id}")
-                except Exception as session_ex:
-                    follow_up_manager.sessions[str(sid)] = session_data
-                    logger.warning(f"[update_user_by_session] Fallback session state update for session_id={session_id}: {session_ex}")
-        except Exception as e:
-            logger.warning(f"[update_user_by_session] Could not set user_details_known in session: {e}")
+        # Session state management removed - using optimized flow only
+        logger.info(f"[update_user_by_session] User details updated successfully for session_id={session_id}")
     except Exception as e:
         if conn:
             conn.rollback()
@@ -416,9 +409,7 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
         cursor.close()
         conn.close()
 
-async def send_message_stream(
-    req: SentMessage, follow_up_manager: FollowUpManager = Depends(get_follow_up_manager)
-):
+async def send_message_stream(req: SentMessage):
     logger.info(f"[send_message_stream] Called for session_id={getattr(req, 'session_id', None)}")
 
     # Extract required variables from req or context
@@ -432,14 +423,16 @@ async def send_message_stream(
     # --- Unified streaming logic: yield processing event once, then stream follow-up or final response ---
 
     async def stream_response():
+        # Only yield 'processing' once, from here (not from LLM)
         yield "data: " + json.dumps({"status": "processing", "message": "Preparing response..."}) + "\n\n"
         if session_id is None or not isinstance(session_id, str):
             logger.error("[send_message_stream] session_id is missing or not a string.")
             raise HTTPException(status_code=400, detail="session_id is required and must be a string")
 
-        # Save user message if present
+        # Prepare user message for later saving (defer to improve response time)
+        user_msg_to_save = None
         if req.query:
-            user_msg = MessageCreate(
+            user_msg_to_save = MessageCreate(
                 session_id=session_id,
                 content=req.query,
                 role="user",
@@ -448,64 +441,87 @@ async def send_message_stream(
                 follow_up_depth=0,
                 metadata={}
             )
-            try:
-                await save_message(user_msg)
-            except Exception as e:
-                logger.warning(f"Failed to save user message: {e}")
 
-        if not follow_up_manager.check_requirements(session_id):
-            logger.info(f"[send_message_stream] Requirements not met, streaming follow up.")
-            session_ended = False
-            form_triggered = False
-            # Buffer events to check for form_trigger
-            buffered_events = []
-            async for evt in build_chatbot_response(
-                session_id=session_id,
-                follow_up_manager=follow_up_manager,
-                conversation_history=conversation_history,
-                prompt_context=prompt_context,
-                mode="follow_up",
-            ):
-                buffered_events.append(evt)
-            # Iterate and yield, skipping last assistant chunk if next is form_trigger
-            for i, evt in enumerate(buffered_events):
-                assistant_content = None
-                if isinstance(evt, dict):
-                    status = evt.get("status", "unknown")
-                    chunk = evt.get("chunk", "")
-                    assistant_content = chunk
-                    if status == "end_chat":
-                        session_ended = True
-                    if status == "form_trigger":
-                        form_triggered = True
-                else:
-                    status = "unknown"
-                    chunk = str(evt)
-                    assistant_content = chunk
-                # If next event is form_trigger, skip saving and yielding this assistant chunk
-                if status == "chunk" and i + 1 < len(buffered_events):
-                    next_evt = buffered_events[i + 1]
-                    next_status = next_evt.get("status", "unknown") if isinstance(next_evt, dict) else "unknown"
-                    if next_status == "form_trigger":
-                        continue
-                # Persist assistant messages for regular chunks, form triggers, and end_chat
-                if assistant_content and status in ["chunk", "form_trigger", "end_chat"]:
-                    assistant_msg = MessageCreate(
-                        session_id=session_id,
-                        content=assistant_content,
-                        role="assistant",
-                        reply_to=None,
-                        follow_up_to=None,
-                        follow_up_depth=0,
-                        metadata={}
-                    )
-                    try:
-                        await save_message(assistant_msg)
-                    except Exception as e:
-                        logger.warning(f"Failed to save assistant message: {e}")
-                yield "data: " + json.dumps({"status": status, "chunk": chunk}) + "\n\n"
-            # If session ended, update is_active flag in DB
-            if session_ended:
+        # Save user message asynchronously to improve response time
+        import asyncio
+        async def save_user_message_async():
+            if user_msg_to_save:
+                try:
+                    await save_message(user_msg_to_save)
+                except Exception as e:
+                    logger.warning(f"Failed to save user message: {e}")
+        
+        # Start user message saving in background
+        if user_msg_to_save:
+            asyncio.create_task(save_user_message_async())
+
+        # Always use the optimized chatbot flow
+        logger.info(f"[send_message_stream] Using optimized chatbot flow.")
+        from app.core.services.chatbot_optimizer import OptimizedChatbot
+        chatbot = OptimizedChatbot()
+        query = req.query or ""
+        
+        # Use provided conversation history or get from database only if needed
+        if conversation_history:
+            chat_history = [(msg.get("role"), msg.get("content")) for msg in conversation_history if msg.get("role") in ["user", "assistant"]]
+            logger.info(f"[OPTIMIZED_FLOW] Using provided conversation history: {len(chat_history)} messages")
+        else:
+            try:
+                from uuid import UUID
+                session_uuid = UUID(session_id)
+                messages = await get_messages_for_session(session_uuid)
+                chat_history = [(msg.role, msg.content) for msg in messages if msg.role in ["user", "assistant"]]
+                logger.info(f"[OPTIMIZED_FLOW] Using conversation history from database: {len(chat_history)} messages")
+            except Exception as e:
+                logger.warning(f"Failed to load conversation history: {e}")
+                chat_history = []
+        
+        full_assistant_response = ""
+        session_ended = False
+
+        async for event in chatbot.get_detailed_response(query=query, chat_history=chat_history, session_id=session_id, stream=True):
+            # Track session ending
+            if isinstance(event, dict) and event.get("status") == "end_chat":
+                session_ended = True
+            # Build complete response from chunks only (not meta events)
+            if isinstance(event, dict) and event.get("status") == "chunk":
+                chunk_content = event.get("chunk", "")
+                if chunk_content:
+                    chunk_str = str(chunk_content) if not isinstance(chunk_content, str) else chunk_content
+                    full_assistant_response += chunk_str  # Preserve all characters including markdown formatting
+            elif not isinstance(event, dict):
+                # Handle non-dict events
+                full_assistant_response += str(event)
+            # Do NOT flatten or clean newlines; preserve markdown as-is
+            yield "data: " + json.dumps(event) + "\n\n"
+        
+        # After streaming is complete, save complete message and handle session ending
+        if full_assistant_response:
+            try:
+                # Debug markdown preservation in optimized flow
+                has_markdown = any(marker in full_assistant_response for marker in ["**", "*", "_", "#", "-", "`", "```"])
+                if has_markdown:
+                    logger.info(f"[OPTIMIZED_FLOW] Response contains markdown: {full_assistant_response[:200]}...")
+                
+                # Save complete message to database (only once)
+                assistant_msg = MessageCreate(
+                    session_id=session_id,
+                    content=full_assistant_response,
+                    role="assistant",
+                    reply_to=None,
+                    follow_up_to=None,
+                    follow_up_depth=0,
+                    metadata={}
+                )
+                await save_message(assistant_msg)
+                logger.info(f"[OPTIMIZED_FLOW] Saved complete response: {len(full_assistant_response)} chars")
+                        
+            except Exception as e:
+                logger.warning(f"Failed to save complete response: {e}")
+        
+        # Handle session ending asynchronously
+        if session_ended:
+            async def end_session_async():
                 try:
                     conn = get_db_conn()
                     cursor = conn.cursor()
@@ -518,37 +534,11 @@ async def send_message_stream(
                     conn.commit()
                     cursor.close()
                     conn.close()
-                    logger.info(f"[send_message_stream] Updated is_active to FALSE for ended session_id={session_id}")
+                    logger.info(f"[OPTIMIZED_FLOW] Updated is_active to FALSE for ended session_id={session_id}")
                 except Exception as e:
-                    logger.error(f"[send_message_stream] Failed to update is_active for ended session_id={session_id}: {e}")
-        else:
-            logger.info(f"[send_message_stream] Requirements met, streaming full response.")
-            from app.core.services.chatbot_optimizer import OptimizedChatbot
-            chatbot = OptimizedChatbot()
-            query = req.query or ""
-            chat_history = []
-            for msg in conversation_history:
-                if isinstance(msg, dict):
-                    chat_history.append((msg.get('role', ''), msg.get('content', '')))
-                elif isinstance(msg, (list, tuple)) and len(msg) == 2:
-                    chat_history.append(tuple(msg))
-            async for event in chatbot.get_detailed_response(query=query, chat_history=chat_history, session_id=session_id, stream=True):
-                assistant_content = event.get("chunk") if isinstance(event, dict) else str(event)
-                if assistant_content:
-                    assistant_msg = MessageCreate(
-                        session_id=session_id,
-                        content=assistant_content,
-                        role="assistant",
-                        reply_to=None,
-                        follow_up_to=None,
-                        follow_up_depth=0,
-                        metadata={}
-                    )
-                    try:
-                        await save_message(assistant_msg)
-                    except Exception as e:
-                        logger.warning(f"Failed to save assistant message: {e}")
-                yield "data: " + json.dumps(event) + "\n\n"
+                    logger.error(f"[OPTIMIZED_FLOW] Failed to update is_active for ended session_id={session_id}: {e}")
+            
+            asyncio.create_task(end_session_async())
 
     return StreamingResponse(stream_response(), media_type="text/event-stream", headers=SSE_HEADERS)
 
@@ -753,4 +743,10 @@ async def end_session_helper(session_id: str):
         if conn:
             conn.close()
             
-        
+
+
+async def fetch_follow_up_prompts(user_message:str)-> Any:
+    response = generate_llm_response(user_message)
+    if response is None:
+        raise HTTPException(status_code=500, detail="Error generating LLM response for follow-up prompts")
+    return response
