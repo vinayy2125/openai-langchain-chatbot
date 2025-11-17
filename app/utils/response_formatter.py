@@ -175,23 +175,25 @@ def format_response(
 
     if has_markdown:
         # Fix common token splits, but preserve all newlines
-        paragraph_block = re.sub(r"\*\s+\*", "**", resp_text)
-        paragraph_block = re.sub(r"_\s+_", "__", paragraph_block)
-        paragraph_block = re.sub(r"(`{1,3})\s+(`{1,3})", r"\1\2", paragraph_block)
+        # Only fix obvious token boundary issues - be very conservative
+        paragraph_block = re.sub(r"\* \*", "**", resp_text)  # Only single space
+        paragraph_block = re.sub(r"_ _", "__", paragraph_block)  # Only single space
+        paragraph_block = re.sub(r"(`{1,3}) (`{1,3})", r"\1\2", paragraph_block)  # Only single space
 
         # Fix markdown list formatting - ensure proper spacing and line breaks
         paragraph_block = re.sub(r"([-*])\s*\n\s*([-*])", r"\1\n\2", paragraph_block)
-        paragraph_block = re.sub(r"([-*])([^\s\*\-\n])", r"\1 \2", paragraph_block)
-        paragraph_block = re.sub(r"(#{1,6})([^\s#\n])", r"\1 \2", paragraph_block)
+        # More precise list marker regex - only at start of line to avoid breaking **bold**
+        paragraph_block = re.sub(r"^([-*])([^\s*\-\n])", r"\1 \2", paragraph_block, flags=re.MULTILINE)
+        paragraph_block = re.sub(r"(#{1,6})([^\s\n])", r"\1 \2", paragraph_block)
 
         # Ensure all double-escaped newlines are real newlines
         paragraph_block = paragraph_block.replace("\\n", "\n")
 
-        # Ensure proper line breaks before lists
-        paragraph_block = re.sub(r"([^\n])\n([-*]\s)", r"\1\n\n\2", paragraph_block)
+        # Ensure proper line breaks before lists - only at start of line
+        paragraph_block = re.sub(r"([^\n])\n(^[-*]\s)", r"\1\n\n\2", paragraph_block, flags=re.MULTILINE)
 
-        # Ensure proper line breaks after lists
-        paragraph_block = re.sub(r"([-*].*)\n([^-*\n\s])", r"\1\n\n\2", paragraph_block)
+        # Ensure proper line breaks after lists - only for actual list items at start of line
+        paragraph_block = re.sub(r"(^[*-].*)\n([a-zA-Z0-9])", r"\1\n\n\2", paragraph_block, flags=re.MULTILINE)
 
         # Enhance formatting based on content analysis
         paragraph_block = _enhance_formatting(paragraph_block, structure)
