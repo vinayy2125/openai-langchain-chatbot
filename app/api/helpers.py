@@ -175,7 +175,7 @@ async def update_user_by_session(session_id: str, user: UserCreate):
     try:
         conn = get_db_conn()
         cursor = conn.cursor()
-        logger.info(f"[update_user_by_session] DB connection established.")
+        logger.info("[update_user_by_session] DB connection established.")
 
         # Find the user for this session
         cursor.execute(
