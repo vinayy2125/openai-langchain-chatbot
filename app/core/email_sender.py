@@ -64,7 +64,7 @@ def send_closure_email(
         user_region = "unknown"
  
         try:
-            from app.api.helpers import get_db_conn
+            from app.db.base import get_db_conn
             conn = get_db_conn()
             cur = conn.cursor()
  
