@@ -75,7 +75,7 @@ def get_redis_context_chunks(
             except Exception:
                 continue
 
-    logger.info(f"[RedisContext] Semantic search query: {search_query}, top_n={top_n}")
+    # logger.info(f"[RedisContext] Semantic search query: {search_query}, top_n={top_n}")
 
     # Perform similarity search with enhanced query
     results = similarity_search(session_id, search_query, top_n=top_n)
@@ -106,14 +106,12 @@ def get_redis_context_chunks(
         normalized.append(text)
         seen_content.add(key)
 
-    if normalized:
-        logger.info(
-            f"[RedisContext] Selected {len(normalized)} relevant context chunks"
-        )
+    # if normalized:
+    #     logger.info(
+    #         f"[RedisContext] Selected {len(normalized)} relevant context chunks"
+    #     )
 
-    logger.info(
-        f"[RedisContext] Retrieved {len(normalized)} context items (top_n={top_n})"
-    )
+    # logger.info(f"[RedisContext] Retrieved {len(normalized)} context items (top_n={top_n})")
 
     if normalized:
         # Skip LLM summarization to avoid blocking - use raw chunks directly for faster response

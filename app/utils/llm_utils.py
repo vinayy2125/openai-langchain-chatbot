@@ -1,7 +1,6 @@
 from typing import Any, Dict, List, Optional, Union
 
 from app.utils.llm_client import llm
-from app.utils.prompts import SHARED_SYSTEM_PROMPT
 from app.logger import get_logger
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -16,7 +15,7 @@ FALLBACK_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"  # kept for 
 
 def _validate_and_build_messages(
     prompt: Union[str, List[Dict[str, Any]]],
-    system_prompt: str,
+    system_prompt: Optional[str] = None,
 ) -> Optional[List[Any]]:
     """
     Validate incoming prompt(s) and convert to langchain_core message objects.
@@ -52,7 +51,7 @@ def _validate_and_build_messages(
                 logger.error("Invalid role '%s' at index %d", role, idx)
                 return None
 
-        if not has_system:
+        if not has_system and system_prompt:
             messages.insert(0, SystemMessage(content=system_prompt))
         return messages
 
@@ -61,7 +60,11 @@ def _validate_and_build_messages(
     if not text:
         logger.warning("Empty prompt string provided")
         return None
-    return [SystemMessage(content=system_prompt), HumanMessage(content=text)]
+    
+    messages = [HumanMessage(content=text)]
+    if system_prompt:
+        messages.insert(0, SystemMessage(content=system_prompt))
+    return messages
 
 
 def _invoke_with_local_wrapper(messages: List[Any]) -> Any:
@@ -161,7 +164,7 @@ def generate_llm_response(
     Returns:
         stripped response text or None on error/empty response.
     """
-    system_prompt = system_prompt or SHARED_SYSTEM_PROMPT
+
 
     messages = _validate_and_build_messages(prompt, system_prompt)
     if messages is None:
