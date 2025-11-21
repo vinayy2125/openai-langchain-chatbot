@@ -40,7 +40,7 @@ def store_text(session_id: str, text: str) -> bool:
 def similarity_search(session_id: str, query: str, top_n: int = 4) -> list:
     query_embedding = vectorize_text(query)
     query_blob = np.array(query_embedding, dtype=np.float32).tobytes()
-    logger.info(f"Performing similarity search for session_id: {session_id} with query: {query}")
+    # logger.info(f"Performing similarity search for session_id: {session_id} with query: {query}")
     knn_query = f'*=>[KNN {top_n} @embedding $vec AS vector_score]'
     try:
         q = (
@@ -90,6 +90,7 @@ def similarity_search(session_id: str, query: str, top_n: int = 4) -> list:
             logger.debug(f"Skipping doc in similarity_search due to error: {e}")
 
     if formatted_results:
-        sample_types = [type(x).__name__ for x in formatted_results[:3]]
-        logger.info(f"[redis_vector_helper] similarity_search returning {len(formatted_results)} items (sample types: {sample_types})")
+        # sample_types = [type(x).__name__ for x in formatted_results[:3]]
+        # logger.info(f"[redis_vector_helper] similarity_search returning {len(formatted_results)} items (sample types: {sample_types})")
+        pass
     return formatted_results

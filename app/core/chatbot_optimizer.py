@@ -9,6 +9,10 @@ from app.utils.redis_context import get_redis_context_chunks
 
 # format_response is now imported only when needed (async version with URL validation)
 from app.utils.prompts import final_response_prompt
+from app.utils.response_formatter import format_response, _normalize_url
+import asyncio
+import functools
+from app.api.models import MessageCreate
 
 logger = get_logger("chatbot")
 
@@ -150,11 +154,11 @@ class OptimizedChatbot:
         - model: model name to instantiate a default ChatOpenAI if llm is not provided.
         """
         self.model = model
-        # Initialize a ContextOptimizer to centralize encoding and limits
-        self.context_optimizer = ContextOptimizer(model)
-        self.encoding = self.context_optimizer.encoding
-        self.model_limits = self.context_optimizer.model_limits
-        self.context_limit = self.context_optimizer.context_limit
+        # ContextOptimizer is unused in the critical path, skipping initialization to save overhead
+        # self.context_optimizer = ContextOptimizer(model)
+        # self.encoding = self.context_optimizer.encoding
+        # self.model_limits = self.context_optimizer.model_limits
+        # self.context_limit = self.context_optimizer.context_limit
 
         self.query_llm = llm if llm is not None else ChatOpenAI(model=model)
 
@@ -199,8 +203,20 @@ class OptimizedChatbot:
                 top_n_value = _calculate_dynamic_top_n(
                     query, conversation_history_for_redis
                 )
-                context_chunks = get_redis_context_chunks(
-                    session_id, query, conversation_history_for_redis, top_n=top_n_value
+                
+                # Offload blocking Redis/Embedding call to executor
+                import asyncio
+                import functools
+                loop = asyncio.get_event_loop()
+                context_chunks = await loop.run_in_executor(
+                    None, 
+                    functools.partial(
+                        get_redis_context_chunks,
+                        session_id, 
+                        query, 
+                        conversation_history_for_redis, 
+                        top_n=top_n_value
+                    )
                 )
             except Exception as e:
                 logger.warning(
@@ -247,19 +263,26 @@ class OptimizedChatbot:
             # 1. Yield processing chunk (handled by outer function, do not yield here)
             # yield {"status": "processing", "message": "Preparing response..."}
 
-            # 2. Get user details and generate response chunk
-            user_details_known = get_user_details_known_from_db(session_id)
-            logger.info(
-                f"[Chatbot] user_details_known (DB) = {user_details_known} for session {session_id}"
-            )
-
-            # Get user details for context mapping
-            from app.api.helpers import get_user_details_from_db
-
+            # 2. Get user details once (Cache for this request)
+            from app.api.helpers import get_user_details_from_db, get_user_details_known_from_db
+            
+            # Fetch both in parallel if possible, or just sequentially but ONCE
             user_details = get_user_details_from_db(session_id)
-            logger.info(
-                f"[Chatbot] User details retrieved: {list(user_details.keys()) if user_details else 'None'} for session {session_id}"
-            )
+            user_details_known = user_details.get("user_details_known", False)
+            
+            # If get_user_details_from_db doesn't return the flag (it seems it does based on previous code), 
+            # we might need to check how it was implemented. 
+            # Looking at helpers.py, get_user_details_from_db returns a dict, and it includes "user_details_known" if true.
+            # However, get_user_details_known_from_db is a separate call that returns a boolean.
+            # Let's stick to the safe bet: use the specific function if the dict doesn't have it, 
+            # OR just trust the specific function. 
+            # Actually, let's just call both ONCE.
+            
+            if not user_details:
+                 # Fallback if user_details is empty but we need the flag
+                 user_details_known = get_user_details_known_from_db(session_id)
+            
+            logger.info(f"[Chatbot] Context: user_details_known={user_details_known}, details_found={bool(user_details)}")
 
             # Handle simple affirmative "yes" to a choice question
             if (
@@ -274,8 +297,8 @@ class OptimizedChatbot:
                 yield {"status": "chunk", "chunk": clarification_response}
                 # Save this clarification to history
                 try:
-                    import asyncio
-                    from app.api.models import MessageCreate
+                    # import asyncio
+                    # from app.api.models import MessageCreate
                     from app.api.helpers import save_message
 
                     assistant_msg = MessageCreate(
@@ -309,12 +332,12 @@ class OptimizedChatbot:
 
             # Step 3: Generate response from LLM
             try:
-                import asyncio
+                # import asyncio
 
                 if asyncio.iscoroutinefunction(generate_llm_response):
                     final_text = await generate_llm_response(prompt)
                 else:
-                    import functools
+                    # import functools
 
                     loop = asyncio.get_event_loop()
                     final_text = await loop.run_in_executor(
@@ -416,13 +439,13 @@ class OptimizedChatbot:
                 )
 
             # Step 6: Enhanced Funnel stage handling (form trigger) BEFORE yielding assistant response
-            user_details_known_db = get_user_details_known_from_db(session_id)
+            # Use cached user_details_known
             logger.info(
-                f"[FORM_DEBUG] session_id={session_id}, funnel_stage='{funnel_stage}', message_count={count}, user_details_known={user_details_known_db}"
+                f"[FormLogic] Stage='{funnel_stage}', Count={count}, Known={user_details_known}"
             )
             trigger_form = False
             trigger_reason = ""
-            if not user_details_known_db:
+            if not user_details_known:
                 if funnel_stage == "action":
                     trigger_form = True
                     trigger_reason = "action_stage"
@@ -452,7 +475,7 @@ class OptimizedChatbot:
             # Only yield the assistant response if we are NOT about to trigger a form
             if not trigger_form:
                 # Use smart formatter - format immediately, validate URLs in background
-                from app.utils.response_formatter import format_response
+                # from app.utils.response_formatter import format_response
 
                 # Format response immediately (no blocking URL validation)
                 formatted = format_response(cleaned, query, None)
@@ -460,25 +483,12 @@ class OptimizedChatbot:
 
                 # Quick URL normalization (no network calls) - fix spaces in URLs
                 # Skip blocking URL validation - normalize only (fixes spaces like "real- estate")
-                from app.utils.response_formatter import _normalize_url
+                # from app.utils.response_formatter import _normalize_url
 
-                def normalize_urls_in_text(text):
-                    url_pattern = r"\[([^\]]+)\]\(([^)]+)\)|(https?://[^\s\)]+)"
-
-                    def normalize_match(match):
-                        if match.group(2):  # Markdown link
-                            normalized = _normalize_url(match.group(2))
-                            return f"[{match.group(1)}]({normalized})"
-                        elif match.group(3):  # Plain URL
-                            return _normalize_url(match.group(3))
-                        return match.group(0)
-
-                    return re.sub(url_pattern, normalize_match, text)
-
-                formatted = normalize_urls_in_text(formatted)
+                formatted = self._normalize_urls_in_text(formatted)
 
                 # Remove bold follow-up questions if user_details_known=True
-                if user_details_known_db:
+                if user_details_known:
                     # Log the response before modification for debugging
                     logger.info(f"[MARKDOWN_DEBUG] Response before bold removal: {formatted[-200:]}")
                     
@@ -518,7 +528,7 @@ class OptimizedChatbot:
                             "[ANTI-REPETITION] New response is too similar to last assistant response. Consider regenerating or expanding."
                         )
                         # Only add clarifying question if user_details_known=False
-                        if not user_details_known_db:
+                        if not user_details_known:
                             formatted += "\n\n(Can you share more details or specify what you'd like to know next?)"
 
                 if has_markdown_before:
@@ -539,7 +549,7 @@ class OptimizedChatbot:
                     bold_after = "**" in formatted
                     if bold_before and not bold_after:
                         logger.warning(
-                            f"[MARKDOWN_WARNING] Bold markdown (**) was removed! user_details_known_db={user_details_known_db}"
+                            f"[MARKDOWN_WARNING] Bold markdown (**) was removed! known={user_details_known}"
                         )
                     elif bold_before and bold_after:
                         # Check for spacing issues in bold markdown
@@ -564,9 +574,9 @@ class OptimizedChatbot:
                         }
 
             # Step 7: Emit meta update if present, but skip if form_trigger is about to be yielded
-            user_details_known_db = get_user_details_known_from_db(session_id)
+            # Use cached user_details_known
             meta_chunk = {
-                "user_details_known": user_details_known_db,
+                "user_details_known": user_details_known,
                 **({"user_network_id": user_network_id} if user_network_id else {}),
             }
             if not trigger_form and meta_chunk:
@@ -580,7 +590,7 @@ class OptimizedChatbot:
                 yield {"status": "form_trigger", "chunk": ""}
             else:
                 logger.info(
-                    f"[Chatbot] No form trigger. funnel_stage={funnel_stage}, message_count={count}, user_details_known={user_details_known_db}"
+                    f"[Chatbot] No form trigger. Stage={funnel_stage}"
                 )
 
         except Exception as e:
@@ -666,3 +676,17 @@ class OptimizedChatbot:
             formatted.append(f"=== END CONVERSATION FLOW ===")
 
         return "\n".join(formatted)
+
+    def _normalize_urls_in_text(self, text: str) -> str:
+        """Helper to normalize URLs in text without blocking validation."""
+        url_pattern = r"\[([^\]]+)\]\(([^)]+)\)|(https?://[^\s\)]+)"
+
+        def normalize_match(match):
+            if match.group(2):  # Markdown link
+                normalized = _normalize_url(match.group(2))
+                return f"[{match.group(1)}]({normalized})"
+            elif match.group(3):  # Plain URL
+                return _normalize_url(match.group(3))
+            return match.group(0)
+
+        return re.sub(url_pattern, normalize_match, text)
