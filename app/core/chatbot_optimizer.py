@@ -209,14 +209,13 @@ class OptimizedChatbot:
                 import functools
                 loop = asyncio.get_event_loop()
                 context_chunks = await loop.run_in_executor(
-                    None, 
+                    None,
                     functools.partial(
                         get_redis_context_chunks,
-                        session_id, 
-                        query, 
-                        conversation_history_for_redis, 
-                        top_n=top_n_value
-                    )
+                        session_id,
+                        query,
+                        top_n=top_n_value,
+                    ),
                 )
             except Exception as e:
                 logger.warning(
@@ -225,7 +224,13 @@ class OptimizedChatbot:
                 context_chunks = []
 
             context = "\n\n---\n\n".join(map(str, context_chunks or []))
-            history = self._format_history(chat_history)
+            # Build a concise LLM-ready context from history (summary + latest user message)
+            try:
+                from app.utils.chat_state import build_llm_context_from_history
+
+                history = build_llm_context_from_history(session_id, query) or self._format_history(chat_history)
+            except Exception:
+                history = self._format_history(chat_history)
             count = len(chat_history)
             logger.info(
                 f"[Chatbot] Enhanced Conversation Summary generated ({len(history)} chars) for {count} messages"
