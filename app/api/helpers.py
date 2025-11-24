@@ -1,23 +1,22 @@
 import re
 import os
 import json
-import psycopg2
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Any as AnyType
 from fastapi.responses import StreamingResponse
 from uuid import UUID
-from app.core.utils import generate_llm_response
+from app.utils.llm_utils import generate_llm_response
 from app.logger import get_logger
 from fastapi import HTTPException, Depends
-from app.api.v1.models import (
+from app.api.models import (
     MessageCreate,
     Message,
     SentMessage,
 )
-from app.api.v1.models import UserCreate
-from app.core.services.email_sender import send_closure_email
+from app.api.models import UserCreate
+from app.core.email_sender import send_closure_email
 from fastapi import HTTPException
 from datetime import datetime
-from app.api.v1.models import PromptType
+from app.api.models import PromptType
 from app.db.base import get_db_conn
 
 
@@ -31,18 +30,14 @@ SSE_HEADERS = {
 
 # --- Form Trigger Logic (no longer used, logic moved to prompt) ---
 
+
 def get_user_details_known_from_db(session_id: str) -> bool:
     """Fetch user_details_known from the database for the user associated with the session."""
-    logger.info(f"[get_user_details_known_from_db] Fetching user_details_known for session_id={session_id}")
+    logger.info(
+        f"[get_user_details_known_from_db] Fetching user_details_known for session_id={session_id}"
+    )
     try:
-        conn = psycopg2.connect(
-            dbname=os.getenv("DB_NAME"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT"),
-            options="-c client_encoding=UTF8",
-        )
+        conn = get_db_conn()
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -50,36 +45,38 @@ def get_user_details_known_from_db(session_id: str) -> bool:
             JOIN sessions s ON u.id = s.user_id
             WHERE s.session_id = %s
             """,
-            (str(session_id),)
+            (str(session_id),),
         )
         row = cursor.fetchone()
         cursor.close()
         conn.close()
         logger.debug(f"[get_user_details_known_from_db] DB row: {row}")
         if row and row[0]:
-            logger.info(f"[get_user_details_known_from_db] user_details_known=True for session_id={session_id}")
+            logger.info(
+                f"[get_user_details_known_from_db] user_details_known=True for session_id={session_id}"
+            )
             return bool(row[0])
     except Exception as e:
-        logger.warning(f"[get_user_details_known_from_db] DB error for session {session_id}: {e}")
-    logger.info(f"[get_user_details_known_from_db] user_details_known=False for session_id={session_id}")
+        logger.warning(
+            f"[get_user_details_known_from_db] DB error for session {session_id}: {e}"
+        )
+    logger.info(
+        f"[get_user_details_known_from_db] user_details_known=False for session_id={session_id}"
+    )
     return False
+
 
 
 def get_user_details_from_db(session_id: str) -> Dict[str, Any]:
     """Fetch user details (username, email, mobile) from the database for the user associated with the session.
-    
+
     Returns a dictionary with user details if available, empty dict otherwise.
     """
-    logger.info(f"[get_user_details_from_db] Fetching user details for session_id={session_id}")
+    logger.info(
+        f"[get_user_details_from_db] Fetching user details for session_id={session_id}"
+    )
     try:
-        conn = psycopg2.connect(
-            dbname=os.getenv("DB_NAME"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT"),
-            options="-c client_encoding=UTF8",
-        )
+        conn = get_db_conn()
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -88,12 +85,12 @@ def get_user_details_from_db(session_id: str) -> Dict[str, Any]:
             JOIN sessions s ON u.id = s.user_id
             WHERE s.session_id = %s
             """,
-            (str(session_id),)
+            (str(session_id),),
         )
         row = cursor.fetchone()
         cursor.close()
         conn.close()
-        
+
         if row:
             username, email, mobile, user_details_known = row
             user_details = {}
@@ -105,18 +102,27 @@ def get_user_details_from_db(session_id: str) -> Dict[str, Any]:
                 user_details["mobile"] = mobile
             if user_details_known:
                 user_details["user_details_known"] = True
-            
+
             if user_details:
-                logger.info(f"[get_user_details_from_db] Found user details for session_id={session_id}: {list(user_details.keys())}")
+                logger.info(
+                    f"[get_user_details_from_db] Found user details for session_id={session_id}: {list(user_details.keys())}"
+                )
                 return user_details
     except Exception as e:
-        logger.warning(f"[get_user_details_from_db] DB error for session {session_id}: {e}")
-    
-    logger.info(f"[get_user_details_from_db] No user details found for session_id={session_id}")
+        logger.warning(
+            f"[get_user_details_from_db] DB error for session {session_id}: {e}"
+        )
+
+    logger.info(
+        f"[get_user_details_from_db] No user details found for session_id={session_id}"
+    )
     return {}
 
+
 def mark_form_shown(session_data: dict):
-    logger.info(f"[mark_form_shown] Marking form_shown=True for session_id={session_data.get('session_id')}")
+    logger.info(
+        f"[mark_form_shown] Marking form_shown=True for session_id={session_data.get('session_id')}"
+    )
     session_data["form_shown"] = True
     return session_data
 
@@ -128,7 +134,7 @@ def is_valid_ip(ip_str: str) -> bool:
         logger.debug("[is_valid_ip] IP string is empty.")
         return False
     ip_str = str(ip_str).strip()
-    ipv4_re = r"^((25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(25[0-5]|2[0-4]\d|[01]?\d?\d)$"
+    ipv4_re = r"^((25[0-5]|2[0-4]\\d|[01]?\\d?\\d)\\.){3}(25[0-5]|2[0-4]\\d|[01]?\\d?\\d)$"
     ipv6_re = r"^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$"
     try:
         if re.match(ipv4_re, ip_str):
@@ -144,18 +150,6 @@ def is_valid_ip(ip_str: str) -> bool:
     return False
 
 
-# Database connection helper
-def get_db_conn():
-    return psycopg2.connect(
-        dbname=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT"),
-        options="-c client_encoding=UTF8",
-    )
-
-
 async def update_user_by_session(session_id: str, user: UserCreate):
     """Update a user's fields using the session_id.
 
@@ -166,10 +160,14 @@ async def update_user_by_session(session_id: str, user: UserCreate):
     Returns the session_id on success.
     """
     try:
-        logger.info(f"[update_user_by_session] Called with session_id={session_id}, payload={user.dict()}")
+        logger.info(
+            f"[update_user_by_session] Called with session_id={session_id}, payload={user.dict()}"
+        )
         sid = UUID(str(session_id))
     except Exception as ex:
-        logger.error(f"[update_user_by_session] Invalid session_id format: {session_id} | Exception: {ex}")
+        logger.error(
+            f"[update_user_by_session] Invalid session_id format: {session_id} | Exception: {ex}"
+        )
         raise HTTPException(status_code=422, detail="Invalid session_id format")
 
     conn = None
@@ -177,7 +175,7 @@ async def update_user_by_session(session_id: str, user: UserCreate):
     try:
         conn = get_db_conn()
         cursor = conn.cursor()
-        logger.info(f"[update_user_by_session] DB connection established.")
+        logger.info("[update_user_by_session] DB connection established.")
 
         # Find the user for this session
         cursor.execute(
@@ -188,11 +186,15 @@ async def update_user_by_session(session_id: str, user: UserCreate):
         )
         row = cursor.fetchone()
         if not row or not row[0]:
-            logger.error(f"[update_user_by_session] Session not found for session_id={session_id}")
+            logger.error(
+                f"[update_user_by_session] Session not found for session_id={session_id}"
+            )
             raise HTTPException(status_code=404, detail="Session not found")
 
         user_id = row[0]
-        logger.info(f"[update_user_by_session] Found user_id={user_id} for session_id={session_id}")
+        logger.info(
+            f"[update_user_by_session] Found user_id={user_id} for session_id={session_id}"
+        )
 
         # Update username, email, mobile, and user_details_known in users table
         allowed_fields = ["username", "email", "mobile", "user_details_known"]
@@ -207,8 +209,12 @@ async def update_user_by_session(session_id: str, user: UserCreate):
                 params.append(val)
 
         if not set_clauses:
-            logger.error(f"[update_user_by_session] No user fields provided to update for user_id={user_id}")
-            raise HTTPException(status_code=400, detail="No user fields provided to update")
+            logger.error(
+                f"[update_user_by_session] No user fields provided to update for user_id={user_id}"
+            )
+            raise HTTPException(
+                status_code=400, detail="No user fields provided to update"
+            )
 
         set_sql = ",\n                ".join(set_clauses)
         sql = f"""
@@ -224,19 +230,27 @@ async def update_user_by_session(session_id: str, user: UserCreate):
         cursor.execute(sql, tuple(params))
         updated = cursor.fetchone()
         if not updated or not updated[0]:
-            logger.error(f"[update_user_by_session] User not found for user_id={user_id}, rolling back.")
+            logger.error(
+                f"[update_user_by_session] User not found for user_id={user_id}, rolling back."
+            )
             conn.rollback()
             raise HTTPException(status_code=404, detail="User not found for session")
         else:
             conn.commit()
-            logger.info(f"[update_user_by_session] User updated successfully for user_id={user_id}")
+            logger.info(
+                f"[update_user_by_session] User updated successfully for user_id={user_id}"
+            )
 
         # Session state management removed - using optimized flow only
-        logger.info(f"[update_user_by_session] User details updated successfully for session_id={session_id}")
+        logger.info(
+            f"[update_user_by_session] User details updated successfully for session_id={session_id}"
+        )
     except Exception as e:
         if conn:
             conn.rollback()
-        logger.error(f"[update_user_by_session] Error updating user by session {session_id}: {str(e)}")
+        logger.error(
+            f"[update_user_by_session] Error updating user by session {session_id}: {str(e)}"
+        )
         raise HTTPException(status_code=500, detail="Error updating user")
     finally:
         if cursor:
@@ -297,6 +311,7 @@ async def initialize_session_with_prompt(
         cursor.close()
         conn.close()
 
+
 async def save_message(message_data: MessageCreate) -> Message:
     """Save a message to the database with proper relationships and metadata."""
     conn = get_db_conn()
@@ -341,7 +356,9 @@ async def save_message(message_data: MessageCreate) -> Message:
         message_row = cursor.fetchone()
         conn.commit()
         if not message_row:
-            raise HTTPException(status_code=500, detail="Failed to save message to database")
+            raise HTTPException(
+                status_code=500, detail="Failed to save message to database"
+            )
         return Message(
             id=message_row[0],
             session_id=message_row[1],
@@ -369,45 +386,134 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
     try:
         cursor.execute(
             """
-            SELECT 
-                m.id,
-                m.session_id,
-                m.content,
-                m.role,
-                m.reply_to,
-                m.follow_up_to,
-                m.follow_up_depth,
-                m.metadata,
-                m.created_at,
-                m.updated_at
-            FROM messages m
-            WHERE m.session_id = %s
-            ORDER BY m.created_at ASC
-        """,
-            (str(session_id),),
+            SELECT id, session_id, content, role, reply_to, follow_up_to, 
+                   follow_up_depth, metadata, created_at, updated_at
+            FROM messages 
+            WHERE session_id = %s 
+            ORDER BY created_at ASC
+            """,
+            (str(session_id),)
         )
-
-        messages: List[Message] = []
+        
         rows = cursor.fetchall()
+        messages = []
+        
         for row in rows:
             message = Message(
-                id=row[0],
-                session_id=row[1],
+                id=str(row[0]),
+                session_id=str(row[1]),
                 content=row[2],
                 role=row[3],
-                reply_to=row[4],
-                follow_up_to=row[5],
+                reply_to=str(row[4]) if row[4] else None,
+                follow_up_to=str(row[5]) if row[5] else None,
                 follow_up_depth=row[6],
-                metadata=json.loads(row[7]) if row[7] else {},
+                metadata=row[7] or {},
                 created_at=row[8],
-                updated_at=row[9],
+                updated_at=row[9]
             )
             messages.append(message)
-
+        
         return messages
+        
     finally:
         cursor.close()
         conn.close()
+
+
+async def fetch_root_prompts():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+
+        greeting_text = "Hello! I'm **DITS AI** 👋 — your smart assistant from Ditstek Innovations.\n\n**What brings you here today?**"
+        bottom_hint_text = "**Feel free to type if you're looking for something else!**"
+        desired_order = [
+            "See our Work",
+            "Start a Project",
+            "Talk to DITS team",
+            "Explore DITS Services",
+        ]
+        all_prompt_texts = [greeting_text] + desired_order + [bottom_hint_text]
+
+        cursor.execute(
+            """
+            SELECT prompt_text FROM prompts WHERE prompt_text = ANY(%s)
+            """,
+            (all_prompt_texts,)
+        )
+        existing = set(row[0] for row in cursor.fetchall())
+
+        now = datetime.utcnow()
+        for idx, text in enumerate(all_prompt_texts, start=1):
+            if text not in existing:
+                cursor.execute(
+                    """
+                    INSERT INTO prompts (prompt_text, response_text, display_order, type, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (text, "", idx, "ROOT", now, now)
+                )
+        conn.commit()
+
+        cursor.execute(
+            """
+            SELECT id::text, prompt_text, response_text, display_order, type, created_at, updated_at
+            FROM prompts
+            WHERE prompt_text = ANY(%s)
+            ORDER BY display_order ASC
+            """,
+            (all_prompt_texts,)
+        )
+        rows = cursor.fetchall()
+        greeting = None
+        desired_order_prompts = []
+        hint = None
+        for row in rows:
+            pid, prompt_text, response_text, display_order, ptype, created_at, updated_at = row
+            try:
+                prompt_type_val = PromptType[ptype] if ptype in PromptType.__members__ else PromptType.ROOT
+            except Exception:
+                prompt_type_val = PromptType.ROOT
+            prompt_obj = {
+                "id": str(pid),
+                "prompt_text": prompt_text,
+                "response_text": response_text or "",
+                "display_order": display_order,
+                "type": str(prompt_type_val),
+                "created_at": created_at,
+                "updated_at": updated_at
+            }
+            if prompt_text == greeting_text:
+                greeting = prompt_obj
+            elif prompt_text == bottom_hint_text:
+                hint = prompt_obj
+            elif prompt_text in desired_order:
+                desired_order_prompts.append(prompt_obj)
+
+        # Sort desired_order_prompts by the order in desired_order
+        desired_order_prompts_sorted = []
+        for text in desired_order:
+            for prompt in desired_order_prompts:
+                if prompt["prompt_text"] == text:
+                    desired_order_prompts_sorted.append(prompt)
+                    break
+
+        return {
+            "greeting_text": greeting["prompt_text"] if greeting else None,
+            "root_prompts": desired_order_prompts_sorted,
+            "bottom_hint_text": hint["prompt_text"] if hint else None
+        }
+    except Exception as e:
+        logger.error(f"Error fetching root prompts: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching prompts: {str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
 
 async def send_message_stream(req: SentMessage):
     logger.info(f"[send_message_stream] Called for session_id={getattr(req, 'session_id', None)}")
@@ -456,8 +562,8 @@ async def send_message_stream(req: SentMessage):
             asyncio.create_task(save_user_message_async())
 
         # Always use the optimized chatbot flow
-        logger.info(f"[send_message_stream] Using optimized chatbot flow.")
-        from app.core.services.chatbot_optimizer import OptimizedChatbot
+        logger.info("[send_message_stream] Using optimized chatbot flow.")
+        from app.core.chatbot_optimizer import OptimizedChatbot
         chatbot = OptimizedChatbot()
         query = req.query or ""
         
@@ -543,100 +649,6 @@ async def send_message_stream(req: SentMessage):
     return StreamingResponse(stream_response(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
-async def fetch_root_prompts():
-    conn = None
-    cursor = None
-    try:
-        conn = get_db_conn()
-        cursor = conn.cursor()
-
-        greeting_text = "Hello! I’m **Dits AI** 👋 — your smart assistant from Ditstek Innovations.\n\n**What brings you here today?**"
-        bottom_hint_text = "**Feel free to type if you’re looking for something else!**"
-        desired_order = [
-            "See our Work",
-            "Start a Project",
-            "Talk to Dits team",
-            "Explore Dits Services",
-        ]
-        all_prompt_texts = [greeting_text] + desired_order + [bottom_hint_text]
-
-        cursor.execute(
-            """
-            SELECT prompt_text FROM prompts WHERE prompt_text = ANY(%s)
-            """,
-            (all_prompt_texts,)
-        )
-        existing = set(row[0] for row in cursor.fetchall())
-
-        now = datetime.utcnow()
-        for idx, text in enumerate(all_prompt_texts, start=1):
-            if text not in existing:
-                cursor.execute(
-                    """
-                    INSERT INTO prompts (prompt_text, response_text, display_order, type, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    """,
-                    (text, "", idx, "ROOT", now, now)
-                )
-        conn.commit()
-
-        cursor.execute(
-            """
-            SELECT id::text, prompt_text, response_text, display_order, type, created_at, updated_at
-            FROM prompts
-            WHERE prompt_text = ANY(%s)
-            ORDER BY display_order ASC
-            """,
-            (all_prompt_texts,)
-        )
-        rows = cursor.fetchall()
-        greeting = None
-        desired_order_prompts = []
-        hint = None
-        for row in rows:
-            pid, prompt_text, response_text, display_order, ptype, created_at, updated_at = row
-            try:
-                prompt_type_val = PromptType[ptype] if ptype in PromptType.__members__ else PromptType.ROOT
-            except Exception:
-                prompt_type_val = PromptType.ROOT
-            prompt_obj = {
-                "id": str(pid),
-                "prompt_text": prompt_text,
-                "response_text": response_text or "",
-                "display_order": display_order,
-                "type": str(prompt_type_val),
-                "created_at": created_at,
-                "updated_at": updated_at
-            }
-            if prompt_text == greeting_text:
-                greeting = prompt_obj
-            elif prompt_text == bottom_hint_text:
-                hint = prompt_obj
-            elif prompt_text in desired_order:
-                desired_order_prompts.append(prompt_obj)
-
-        # Sort desired_order_prompts by the order in desired_order
-        desired_order_prompts_sorted = []
-        for text in desired_order:
-            for prompt in desired_order_prompts:
-                if prompt["prompt_text"] == text:
-                    desired_order_prompts_sorted.append(prompt)
-                    break
-
-        return {
-            "greeting_text": greeting["prompt_text"] if greeting else None,
-            "root_prompts": desired_order_prompts_sorted,
-            "bottom_hint_text": hint["prompt_text"] if hint else None
-        }
-    except Exception as e:
-        logger.error(f"Error fetching root prompts: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching prompts: {str(e)}")
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
 def delete_last_user_message(session_id: str):
     """Delete the last user message for a session from the database."""
     conn = get_db_conn()
@@ -668,6 +680,7 @@ def delete_last_user_message(session_id: str):
         cursor.close()
         conn.close()
         
+
 async def end_session_helper(session_id: str):
     """
     End a session and trigger closure email in the background ONLY IF:
@@ -744,8 +757,7 @@ async def end_session_helper(session_id: str):
             conn.close()
             
 
-
-async def fetch_follow_up_prompts(user_message:str)-> Any:
+async def fetch_follow_up_prompts(user_message: str):
     response = generate_llm_response(user_message)
     if response is None:
         raise HTTPException(status_code=500, detail="Error generating LLM response for follow-up prompts")

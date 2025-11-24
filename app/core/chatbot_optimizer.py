@@ -4,11 +4,11 @@ import tiktoken
 from functools import lru_cache
 from langchain_openai import ChatOpenAI
 from app.logger import get_logger
-from app.core.llm_utils import generate_llm_response
-from app.core.redis_context import get_redis_context_chunks
+from app.utils.llm_utils import generate_llm_response
+from app.utils.redis_context import get_redis_context_chunks
 
 # format_response is now imported only when needed (async version with URL validation)
-from app.core.prompts import final_response_prompt
+from app.utils.prompts import final_response_prompt
 
 logger = get_logger("chatbot")
 
@@ -161,7 +161,7 @@ class OptimizedChatbot:
     async def get_detailed_response(
         self, query: str, chat_history, session_id: str, stream: bool = True
     ):
-        from app.api.v1.helpers import (
+        from app.api.helpers import (
             get_user_details_known_from_db,
         )  # Do Not Move Outside Function
 
@@ -254,7 +254,7 @@ class OptimizedChatbot:
             )
 
             # Get user details for context mapping
-            from app.api.v1.helpers import get_user_details_from_db
+            from app.api.helpers import get_user_details_from_db
 
             user_details = get_user_details_from_db(session_id)
             logger.info(
@@ -275,8 +275,8 @@ class OptimizedChatbot:
                 # Save this clarification to history
                 try:
                     import asyncio
-                    from app.api.v1.models import MessageCreate
-                    from app.api.v1.helpers import save_message
+                    from app.api.models import MessageCreate
+                    from app.api.helpers import save_message
 
                     assistant_msg = MessageCreate(
                         session_id=session_id,
@@ -452,16 +452,15 @@ class OptimizedChatbot:
             # Only yield the assistant response if we are NOT about to trigger a form
             if not trigger_form:
                 # Use smart formatter - format immediately, validate URLs in background
-                from app.core.response_formatter import format_response
+                from app.utils.response_formatter import format_response
 
                 # Format response immediately (no blocking URL validation)
                 formatted = format_response(cleaned, query, None)
-                if isinstance(formatted, str):
-                    formatted = formatted.replace("\\n", "\n")
+                # Note: format_response already handles \\n replacement internally
 
                 # Quick URL normalization (no network calls) - fix spaces in URLs
                 # Skip blocking URL validation - normalize only (fixes spaces like "real- estate")
-                from app.core.response_formatter import _normalize_url
+                from app.utils.response_formatter import _normalize_url
 
                 def normalize_urls_in_text(text):
                     url_pattern = r"\[([^\]]+)\]\(([^)]+)\)|(https?://[^\s\)]+)"
@@ -480,28 +479,34 @@ class OptimizedChatbot:
 
                 # Remove bold follow-up questions if user_details_known=True
                 if user_details_known_db:
-                    # Remove bold questions at the end of the response
-                    # Pattern: **question text?** or **question text** at the end
-                    # Remove bold questions at the end (after last paragraph)
+                    # Log the response before modification for debugging
+                    logger.info(f"[MARKDOWN_DEBUG] Response before bold removal: {formatted[-200:]}")
+                    
+                    # More precise patterns to only target follow-up questions at the very end
+                    # Pattern 1: Bold question starting a new paragraph at the end
                     formatted = re.sub(
-                        r"\n\n\*\*[^*]+\?\*\*$",  # Bold question ending with ?
+                        r"\n\n\*\*[^*]*\?[^*]*\*\*\s*$",  # Bold question with ? in new paragraph at end
                         "",
                         formatted,
-                        flags=re.MULTILINE,
+                        flags=re.MULTILINE | re.DOTALL,
                     )
+                    # Pattern 2: Bold question on its own line at the end (no preceding paragraph)
                     formatted = re.sub(
-                        r"\n\n\*\*[^*]+\*\*$",  # Bold statement at the end
+                        r"\n\*\*[^*]*\?[^*]*\*\*\s*$",  # Bold question with ? on new line at end
                         "",
                         formatted,
-                        flags=re.MULTILINE,
+                        flags=re.MULTILINE | re.DOTALL,
                     )
-                    # Also remove if it's the last line without preceding newline
+                    # Pattern 3: Very specific - only remove if it looks like a follow-up question
+                    # (contains question words like "What", "How", "Would", etc.)
                     formatted = re.sub(
-                        r"\n\*\*[^*]+\?\*\*$",  # Bold question on its own line
+                        r"\n\n?\*\*(What|How|Would|Could|Can|Do|Are|Is|Will)[^*]*\?[^*]*\*\*\s*$",  # Question word patterns
                         "",
                         formatted,
-                        flags=re.MULTILINE,
+                        flags=re.MULTILINE | re.DOTALL | re.IGNORECASE,
                     )
+                    
+                    logger.info(f"[MARKDOWN_DEBUG] Response after bold removal: {formatted[-200:]}")
                     logger.info(
                         "[Chatbot] Removed bold follow-up question for user_details_known=True"
                     )
@@ -526,8 +531,22 @@ class OptimizedChatbot:
                     )
                     if not has_markdown_after:
                         logger.warning(
-                            f"[MARKDOWN_WARNING] Markdown lost during formatting!"
+                            "[MARKDOWN_WARNING] Markdown lost during formatting!"
                         )
+                    
+                    # Additional debug for bold markdown specifically
+                    bold_before = "**" in cleaned
+                    bold_after = "**" in formatted
+                    if bold_before and not bold_after:
+                        logger.warning(
+                            f"[MARKDOWN_WARNING] Bold markdown (**) was removed! user_details_known_db={user_details_known_db}"
+                        )
+                    elif bold_before and bold_after:
+                        # Check for spacing issues in bold markdown
+                        if "** " in formatted or " **" in formatted:
+                            logger.warning(
+                                f"[MARKDOWN_WARNING] Bold markdown spacing issue detected: '** ' or ' **' found in response"
+                            )
 
                 # Only yield a chunk if it is non-empty and not just whitespace
                 if formatted and formatted.strip():
@@ -635,22 +654,9 @@ class OptimizedChatbot:
             if role == "user":
                 formatted.append(f"User{time_info}: {content}")
             elif role == "assistant":
-                # Highlight questions in assistant messages to help prevent repetition
-                if "?" in content:
-                    questions = [
-                        q.strip() + "?" for q in content.split("?") if q.strip()
-                    ]
-                    if questions:
-                        content_with_questions = (
-                            content + f" [QUESTIONS ASKED: {'; '.join(questions[-2:])}]"
-                        )  # Last 2 questions
-                        formatted.append(
-                            f"Assistant{time_info}: {content_with_questions}"
-                        )
-                    else:
-                        formatted.append(f"Assistant{time_info}: {content}")
-                else:
-                    formatted.append(f"Assistant{time_info}: {content}")
+                # Don't manipulate assistant content to preserve markdown formatting
+                # Simply append as-is to avoid breaking markdown
+                formatted.append(f"Assistant{time_info}: {content}")
             else:
                 # In case of unknown role, include as-is for debugging
                 formatted.append(f"{role.capitalize()}{time_info}: {content}")

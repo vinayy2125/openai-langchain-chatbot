@@ -82,6 +82,11 @@ class SentMessage(BaseModel):
         default=False, description="Whether to generate detailed responses"
     )
 
+class PromptRequest(BaseModel):
+    """Request model for follow-up prompts"""
+    prompt: str = Field(..., description="The prompt text to get follow-up for")
+
+
 class HistoryResponse(BaseModel):
     session_id: str = Field(..., description="UUID of the chat session")
     root_prompts: Dict[str, Any] = Field(

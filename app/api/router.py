@@ -5,7 +5,8 @@ from .models import (
     UserCreate,
     UserRegisterResponse,
     SentMessage,
-    HistoryResponse
+    HistoryResponse,
+    PromptRequest
 )
 from .helpers import (
     get_messages_for_session
@@ -16,7 +17,7 @@ from app.db.base import get_db_conn
 logger = get_logger(__name__)
 
 # Create router
-router = APIRouter(prefix="/api/v1", tags=["v1"])
+router = APIRouter(prefix="/api")
 
 # Common headers for SSE
 SSE_HEADERS = {
@@ -211,10 +212,10 @@ async def get_chat_messages(session_id: str):
 
 
 @router.post("/prompts/follow-up")
-async def get_follow_up_prompts(prompt: str):
+async def get_follow_up_prompts(request: PromptRequest):
     """Fetch follow-up prompts based on a message ID."""
     try:
-        prompts = await helpers.fetch_follow_up_prompts(prompt)
+        prompts = await helpers.fetch_follow_up_prompts(request.prompt)
         return prompts
     except Exception as e:
         logger.error(f"Error fetching follow-up prompts for message")
