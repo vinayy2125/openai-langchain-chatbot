@@ -20,6 +20,7 @@ from fastapi import HTTPException
 from datetime import datetime
 from app.api.models import PromptType
 from app.db.base import get_db_conn
+from app.utils.redis_context import append_message_to_chat_history
 
 
 logger = get_logger(__name__)
@@ -597,6 +598,13 @@ async def send_message_stream(req: SentMessage):
         # Start user message saving in background
         if user_msg_to_save:
             asyncio.create_task(save_message(user_msg_to_save))
+            try:
+                # also persist to Redis chat_history asynchronously
+                asyncio.create_task(asyncio.to_thread(append_message_to_chat_history, session_id, {"role": "user", "content": req.query, "timestamp": None}))
+            except Exception:
+                # if asyncio.to_thread not available, fallback to run_in_executor
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(None, append_message_to_chat_history, session_id, {"role": "user", "content": req.query, "timestamp": None})
 
         # Always use the optimized chatbot flow
         # logger.info("[send_message_stream] Using optimized chatbot flow.")
@@ -658,6 +666,11 @@ async def send_message_stream(req: SentMessage):
                 )
                 # Fire and forget save to close stream immediately
                 asyncio.create_task(save_message(assistant_msg))
+                try:
+                    asyncio.create_task(asyncio.to_thread(append_message_to_chat_history, session_id, {"role": "assistant", "content": full_assistant_response, "timestamp": None}))
+                except Exception:
+                    loop = asyncio.get_event_loop()
+                    loop.run_in_executor(None, append_message_to_chat_history, session_id, {"role": "assistant", "content": full_assistant_response, "timestamp": None})
                 # logger.info(f"[OPTIMIZED_FLOW] Saved complete response: {len(full_assistant_response)} chars")
                         
             except Exception as e:
