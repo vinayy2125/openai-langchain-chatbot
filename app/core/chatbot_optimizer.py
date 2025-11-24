@@ -438,7 +438,7 @@ class OptimizedChatbot:
                     f"[MARKDOWN_DEBUG] Raw response contains markdown: {cleaned[:100]}..."
                 )
 
-            # Step 6: Enhanced Funnel stage handling (form trigger) BEFORE yielding assistant response
+            # Step 6: DYNAMIC Funnel-based form trigger (LLM-driven intelligence)
             # Use cached user_details_known
             logger.info(
                 f"[FormLogic] Stage='{funnel_stage}', Count={count}, Known={user_details_known}"
@@ -446,30 +446,59 @@ class OptimizedChatbot:
             trigger_form = False
             trigger_reason = ""
             if not user_details_known:
+                # DYNAMIC LOGIC: Let LLM determine funnel stage based on conversation analysis
+                # Only enforce minimum safety (count >= 2) and fallback (count >= 10)
+                
                 if funnel_stage == "action":
-                    trigger_form = True
-                    trigger_reason = "action_stage"
-                elif funnel_stage == "intent" and count >= 3:
-                    trigger_form = True
-                    trigger_reason = "intent_stage_depth"
-                    logger.info(
-                        f"[FORM_DEBUG] Intent stage trigger conditions met: funnel_stage='{funnel_stage}', count={count}"
-                    )
-                elif funnel_stage == "interest" and count >= 6:
-                    trigger_form = True
-                    trigger_reason = "interest_stage_engagement"
-                    logger.info(
-                        f"[FORM_DEBUG] Interest stage trigger conditions met: funnel_stage='{funnel_stage}', count={count}"
-                    )
-                elif count >= 12:
+                    # LLM detected Action stage - user wants to connect or shows strong buying intent
+                    if count >= 2:
+                        # Safety: minimum 2 user messages before any form
+                        trigger_form = True
+                        trigger_reason = "action_stage_llm_detected"
+                        logger.info(
+                            f"[FORM_DEBUG] Action stage detected by LLM: funnel_stage='{funnel_stage}', count={count}"
+                        )
+                    else:
+                        # Too early - need at least 2 user messages
+                        logger.info(
+                            f"[FORM_DEBUG] Action stage detected but count={count} < 2 - waiting for minimum messages"
+                        )
+                elif funnel_stage == "intent":
+                    # LLM detected Intent stage - user shows buying signals
+                    if count >= 2:
+                        # Trigger form if LLM detected intent and we have minimum messages
+                        trigger_form = True
+                        trigger_reason = "intent_stage_llm_detected"
+                        logger.info(
+                            f"[FORM_DEBUG] Intent stage detected by LLM: funnel_stage='{funnel_stage}', count={count}"
+                        )
+                    else:
+                        logger.info(
+                            f"[FORM_DEBUG] Intent stage detected but count={count} < 2 - waiting for minimum messages"
+                        )
+                elif funnel_stage == "interest":
+                    # LLM detected Interest stage - user is engaged
+                    if count >= 3:
+                        # For interest stage, wait for at least 3 messages to ensure engagement
+                        trigger_form = True
+                        trigger_reason = "interest_stage_llm_detected"
+                        logger.info(
+                            f"[FORM_DEBUG] Interest stage detected by LLM with sufficient engagement: funnel_stage='{funnel_stage}', count={count}"
+                        )
+                    else:
+                        logger.info(
+                            f"[FORM_DEBUG] Interest stage detected but count={count} < 3 - continue building rapport"
+                        )
+                elif count >= 10:
+                    # Fallback: If conversation is extended without form trigger, trigger anyway
                     trigger_form = True
                     trigger_reason = "conversation_length_fallback"
                     logger.info(
-                        f"[FORM_DEBUG] Fallback trigger conditions met: count={count}"
+                        f"[FORM_DEBUG] Fallback trigger: Extended conversation without form (count={count})"
                     )
                 else:
                     logger.info(
-                        f"[FORM_DEBUG] No trigger conditions met. funnel_stage='{funnel_stage}', count={count}"
+                        f"[FORM_DEBUG] No trigger conditions met. funnel_stage='{funnel_stage}', count={count} - LLM will determine next stage"
                     )
 
             # Only yield the assistant response if we are NOT about to trigger a form
