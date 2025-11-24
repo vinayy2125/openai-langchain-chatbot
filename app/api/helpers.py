@@ -1,6 +1,8 @@
 import re
 import os
 import json
+import asyncio
+import functools
 from typing import Dict, Any, List, Optional, Any as AnyType
 from fastapi.responses import StreamingResponse
 from uuid import UUID
@@ -150,8 +152,8 @@ def is_valid_ip(ip_str: str) -> bool:
     return False
 
 
-async def update_user_by_session(session_id: str, user: UserCreate):
-    """Update a user's fields using the session_id.
+def _update_user_by_session_sync(session_id: str, user: UserCreate):
+    """Update a user's fields using the session_id (Synchronous).
 
     Accepts a `UserCreate` model and performs a partial update of only the
     provided fields (username, email, mobile). Also keeps the
@@ -260,7 +262,15 @@ async def update_user_by_session(session_id: str, user: UserCreate):
         logger.info(f"[update_user_by_session] DB connection closed.")
 
 
-async def initialize_session_with_prompt(
+async def update_user_by_session(session_id: str, user: UserCreate):
+    """Update a user's fields using the session_id (non-blocking wrapper)."""
+    import asyncio
+    import functools
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _update_user_by_session_sync, session_id, user)
+
+
+def _initialize_session_with_prompt_sync(
     session_id: UUID, prompt_id: UUID
 ) -> Dict[str, Any]:
     """Initialize a new session with the selected prompt."""
@@ -312,8 +322,18 @@ async def initialize_session_with_prompt(
         conn.close()
 
 
-async def save_message(message_data: MessageCreate) -> Message:
-    """Save a message to the database with proper relationships and metadata."""
+async def initialize_session_with_prompt(
+    session_id: UUID, prompt_id: UUID
+) -> Dict[str, Any]:
+    """Initialize session with prompt (non-blocking wrapper)."""
+    import asyncio
+    import functools
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _initialize_session_with_prompt_sync, session_id, prompt_id)
+
+
+def _save_message_sync(message_data: MessageCreate) -> Message:
+    """Synchronous implementation of save_message."""
     conn = get_db_conn()
     cursor = conn.cursor()
     try:
@@ -376,8 +396,16 @@ async def save_message(message_data: MessageCreate) -> Message:
         conn.close()
 
 
-async def get_messages_for_session(session_id: UUID) -> List[Message]:
-    """Retrieve all messages for a given session ordered by creation time.
+async def save_message(message_data: MessageCreate) -> Message:
+    """Save a message to the database (non-blocking wrapper)."""
+    import asyncio
+    import functools
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _save_message_sync, message_data)
+
+
+def _get_messages_for_session_sync(session_id: UUID) -> List[Message]:
+    """Retrieve all messages for a given session ordered by creation time (Synchronous).
 
     Returns a list of `Message` objects expected by the router.
     """
@@ -420,7 +448,15 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
         conn.close()
 
 
-async def fetch_root_prompts():
+async def get_messages_for_session(session_id: UUID) -> List[Message]:
+    """Retrieve all messages for a given session (non-blocking wrapper)."""
+    import asyncio
+    import functools
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _get_messages_for_session_sync, session_id)
+
+
+def _fetch_root_prompts_sync():
     conn = None
     cursor = None
     try:
@@ -515,8 +551,17 @@ async def fetch_root_prompts():
             conn.close()
 
 
+async def fetch_root_prompts():
+    """Fetch root prompts (non-blocking wrapper)."""
+    import asyncio
+    import functools
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _fetch_root_prompts_sync)
+
+
 async def send_message_stream(req: SentMessage):
-    logger.info(f"[send_message_stream] Called for session_id={getattr(req, 'session_id', None)}")
+    # Simplified logging
+    # logger.info(f"[send_message_stream] Called for session_id={getattr(req, 'session_id', None)}")
 
     # Extract required variables from req or context
     session_id = getattr(req, "session_id", None)
@@ -549,20 +594,12 @@ async def send_message_stream(req: SentMessage):
             )
 
         # Save user message asynchronously to improve response time
-        import asyncio
-        async def save_user_message_async():
-            if user_msg_to_save:
-                try:
-                    await save_message(user_msg_to_save)
-                except Exception as e:
-                    logger.warning(f"Failed to save user message: {e}")
-        
         # Start user message saving in background
         if user_msg_to_save:
-            asyncio.create_task(save_user_message_async())
+            asyncio.create_task(save_message(user_msg_to_save))
 
         # Always use the optimized chatbot flow
-        logger.info("[send_message_stream] Using optimized chatbot flow.")
+        # logger.info("[send_message_stream] Using optimized chatbot flow.")
         from app.core.chatbot_optimizer import OptimizedChatbot
         chatbot = OptimizedChatbot()
         query = req.query or ""
@@ -577,7 +614,7 @@ async def send_message_stream(req: SentMessage):
                 session_uuid = UUID(session_id)
                 messages = await get_messages_for_session(session_uuid)
                 chat_history = [(msg.role, msg.content) for msg in messages if msg.role in ["user", "assistant"]]
-                logger.info(f"[OPTIMIZED_FLOW] Using conversation history from database: {len(chat_history)} messages")
+                # logger.info(f"[OPTIMIZED_FLOW] Using conversation history from database: {len(chat_history)} messages")
             except Exception as e:
                 logger.warning(f"Failed to load conversation history: {e}")
                 chat_history = []
@@ -607,7 +644,7 @@ async def send_message_stream(req: SentMessage):
                 # Debug markdown preservation in optimized flow
                 has_markdown = any(marker in full_assistant_response for marker in ["**", "*", "_", "#", "-", "`", "```"])
                 if has_markdown:
-                    logger.info(f"[OPTIMIZED_FLOW] Response contains markdown: {full_assistant_response[:200]}...")
+                    pass # logger.info(f"[OPTIMIZED_FLOW] Response contains markdown: {full_assistant_response[:200]}...")
                 
                 # Save complete message to database (only once)
                 assistant_msg = MessageCreate(
@@ -619,8 +656,9 @@ async def send_message_stream(req: SentMessage):
                     follow_up_depth=0,
                     metadata={}
                 )
-                await save_message(assistant_msg)
-                logger.info(f"[OPTIMIZED_FLOW] Saved complete response: {len(full_assistant_response)} chars")
+                # Fire and forget save to close stream immediately
+                asyncio.create_task(save_message(assistant_msg))
+                # logger.info(f"[OPTIMIZED_FLOW] Saved complete response: {len(full_assistant_response)} chars")
                         
             except Exception as e:
                 logger.warning(f"Failed to save complete response: {e}")
@@ -649,8 +687,8 @@ async def send_message_stream(req: SentMessage):
     return StreamingResponse(stream_response(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
-def delete_last_user_message(session_id: str):
-    """Delete the last user message for a session from the database."""
+def _delete_last_user_message_sync(session_id: str):
+    """Delete the last user message for a session from the database (Synchronous)."""
     conn = get_db_conn()
     cursor = conn.cursor()
     try:
@@ -679,7 +717,42 @@ def delete_last_user_message(session_id: str):
     finally:
         cursor.close()
         conn.close()
-        
+
+
+async def delete_last_user_message(session_id: str):
+    """Delete the last user message (non-blocking wrapper)."""
+    import asyncio
+    import functools
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _delete_last_user_message_sync, session_id)
+
+
+def _get_session_is_active_sync(session_id: UUID) -> bool:
+    """Check if session is active (Synchronous)."""
+    conn = get_db_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT is_active FROM sessions WHERE session_id = %s",
+            (str(session_id),)
+        )
+        row = cursor.fetchone()
+        return bool(row[0]) if row and row[0] is not None else False
+    except Exception as e:
+        logger.warning(f"Could not fetch is_active for session {session_id}: {e}")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
+
+
+async def get_session_is_active(session_id: UUID) -> bool:
+    """Check if session is active (non-blocking wrapper)."""
+    import asyncio
+    import functools
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _get_session_is_active_sync, session_id)
+
 
 async def end_session_helper(session_id: str):
     """
@@ -757,8 +830,4 @@ async def end_session_helper(session_id: str):
             conn.close()
             
 
-async def fetch_follow_up_prompts(user_message: str):
-    response = generate_llm_response(user_message)
-    if response is None:
-        raise HTTPException(status_code=500, detail="Error generating LLM response for follow-up prompts")
-    return response
+
