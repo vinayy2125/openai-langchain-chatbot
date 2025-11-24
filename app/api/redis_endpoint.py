@@ -8,6 +8,7 @@ from app.db.redis_vector_helper import store_text, similarity_search
 router = APIRouter()
 
 logger = get_logger(__name__)
+from app.db.redis_prompts import refresh_prompts
 
 
 class RedisContextRequest(BaseModel):
@@ -76,3 +77,24 @@ async def redis_context_endpoint(payload: RedisContextRequest):
         else:
             
             raise HTTPException(status_code=500, detail="Failed to store text.")
+
+
+
+@router.post("/prompts/refresh")
+async def refresh_prompts_endpoint(limit: int = 100, ensure_index: bool = True):
+    """Refresh prompts into Redis from `app.utils.prompts` (or provided source).
+
+    Writes prompts as hashes `chat_prompt:{id}` and adds them to sorted set `chat_prompts:z`.
+    Returns JSON with number of prompts written.
+    """
+    try:
+        redis_client = get_redis
+        if not redis_client:
+            raise HTTPException(status_code=500, detail="Redis client not configured")
+        count = refresh_prompts(redis_client, prompts=None, limit=limit, ensure_idx=ensure_index)
+        return {"status": "success", "written": count}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error refreshing prompts into Redis: {e}")
+        raise HTTPException(status_code=500, detail=f"Error refreshing prompts: {e}")
