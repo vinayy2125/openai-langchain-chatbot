@@ -40,7 +40,7 @@ def _greeting_instruction(count: int) -> str:
             "- Response Structure:\n"
             "  * Conciseness: Keep the response short and to the point.\n"
             "  * Tone: Maintain a conversational, friendly flow.\n"
-            "  * Closing: MUST end with a relevant follow-up question to keep the dialogue open.\n"
+            "  * Closing: Add a blank line, then MUST end with a relevant follow-up question in **bold formatting** to keep the dialogue open.\n"
             "  * Goal: Subtly steer the conversation towards how you/Ditstek can provide value or assistance.\n"
         )
     return (
