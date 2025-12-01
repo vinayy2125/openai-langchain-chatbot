@@ -25,6 +25,9 @@ import time
 from typing import Any, Dict, List, Optional, Sequence
 import importlib
 
+# Import the new helper for assistant instructions
+from app.db.assistant_instructions_helper import get_assistant_instruction_by_key
+
 INDEX_NAME = "chat_prompts"
 SORTED_SET_KEY = "chat_prompts:z"
 HASH_PREFIX = "chat_prompt:"
@@ -593,6 +596,13 @@ def refresh_prompts(redis_conn, prompts: Optional[Sequence[Dict[str, Any]]] = No
                     doc["source"] = str(p.get("source"))
                 if p.get("lang"):
                     doc["lang"] = str(p.get("lang"))
+
+                # Enrich with assistant_name and assistant_instruction if available
+                if pid:
+                    ai_info = get_assistant_instruction_by_key(pid)
+                    if ai_info:
+                        doc["assistant_name"] = ai_info["assistant_name"]
+                        doc["assistant_instruction"] = ai_info["assistant_instruction"]
 
                 # Try to use RedisJSON if available, otherwise fall back to storing JSON string
                 json_client = getattr(redis_conn, "json", None)
