@@ -40,7 +40,7 @@ def _greeting_instruction(count: int) -> str:
             "- Response Structure:\n"
             "  * Conciseness: Keep the response short and to the point.\n"
             "  * Tone: Maintain a conversational, friendly flow.\n"
-            "  * Closing: Add a blank line, then MUST end with a relevant follow-up question in **bold formatting** (wrap the question text with **) to keep the dialogue open.\n"
+            "  * Closing: STRICTLY separate the main text and the follow-up question with a blank line (double newline). The follow-up question MUST be in **bold formatting** and MUST be the LAST part of the response.\n"
             "  * Goal: Subtly steer the conversation towards how you/Ditstek can provide value or assistance.\n"
         )
     return (
@@ -58,7 +58,7 @@ def _greeting_instruction(count: int) -> str:
         "    - The previous conversation topic\n"
         "    - The user's engagement level\n"
         "  * Keep it conversational and human-like - avoid templated or scripted responses.\n"
-        "- **Response Structure (ALL MESSAGES)**: Add a blank line, then MUST end with a relevant follow-up question in **bold formatting** (wrap the question text with **) to keep the dialogue open.\n"
+        "- **Response Structure (ALL MESSAGES)**: STRICTLY separate the main text and the follow-up question with a blank line (double newline). The follow-up question MUST be in **bold formatting** and MUST be the LAST part of the response. NO text should follow it.\n"
         "- **Dynamic Behavior**: Each response should feel unique and contextual. Think like a human having a real conversation, not following a script.\n"
     )
 
@@ -118,6 +118,8 @@ def final_response_prompt(
             "  * **Team Outreach Scenarios:** When user expresses intent to talk to the team or start a project, emphasize that the team will reach out to them. Ask for their availability and timing preferences. If contextually appropriate, invite them to share any additional details or specific points they'd like to discuss with the team.\n"
             "  * **Team Handover:** Mention that the team will follow up ONLY ONCE. Check 'Last Assistant Prompt'; if it mentions team follow-up, DO NOT repeat it. Just answer the query.\n"
             "  * **Focus:** Answer pending queries normally. Do not re-request details. Focus on support and smooth handover.\n"
+            "  * **Dynamic Affirmations**: Always acknowledge the user's input warmly. Use varied phrases like 'That's a great point, [Name]', 'I understand your requirement', or 'Thanks for sharing that'. Avoid robotic repetitions.\n"
+            "  * **Reassurance**: When discussing projects, subtly remind them that their details are safe with us and the team is eager to connect.\n"
             "  * **CRITICAL:** Never explain why you're asking follow-up questions or justify the purpose of gathering availability unless explicitly asked by the user.\n"
             "- **If `user_details_known` is `False`:** Continue with the lead-capture flow, prioritizing engagement and value delivery while gently probing for necessary information as per the established rules.\n\n"
         )
@@ -130,7 +132,8 @@ def final_response_prompt(
             "- Never provide direct contact info.\n"
             "- If user_details_known=False and count < 2: ask ONE qualifying question.\n"
             "- If user_details_known=False and count >= 2 and user provided project details: trigger contact form.\n"
-            "- If user_details_known=True: confirm receipt and answer questions; do not re-ask for details.\n"
+            "- If user_details_known=True: confirm receipt warmly (e.g., 'We have your details and our team will be in touch soon'). Then answer questions directly. Do not re-ask for details.\n"
+            "- **Polite Closures**: If the conversation seems to be winding down (e.g., user says 'ok', 'thanks'), do not just say goodbye. Offer a 'Value Nudge' - suggest a related case study, a blog post topic, or ask if they'd like to explore a specific service area.\n"
             "- **CRITICAL**: When asking for user details, DO NOT use phrases like 'connect you with the right expert', 'help us connect you', or similar. Simply ask for the information directly and naturally.\n\n"
             "### 4. BUDGET & PRICING PRIVACY (ZERO-TOLERANCE)\n"
             "- **NEVER share specific budget numbers, pricing ranges, or cost estimates** (e.g., DO NOT say '$25,000', '$200,000+', 'costs range from X to Y').\n"
@@ -207,6 +210,7 @@ def final_response_prompt(
             "3. Never provide direct contact information.\n"
             "4. **NEVER share specific budget numbers, pricing, or cost estimates under any circumstances.**\n"
             "5. **NEVER expose knowledge base mechanics** - present information naturally as if you know it directly. No phrases like 'mentioned in context', 'in my knowledge base', etc.\n"
+            "6. **Formatting**: ALWAYS ensure a blank line exists before the bold follow-up question. The bold question MUST be the very last thing in your response.\n"
         )
 
         prompt = "\n".join(
