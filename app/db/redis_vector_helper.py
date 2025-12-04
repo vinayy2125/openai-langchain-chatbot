@@ -40,7 +40,7 @@ def store_text(session_id: str, text: str) -> bool:
 def similarity_search(session_id: str, query: str, top_n: int = 4) -> list:
     query_embedding = vectorize_text(query)
     query_blob = np.array(query_embedding, dtype=np.float32).tobytes()
-    logger.info(f"Performing similarity search for session_id: {session_id} with query: {query}")
+    # logger.info(f"Performing similarity search for session_id: {session_id} with query: {query}")
     knn_query = f'*=>[KNN {top_n} @embedding $vec AS vector_score]'
     try:
         q = (
@@ -90,6 +90,63 @@ def similarity_search(session_id: str, query: str, top_n: int = 4) -> list:
             logger.debug(f"Skipping doc in similarity_search due to error: {e}")
 
     if formatted_results:
-        sample_types = [type(x).__name__ for x in formatted_results[:3]]
-        logger.info(f"[redis_vector_helper] similarity_search returning {len(formatted_results)} items (sample types: {sample_types})")
+        # sample_types = [type(x).__name__ for x in formatted_results[:3]]
+        # logger.info(f"[redis_vector_helper] similarity_search returning {len(formatted_results)} items (sample types: {sample_types})")
+        pass
+    return formatted_results
+
+
+def similarity_search_chat_history(query: str, top_n: int = 4) -> list:
+    """Perform KNN search against `chat_history_index` using the query embedding.
+
+    Returns a list of session-level results with session id, messages_text, embedding, and similarity score.
+    """
+    query_embedding = vectorize_text(query)
+    query_blob = np.array(query_embedding, dtype=np.float32).tobytes()
+    knn_query = f'*=>[KNN {top_n} @embedding $vec AS vector_score]'
+    try:
+        q = (
+            Query(knn_query)
+            .sort_by("vector_score", asc=True)
+            .return_fields("session_id", "messages_text", "embedding", "vector_score")
+            .paging(0, top_n)
+            .dialect(2)
+        )
+        results = get_redis.ft("chat_history_index").search(q, query_params={"vec": query_blob})
+    except Exception as e:
+        logger.error(f"❌ RediSearch chat_history query failed: {e}")
+        return []
+
+    formatted_results = []
+    for doc in results.docs:
+        try:
+            distance_raw = getattr(doc, "vector_score", 0.0)
+            try:
+                distance = float(distance_raw)
+            except Exception:
+                distance = 0.0
+            similarity = 1.0 - (distance / 2.0)
+
+            embedding = getattr(doc, "embedding", None)
+            embedding_list = []
+            if isinstance(embedding, str):
+                try:
+                    embedding_list = json.loads(embedding)
+                except Exception:
+                    embedding_list = []
+            elif isinstance(embedding, (list, tuple)):
+                embedding_list = list(embedding)
+
+            messages_text = getattr(doc, "messages_text", None) or ""
+            session_id = getattr(doc, "session_id", None) or getattr(doc, "id", None) or "unknown"
+
+            formatted_results.append({
+                "session_id": session_id,
+                "messages_text": str(messages_text),
+                "embedding": embedding_list,
+                "similarity": float(similarity)
+            })
+        except Exception as e:
+            logger.debug(f"Skipping doc in similarity_search_chat_history due to error: {e}")
+
     return formatted_results

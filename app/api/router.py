@@ -111,7 +111,7 @@ async def update_user(session_id: str, user: UserCreate):
         # Pass the full Pydantic model to the helper for partial updates
         await helpers.update_user_by_session(session_id, user)
         # Delete the last user message from the DB for this session
-        deleted_id = helpers.delete_last_user_message(session_id)
+        deleted_id = await helpers.delete_last_user_message(session_id)
         logger.info(f"Deleted last user message id: {deleted_id} for session_id: {session_id}")
         return {"status": "success", "message": "User updated successfully", "session_id": session_id, "deleted_message_id": deleted_id}
     except HTTPException as http_ex:
@@ -174,30 +174,7 @@ async def get_chat_messages(session_id: str):
                 )
 
         # Also fetch session is_active flag
-        is_active = False
-        try:
-            conn2 = get_db_conn()
-            cur2 = conn2.cursor()
-            cur2.execute(
-                """
-                SELECT is_active FROM sessions WHERE session_id = %s
-                """,
-                (str(session_uuid),),
-            )
-            row = cur2.fetchone()
-            if row and row[0] is not None:
-                is_active = bool(row[0])
-        except Exception as e:
-            logger.warning(f"Could not fetch is_active for session {session_id}: {e}")
-        finally:
-            try:
-                cur2.close()
-            except Exception:
-                pass
-            try:
-                conn2.close()
-            except Exception:
-                pass
+        is_active = await helpers.get_session_is_active(session_uuid)
 
         return {
             "root_prompts": root_prompts,
@@ -211,12 +188,4 @@ async def get_chat_messages(session_id: str):
 
 
 
-@router.post("/prompts/follow-up")
-async def get_follow_up_prompts(request: PromptRequest):
-    """Fetch follow-up prompts based on a message ID."""
-    try:
-        prompts = await helpers.fetch_follow_up_prompts(request.prompt)
-        return prompts
-    except Exception as e:
-        logger.error(f"Error fetching follow-up prompts for message")
-        raise HTTPException(status_code=500, detail="Error fetching follow-up prompts")
+

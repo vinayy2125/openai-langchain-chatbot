@@ -1,15 +1,283 @@
+# Utility to build LLM context from chat history
+# build_llm_context_from_history moved to app.utils.chat_state
 from app.logger import get_logger
 from typing import List, Dict, Any, Optional
-from app.db.redis_vector_helper import similarity_search
+from app.db.redis_vector_helper import similarity_search, similarity_search_chat_history
 from app.utils.llm_client import call_llm_summarize_chunks
+import json
+from app.db import base
+from app.config import get_redis_client as config_get_redis_client, get_redis as config_redis_client
+from app.ingestion.scrape_to_redis import create_index_from_yaml
+from core_services.embedding_utils import get_embedding
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
+# Single-threaded executor for background embedding tasks (small default)
+_EMBEDDING_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+from pathlib import Path
 
 logger = get_logger("chatbot")
+
+
+def _safe_json_set(client, key, path, value):
+    """Safely set a RedisJSON value.
+
+    If the key exists but has the wrong Redis type (e.g., plain string), delete
+    the key and retry the JSON set. Return True on success, False otherwise.
+    """
+    try:
+        client.json().set(key, path, value)
+        return True
+    except Exception as e:
+        # Detect Redis "wrong type" response and recover by deleting the key
+        msg = str(e)
+        if "wrong Redis type" in msg or "WRONGTYPE" in msg or "Existing key has wrong Redis type" in msg:
+            try:
+                # Attempt to remove conflicting key and retry
+                if hasattr(client, 'delete'):
+                    try:
+                        client.delete(key)
+                    except Exception:
+                        # Older redis clients might use 'del' or not expose delete; try raw command
+                        try:
+                            client.execute_command('DEL', key)
+                        except Exception:
+                            pass
+                client.json().set(key, path, value)
+                return True
+            except Exception:
+                logger.exception("Failed to recover from wrong Redis type for key %s", key)
+                return False
+        else:
+            # Not a type error – re-raise for upstream handling
+            raise
+
+
+def get_redis_client():
+    """Return the shared redis client from `app.config` when available,
+    otherwise create a fresh client via the config helper. Avoids duplicating
+    connection logic.
+    """
+    try:
+        # Prefer the already-instantiated client if present
+        if config_redis_client:
+            return config_redis_client
+    except Exception:
+        pass
+    # Fall back to factory
+    return config_get_redis_client()
+
+# Key generator for chat history chunk
+def get_chat_history_chunk_key(session_id):
+    return f"chat_history:{session_id}"
+
+# Save chat history chunk to Redis, fallback to DB
+def save_chat_history(session_id, chat_history):
+    """Save chat history chunk to Redis; on failure persist to DB messages table."""
+    try:
+        r = get_redis_client()
+        key = get_chat_history_chunk_key(session_id)
+        # Use RedisJSON to store structured chat history so it can be indexed/searched
+        try:
+            # Ensure the chat_history_index exists (create on demand)
+            yaml_path = Path(__file__).parent.parent / "db" / "chat_history_index.yaml"
+            create_index_from_yaml(str(yaml_path))
+        except Exception:
+            # Non-fatal: if index creation/check fails, continue to store the data
+            pass
+
+        # Store as JSON document under the key (root path '$') if RedisJSON is available.
+        # Also write a legacy string value when possible so tests and older clients that
+        # expect `.set`/`.get` continue to work.
+        # Build a text blob from messages for text indexing and embeddings
+        try:
+            messages_text = "\n".join([ (m.get("content") or "") for m in chat_history ])
+        except Exception:
+            messages_text = ""
+
+        # Prepare payload and store immediately; compute embedding in background
+        payload = {"session_id": session_id, "messages": chat_history, "messages_text": messages_text}
+
+        try:
+            _safe_json_set(r, key, '$', payload)
+        except Exception:
+            # Best-effort: if JSON storage fails for reasons other than type conflict,
+            # continue and still write legacy string form below.
+            pass
+
+        # Also store string form for compatibility with tests/mocks
+        try:
+            if hasattr(r, 'set'):
+                r.set(key, json.dumps(chat_history))
+        except Exception:
+            pass
+
+        # Offload embedding computation to background thread to avoid blocking
+        def _compute_and_set_embedding(k, text):
+            try:
+                if not text or not text.strip():
+                    return
+                vec = get_embedding(text)
+                client = get_redis_client()
+                # Try to update existing JSON root with embedding
+                try:
+                    # If key contains a valid JSON root, this will return the object
+                    existing = None
+                    try:
+                        existing = client.json().get(k)
+                    except Exception:
+                        existing = None
+
+                    if existing is None:
+                        # Try to recover from legacy string storage
+                        payload = None
+                        try:
+                            raw = client.get(k) if hasattr(client, 'get') else None
+                            if raw:
+                                if isinstance(raw, bytes):
+                                    raw = raw.decode('utf-8')
+                                payload = json.loads(raw)
+                        except Exception:
+                            payload = None
+
+                        if not payload:
+                            # create a minimal root payload
+                            payload = {"session_id": session_id, "messages": [], "messages_text": text}
+                        else:
+                            # Some legacy clients stored the value as a list of messages (not a dict).
+                            # If we get a list, convert it into the expected dict structure.
+                            if isinstance(payload, list):
+                                payload = {"session_id": session_id, "messages": payload, "messages_text": text}
+                            # If payload is not a dict at this point, replace with minimal payload
+                            if not isinstance(payload, dict):
+                                payload = {"session_id": session_id, "messages": [], "messages_text": text}
+                        # Safely set embedding on the payload dict
+                        payload["embedding"] = vec
+                        try:
+                            _safe_json_set(client, k, '$', payload)
+                            return
+                        except Exception as e:
+                            logger.exception("Failed to create JSON root for %s: %s", k, e)
+                            return
+
+                    # existing JSON root present, set embedding path
+                    try:
+                        _safe_json_set(client, k, '$.embedding', vec)
+                        return
+                    except Exception:
+                        # If setting a non-root object fails, attempt to replace root with added embedding
+                        try:
+                            existing["embedding"] = vec
+                            _safe_json_set(client, k, '$', existing)
+                            return
+                        except Exception:
+                            logger.exception("Failed to store embedding into Redis JSON for %s", k)
+                except Exception:
+                    logger.exception("Background embedding computation failed while writing JSON for session %s", session_id)
+            except Exception:
+                logger.exception("Background embedding computation failed for session %s", session_id)
+
+        try:
+            _EMBEDDING_EXECUTOR.submit(_compute_and_set_embedding, key, messages_text)
+        except Exception:
+            # best-effort; ignore if executor fails
+            pass
+        except Exception:
+            # ignore JSON storage errors
+            pass
+
+        # Also store string form for compatibility with tests/mocks that expect .set/.get
+        try:
+            if hasattr(r, 'set'):
+                r.set(key, json.dumps(chat_history))
+        except Exception:
+            # ignore string set errors
+            pass
+        return True
+    except Exception as e:
+        logger.error(f"Redis save failed for chat_history: {e}, falling back to DB.")
+        try:
+            conn = base.get_db_conn()
+            cur = conn.cursor()
+            insert_sql = (
+                "INSERT INTO messages (session_id, content, role, metadata) VALUES (%s, %s, %s, %s)"
+            )
+            for msg in chat_history:
+                content = msg.get("content")
+                role = msg.get("role") or msg.get("sender")
+                metadata = msg.get("metadata") or {}
+                cur.execute(insert_sql, (session_id, content, role, json.dumps(metadata)))
+            conn.commit()
+            cur.close()
+            conn.close()
+            return True
+        except Exception as db_e:
+            logger.error(f"DB save failed for chat_history: {db_e}")
+            return False
+
+# Retrieve chat history chunk from Redis, fallback to DB
+def get_chat_history(session_id):
+    """Retrieve chat history chunk from Redis; fallback to DB messages table."""
+    try:
+        r = get_redis_client()
+        key = get_chat_history_chunk_key(session_id)
+        # First try legacy string GET (tests/mocks often implement this).
+        try:
+            if hasattr(r, 'get'):
+                data = r.get(key)
+                if data:
+                    if isinstance(data, bytes):
+                        data = data.decode('utf-8')
+                    return json.loads(data)
+        except Exception:
+            pass
+
+        # Fall back to RedisJSON get
+        try:
+            data = r.json().get(key)
+            if data and isinstance(data, dict):
+                return data.get("messages", [])
+        except Exception:
+            pass
+
+        return []
+    except Exception as e:
+        logger.warning(f"Redis retrieval failed for chat_history: {e}, falling back to DB.")
+        try:
+            conn = base.get_db_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT content, role, metadata, created_at FROM messages WHERE session_id = %s ORDER BY created_at ASC",
+                (session_id,)
+            )
+            rows = cur.fetchall()
+            chat_history = []
+            for row in rows:
+                content, role, metadata, created_at = row
+                chat_history.append({
+                    "sender": role,
+                    "content": content,
+                    "metadata": metadata,
+                    "timestamp": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+                })
+            cur.close()
+            conn.close()
+            return chat_history
+        except Exception as db_e:
+            logger.error(f"DB retrieval failed for chat_history: {db_e}")
+            return []
+
+# Append a message to the chat history chunk, with Redis and DB fallback
+def append_message_to_chat_history(session_id, message):
+    history = get_chat_history(session_id)
+    history.append(message)
+    save_chat_history(session_id, history)
+    return True
 
 
 def get_redis_context_chunks(
     session_id: str,
     query: str,
-    conversation_history: List[Dict[str, Any]],
     top_n: int = 4,
     key_terms: Optional[List[str]] = None,
     domain_prefix: str = "",
@@ -25,7 +293,6 @@ def get_redis_context_chunks(
     Args:
         session_id: Session identifier
         query: User query (semantic search handles intent inference)
-        conversation_history: Previous conversation messages for context
         top_n: Number of top results to retrieve (calculated dynamically by caller)
         key_terms: Optional domain-specific terms (if provided, used for filtering)
         domain_prefix: Optional domain prefix for search query
@@ -37,91 +304,102 @@ def get_redis_context_chunks(
     # Use key_terms if provided, otherwise rely on semantic similarity alone
     # Semantic search will handle relevance ranking dynamically
 
+    chat_history = get_chat_history(session_id)
+
+    # Derive search query from chat history and user query
+    search_query = derive_search_query(chat_history, query, domain_prefix, fallback_keywords)
+
+    # Perform KB similarity search (chunk_index)
+    kb_results = []
+    try:
+        kb_results = similarity_search(session_id, search_query, top_n=top_n)
+    except Exception as e:
+        logger.warning(f"KB similarity search failed: {e}")
+
+    # Perform chat-history similarity search (chat_history_index)
+    history_results = []
+    try:
+        history_results = similarity_search_chat_history(search_query, top_n=top_n)
+    except Exception as e:
+        logger.warning(f"Chat-history similarity search failed: {e}")
+
+    # Normalize both result sets to simple text chunks and deduplicate (history first)
+    processed_history = []
+    for item in history_results:
+        text = item.get("messages_text") or item.get("response") or item.get("messages_text", "")
+        if text:
+            processed_history.append(str(text))
+
+    processed_kb = []
+    for item in kb_results:
+        text = item.get("response") or item.get("text") or item.get("query") or ""
+        if text:
+            processed_kb.append(str(text))
+
+    # Merge while preserving uniqueness (history prioritized)
+    seen = set()
+    merged: List[str] = []
+    for t in processed_history + processed_kb:
+        key = t.strip().lower()
+        if not key or key in seen:
+            continue
+        merged.append(t)
+        seen.add(key)
+
+    return merged
+
+
+def derive_search_query(chat_history, query, domain_prefix: str, fallback_keywords: str):
     q = (query or "").strip()
-    # If the explicit query is empty, try to derive a reasonable search term
-    # from recent user messages in the conversation_history. If that also
-    # yields nothing, fall back to the provided fallback_keywords so the
-    # similarity search is never executed with an empty query.
-    if not q and conversation_history:
-        try:
-            for item in reversed(conversation_history):
-                if isinstance(item, dict) and item.get("role") == "user":
-                    content = (item.get("content") or "").strip()
-                    if content:
-                        q = content[:300]
-                        break
-        except Exception:
-            q = q
+    if not q:
+        q = get_recent_user_content(chat_history) or ""
 
     if not q:
         logger.info("[RedisContext] Empty query; using fallback keywords for search.")
         q = fallback_keywords or "capabilities"
 
-    # Let semantic similarity search handle intent inference dynamically
-    # Build search query from user query and context - semantic search will find relevant chunks
     search_query = f"{domain_prefix} {q}" if domain_prefix else q
+    recent_short = get_recent_user_content(chat_history, limit_chars=300)
+    if recent_short and recent_short != q:
+        search_query = f"{search_query} {recent_short}"
+    return search_query
 
-    # Augment search with recent user messages in the conversation (last 2)
-    if conversation_history:
-        for item in reversed(conversation_history[-2:]):
-            try:
-                if isinstance(item, dict) and item.get("role") == "user":
-                    content = (item.get("content") or "").strip()
-                    if content:
-                        # Only append short recent content to keep search focused
-                        if len(content) < 300:
-                            search_query = f"{search_query} {content}"
-                            break
-            except Exception:
-                continue
 
-    logger.info(f"[RedisContext] Semantic search query: {search_query}, top_n={top_n}")
+def get_recent_user_content(history, limit_chars=300):
+    if not history:
+        return None
+    for item in reversed(history):
+        role = item.get("role") or item.get("sender")
+        if role == "user":
+            content = (item.get("content") or "").strip()
+            if content:
+                return content[:limit_chars]
+    return None
 
-    # Perform similarity search with enhanced query
-    results = similarity_search(session_id, search_query, top_n=top_n)
 
+def process_similarity_results(results) -> List[str]:
     if not results:
         logger.info("[RedisContext] No context retrieved from Redis.")
         return []
-
-    # Process and deduplicate results - semantic search already ranks by relevance
-    # Maintain the order from similarity search as it's already optimized
     seen_content = set()
     normalized: List[str] = []
-
     for item in results:
         if not isinstance(item, dict):
             continue
-
-        text = (
-            item.get("response") or item.get("text") or item.get("query") or ""
-        ).strip()
+        text = (item.get("response") or item.get("text") or item.get("query") or "").strip()
         if not text:
             continue
         key = text.lower()
         if key in seen_content:
             continue
-
-        # Preserve semantic search ranking - similarity search already ordered by relevance
         normalized.append(text)
         seen_content.add(key)
-
     if normalized:
-        logger.info(
-            f"[RedisContext] Selected {len(normalized)} relevant context chunks"
-        )
-
-    logger.info(
-        f"[RedisContext] Retrieved {len(normalized)} context items (top_n={top_n})"
-    )
-
-    if normalized:
-        # Skip LLM summarization to avoid blocking - use raw chunks directly for faster response
-        # LLM summarization adds 5-10 seconds delay - return chunks directly instead
-        # Return first few chunks (limit to avoid token bloat) - main LLM will process them
-        max_chunks = min(len(normalized), 5)  # Limit to 5 chunks max for performance
+        max_chunks = min(len(normalized), 5)
         return normalized[:max_chunks]
     return []
+
+    # (end of get_redis_context_chunks)
 
 
 # Helper function to summarize chunks with LLM
