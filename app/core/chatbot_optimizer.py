@@ -8,7 +8,7 @@ from app.utils.llm_utils import generate_llm_response
 from app.utils.redis_context import get_redis_context_chunks
 
 # format_response is now imported only when needed (async version with URL validation)
-from app.utils.prompts import final_response_prompt
+from app.utils.prompts import final_response_prompt, PROMPT_VERSION
 from app.utils.response_formatter import format_response, _normalize_url
 import asyncio
 import functools
@@ -104,7 +104,7 @@ def _calculate_dynamic_top_n(query: str, conversation_history: list) -> int:
         top_n += 2
 
     # Cap the maximum (to avoid excessive token usage) but allow for comprehensive searches
-    top_n = min(max(top_n, 4), 30)  # Range: 4-30
+    top_n = min(max(top_n, 4), 30)  # Range: 4-10
 
     logger.info(
         f"[DynamicTopN] Calculated top_n={top_n} for query length={query_length}, words={query_words}"
@@ -323,6 +323,19 @@ class OptimizedChatbot:
                     logger.error(f"Failed to save clarification response: {e}")
                 return
 
+            # ============================================================
+            # PROMPT SOURCE CLARITY: Using prompts.py, NOT Redis chunks
+            # ============================================================
+            logger.info(
+                "[PROMPT_SOURCE] ✓ Loading prompt instructions from prompts.py via final_response_prompt() function"
+            )
+            logger.info(
+                "[PROMPT_SOURCE] ✗ NOT using Redis chat_prompt_json chunks (Redis only used for knowledge base context)"
+            )
+            logger.info(
+                f"[PROMPT_SOURCE] Prompt version: {PROMPT_VERSION} from app.utils.prompts"
+            )
+            
             prompt = final_response_prompt(
                 prompt_context=context,
                 conversation_summary=history or "",
@@ -521,39 +534,18 @@ class OptimizedChatbot:
 
                 formatted = self._normalize_urls_in_text(formatted)
 
-                # Remove bold follow-up questions if user_details_known=True
-                if user_details_known:
-                    # Log the response before modification for debugging
-                    logger.info(f"[MARKDOWN_DEBUG] Response before bold removal: {formatted[-200:]}")
-                    
-                    # More precise patterns to only target follow-up questions at the very end
-                    # Pattern 1: Bold question starting a new paragraph at the end
-                    formatted = re.sub(
-                        r"\n\n\*\*[^*]*\?[^*]*\*\*\s*$",  # Bold question with ? in new paragraph at end
-                        "",
-                        formatted,
-                        flags=re.MULTILINE | re.DOTALL,
-                    )
-                    # Pattern 2: Bold question on its own line at the end (no preceding paragraph)
-                    formatted = re.sub(
-                        r"\n\*\*[^*]*\?[^*]*\*\*\s*$",  # Bold question with ? on new line at end
-                        "",
-                        formatted,
-                        flags=re.MULTILINE | re.DOTALL,
-                    )
-                    # Pattern 3: Very specific - only remove if it looks like a follow-up question
-                    # (contains question words like "What", "How", "Would", etc.)
-                    formatted = re.sub(
-                        r"\n\n?\*\*(What|How|Would|Could|Can|Do|Are|Is|Will)[^*]*\?[^*]*\*\*\s*$",  # Question word patterns
-                        "",
-                        formatted,
-                        flags=re.MULTILINE | re.DOTALL | re.IGNORECASE,
-                    )
-                    
-                    logger.info(f"[MARKDOWN_DEBUG] Response after bold removal: {formatted[-200:]}")
-                    logger.info(
-                        "[Chatbot] Removed bold follow-up question for user_details_known=True"
-                    )
+                # Sanitize horizontal rules that cause Setext H2 rendering
+                # Remove lines containing only dashes, asterisks, or underscores (3+)
+                # These create horizontal rules in markdown and can cause text above to render as headers
+                formatted = re.sub(
+                    r'^\s*[-*_]{3,}\s*$',  # Match lines with 3+ dashes, asterisks, or underscores
+                    '',
+                    formatted,
+                    flags=re.MULTILINE
+                )
+                # Clean up any resulting multiple blank lines
+                formatted = re.sub(r'\n{3,}', '\n\n', formatted)
+
 
                 # Anti-repetition: compare with last assistant response
                 if last_assistant_response and isinstance(last_assistant_response, str):
