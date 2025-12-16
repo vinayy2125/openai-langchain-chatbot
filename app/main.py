@@ -41,7 +41,33 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Performance Monitoring Middleware
+    from fastapi import Request
+    import time
+    
+    @app.middleware("http")
+    async def add_process_time_header(request: Request, call_next):
+        start_time = time.perf_counter()
+        response = await call_next(request)
+        process_time = time.perf_counter() - start_time
+        response.headers["X-Process-Time"] = f"{process_time:.4f}"
+        
+        # Log slow requests (> 1 second)
+        if process_time > 1.0:
+             logger.warning(f"[Slow Request] {request.method} {request.url.path} took {process_time:.4f}s")
+             
+        return response
+
     logger.info("LLM client initialized successfully")
+
+    # Initialize database connection pool
+    try:
+        from app.db.pool import initialize_pool
+        initialize_pool()
+        logger.info("Database connection pool initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize database connection pool: {e}")
+        # Don't fail startup, pool will be initialized on first use
 
     # Attach FollowUpManager to app state - REMOVED for optimized flow only
     # app.state.follow_up_manager = FollowUpManager(llm)

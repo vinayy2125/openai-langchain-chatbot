@@ -131,6 +131,30 @@ class ContextOptimizer:
 
 
 class OptimizedChatbot:
+    async def _is_phatic(self, query: str) -> bool:
+        """Check if query is a simple phatic expression (greeting, thanks, etc.)"""
+        if not query:
+            return True
+        
+        q = query.strip().lower()
+        phatic_patterns = {
+            "hi", "hello", "hey", "greetings",
+            "thanks", "thank you", "thx",
+            "good morning", "good afternoon", "good evening",
+            "bye", "goodbye", "see you",
+            "ok", "okay", "sure", "cool"
+        }
+        
+        # Exact match
+        if q in phatic_patterns:
+            return True
+            
+        # Starts with (for "hi there", "hello bot")
+        if len(q.split()) <= 3 and any(q.startswith(p + " ") for p in phatic_patterns):
+            return True
+            
+        return False
+
     def _is_too_similar(
         self, last_response: str, new_response: str, threshold: float = 0.9
     ) -> bool:
@@ -188,40 +212,77 @@ class OptimizedChatbot:
                 last_assistant_response = msg[1]
                 break
         try:
-            # Step 1: Retrieve Redis context
+            # Step 1: Parallel retrieval of Context and User Details
             try:
-                # Convert chat_history to proper format for Redis context retrieval
-                conversation_history_for_redis = []
-                for msg in chat_history or []:
-                    if isinstance(msg, dict):
-                        conversation_history_for_redis.append(msg)
-                    elif isinstance(msg, (list, tuple)) and len(msg) >= 2:
-                        conversation_history_for_redis.append(
-                            {"role": msg[0], "content": msg[1]}
-                        )
-                # Dynamic top_n calculation based on query characteristics
-                top_n_value = _calculate_dynamic_top_n(
-                    query, conversation_history_for_redis
-                )
-                
-                # Offload blocking Redis/Embedding call to executor
                 import asyncio
                 import functools
+                from app.api.helpers import get_user_details_from_db, get_user_details_known_from_db
+                
                 loop = asyncio.get_event_loop()
-                context_chunks = await loop.run_in_executor(
-                    None,
-                    functools.partial(
-                        get_redis_context_chunks,
-                        session_id,
-                        query,
-                        top_n=top_n_value,
-                    ),
-                )
+                
+                # Check if we should skip context retrieval (phatic queries)
+                is_phatic = await self._is_phatic(query)
+                if is_phatic:
+                    logger.info("[Chatbot] Optimization: Skipping context retrieval for phatic query")
+                
+                # Define tasks
+                tasks = []
+                
+                # Task 1: Redis Context Retrieval
+                if is_phatic:
+                    # Return empty context immediately
+                    tasks.append(asyncio.sleep(0, result=[]))
+                else:
+                    # Convert chat_history...
+                    conversation_history_for_redis = []
+                    for msg in chat_history or []:
+                        if isinstance(msg, dict):
+                            conversation_history_for_redis.append(msg)
+                        elif isinstance(msg, (list, tuple)) and len(msg) >= 2:
+                            conversation_history_for_redis.append(
+                                {"role": msg[0], "content": msg[1]}
+                            )
+                            
+                    top_n_value = _calculate_dynamic_top_n(
+                        query, conversation_history_for_redis
+                    )
+                    
+                    tasks.append(loop.run_in_executor(
+                        None,
+                        functools.partial(
+                            get_redis_context_chunks,
+                            session_id,
+                            query,
+                            top_n=top_n_value,
+                        ),
+                    ))
+                
+                # Task 2: User Details (run in executor as it might be blocking DB call if not cached)
+                # Note: get_user_details_from_db now checks cache first, so it's fast
+                # We wrap it in a lambda to make it awaitable if it's not async
+                def fetch_user_details():
+                    details = get_user_details_from_db(session_id)
+                    known = details.get("user_details_known", False)
+                    if not details:
+                         # Fallback
+                         known = get_user_details_known_from_db(session_id)
+                    return details, known
+                
+                tasks.append(loop.run_in_executor(None, fetch_user_details))
+                
+                # Execute in parallel
+                results = await asyncio.gather(*tasks)
+                
+                context_chunks = results[0]
+                user_details, user_details_known = results[1]
+                
             except Exception as e:
                 logger.warning(
-                    "Redis context retrieval failed, using empty context: %s", e
+                    "Parallel retrieval failed, using fallback sequential: %s", e
                 )
                 context_chunks = []
+                user_details = {}
+                user_details_known = False
 
             context = "\n\n---\n\n".join(map(str, context_chunks or []))
             # Build a concise LLM-ready context from history (summary + latest user message)
@@ -231,61 +292,8 @@ class OptimizedChatbot:
                 history = build_llm_context_from_history(session_id, query) or self._format_history(chat_history)
             except Exception:
                 history = self._format_history(chat_history)
+            
             count = len(chat_history)
-            logger.info(
-                f"[Chatbot] Enhanced Conversation Summary generated ({len(history)} chars) for {count} messages"
-            )
-            logger.info(f"[COMPLETE_CONVERSATION_HISTORY] Session: {session_id}")
-            logger.info(
-                f"[COMPLETE_CONVERSATION_HISTORY] Raw chat_history being passed to LLM: {chat_history}"
-            )
-            logger.info(
-                f"[COMPLETE_CONVERSATION_HISTORY] Formatted conversation summary for LLM:\n{history}"
-            )
-            logger.info(
-                f"[MESSAGE_COUNT_DEBUG] Final message count for form trigger logic: {count}"
-            )
-            logger.info(
-                f"[Chatbot] Redis Context Retrieved: {len(context)} chars, {len(context_chunks)} chunks"
-            )
-            logger.info(f"[Chatbot] Chat History: {count} messages")
-
-            # Additional debug info for message count validation
-            user_messages = [
-                msg
-                for msg in conversation_history_for_redis
-                if msg.get("role") == "user"
-            ]
-            assistant_messages = [
-                msg
-                for msg in conversation_history_for_redis
-                if msg.get("role") == "assistant"
-            ]
-            logger.info(
-                f"[MESSAGE_COUNT_BREAKDOWN] Total: {count}, User: {len(user_messages)}, Assistant: {len(assistant_messages)}"
-            )
-
-            # 1. Yield processing chunk (handled by outer function, do not yield here)
-            # yield {"status": "processing", "message": "Preparing response..."}
-
-            # 2. Get user details once (Cache for this request)
-            from app.api.helpers import get_user_details_from_db, get_user_details_known_from_db
-            
-            # Fetch both in parallel if possible, or just sequentially but ONCE
-            user_details = get_user_details_from_db(session_id)
-            user_details_known = user_details.get("user_details_known", False)
-            
-            # If get_user_details_from_db doesn't return the flag (it seems it does based on previous code), 
-            # we might need to check how it was implemented. 
-            # Looking at helpers.py, get_user_details_from_db returns a dict, and it includes "user_details_known" if true.
-            # However, get_user_details_known_from_db is a separate call that returns a boolean.
-            # Let's stick to the safe bet: use the specific function if the dict doesn't have it, 
-            # OR just trust the specific function. 
-            # Actually, let's just call both ONCE.
-            
-            if not user_details:
-                 # Fallback if user_details is empty but we need the flag
-                 user_details_known = get_user_details_known_from_db(session_id)
             
             logger.info(f"[Chatbot] Context: user_details_known={user_details_known}, details_found={bool(user_details)}")
 
