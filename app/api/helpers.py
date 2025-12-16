@@ -19,7 +19,7 @@ from app.core.email_sender import send_closure_email
 from fastapi import HTTPException
 from datetime import datetime
 from app.api.models import PromptType
-from app.db.base import get_db_conn
+from app.db.base import get_db_conn, return_db_conn, DatabaseConnection
 from app.utils.redis_context import append_message_to_chat_history
 
 
@@ -40,25 +40,22 @@ def get_user_details_known_from_db(session_id: str) -> bool:
         f"[get_user_details_known_from_db] Fetching user_details_known for session_id={session_id}"
     )
     try:
-        conn = get_db_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT u.user_details_known FROM users u
-            JOIN sessions s ON u.id = s.user_id
-            WHERE s.session_id = %s
-            """,
-            (str(session_id),),
-        )
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        logger.debug(f"[get_user_details_known_from_db] DB row: {row}")
-        if row and row[0]:
-            logger.info(
-                f"[get_user_details_known_from_db] user_details_known=True for session_id={session_id}"
+        with DatabaseConnection() as (conn, cursor):
+            cursor.execute(
+                """
+                SELECT u.user_details_known FROM users u
+                JOIN sessions s ON u.id = s.user_id
+                WHERE s.session_id = %s
+                """,
+                (str(session_id),),
             )
-            return bool(row[0])
+            row = cursor.fetchone()
+            logger.debug(f"[get_user_details_known_from_db] DB row: {row}")
+            if row and row[0]:
+                logger.info(
+                    f"[get_user_details_known_from_db] user_details_known=True for session_id={session_id}"
+                )
+                return bool(row[0])
     except Exception as e:
         logger.warning(
             f"[get_user_details_known_from_db] DB error for session {session_id}: {e}"
@@ -75,42 +72,49 @@ def get_user_details_from_db(session_id: str) -> Dict[str, Any]:
 
     Returns a dictionary with user details if available, empty dict otherwise.
     """
+    # Try cache first
+    from app.core.cache import get_cached_user_details, cache_user_details
+    
+    cached = get_cached_user_details(session_id)
+    if cached is not None:
+        logger.debug(f"[get_user_details_from_db] Cache hit for session_id={session_id}")
+        return cached
+    
     logger.info(
         f"[get_user_details_from_db] Fetching user details for session_id={session_id}"
     )
     try:
-        conn = get_db_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT u.username, u.email, u.mobile, u.user_details_known 
-            FROM users u
-            JOIN sessions s ON u.id = s.user_id
-            WHERE s.session_id = %s
-            """,
-            (str(session_id),),
-        )
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
+        with DatabaseConnection() as (conn, cursor):
+            cursor.execute(
+                """
+                SELECT u.username, u.email, u.mobile, u.user_details_known 
+                FROM users u
+                JOIN sessions s ON u.id = s.user_id
+                WHERE s.session_id = %s
+                """,
+                (str(session_id),),
+            )
+            row = cursor.fetchone()
 
-        if row:
-            username, email, mobile, user_details_known = row
-            user_details = {}
-            if username:
-                user_details["username"] = username
-            if email:
-                user_details["email"] = email
-            if mobile:
-                user_details["mobile"] = mobile
-            if user_details_known:
-                user_details["user_details_known"] = True
+            if row:
+                username, email, mobile, user_details_known = row
+                user_details = {}
+                if username:
+                    user_details["username"] = username
+                if email:
+                    user_details["email"] = email
+                if mobile:
+                    user_details["mobile"] = mobile
+                if user_details_known:
+                    user_details["user_details_known"] = True
 
-            if user_details:
-                logger.info(
-                    f"[get_user_details_from_db] Found user details for session_id={session_id}: {list(user_details.keys())}"
-                )
-                return user_details
+                if user_details:
+                    logger.info(
+                        f"[get_user_details_from_db] Found user details for session_id={session_id}: {list(user_details.keys())}"
+                    )
+                    # Cache for 5 minutes
+                    cache_user_details(session_id, user_details, ttl=300)
+                    return user_details
     except Exception as e:
         logger.warning(
             f"[get_user_details_from_db] DB error for session {session_id}: {e}"
@@ -120,6 +124,7 @@ def get_user_details_from_db(session_id: str) -> Dict[str, Any]:
         f"[get_user_details_from_db] No user details found for session_id={session_id}"
     )
     return {}
+
 
 
 def mark_form_shown(session_data: dict):
@@ -243,6 +248,11 @@ def _update_user_by_session_sync(session_id: str, user: UserCreate):
             logger.info(
                 f"[update_user_by_session] User updated successfully for user_id={user_id}"
             )
+            
+            # Invalidate user details cache
+            from app.core.cache import invalidate_user_details
+            invalidate_user_details(session_id)
+            logger.debug(f"[update_user_by_session] Invalidated cache for session_id={session_id}")
 
         # Session state management removed - using optimized flow only
         logger.info(
@@ -259,7 +269,7 @@ def _update_user_by_session_sync(session_id: str, user: UserCreate):
         if cursor:
             cursor.close()
         if conn:
-            conn.close()
+            return_db_conn(conn)
         logger.info(f"[update_user_by_session] DB connection closed.")
 
 
@@ -320,7 +330,7 @@ def _initialize_session_with_prompt_sync(
 
     finally:
         cursor.close()
-        conn.close()
+        return_db_conn(conn)
 
 
 async def initialize_session_with_prompt(
@@ -394,7 +404,7 @@ def _save_message_sync(message_data: MessageCreate) -> Message:
         )
     finally:
         cursor.close()
-        conn.close()
+        return_db_conn(conn)
 
 
 async def save_message(message_data: MessageCreate) -> Message:
@@ -446,7 +456,7 @@ def _get_messages_for_session_sync(session_id: UUID) -> List[Message]:
         
     finally:
         cursor.close()
-        conn.close()
+        return_db_conn(conn)
 
 
 async def get_messages_for_session(session_id: UUID) -> List[Message]:
@@ -458,13 +468,21 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
 
 
 def _fetch_root_prompts_sync():
+    # Try cache first
+    from app.core.cache import get_cached_root_prompts, cache_root_prompts
+    
+    cached = get_cached_root_prompts()
+    if cached is not None:
+        logger.debug("[_fetch_root_prompts_sync] Cache hit for root prompts")
+        return cached
+    
     conn = None
     cursor = None
     try:
         conn = get_db_conn()
         cursor = conn.cursor()
 
-        greeting_text = "Hello! I'm **DITS AI** 👋 — your smart assistant from Ditstek Innovations.\n\n**What brings you here today?**"
+        greeting_text = "Hello! I'm **DITS AI** 👋 — your smart assistant from Ditstek Innovations.\\n\\n**What brings you here today?**"
         bottom_hint_text = "**Feel free to type if you're looking for something else!**"
         desired_order = [
             "See our Work",
@@ -537,11 +555,16 @@ def _fetch_root_prompts_sync():
                     desired_order_prompts_sorted.append(prompt)
                     break
 
-        return {
+        result = {
             "greeting_text": greeting["prompt_text"] if greeting else None,
             "root_prompts": desired_order_prompts_sorted,
             "bottom_hint_text": hint["prompt_text"] if hint else None
         }
+        
+        # Cache for 1 hour
+        cache_root_prompts(result, ttl=3600)
+        
+        return result
     except Exception as e:
         logger.error(f"Error fetching root prompts: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching prompts: {str(e)}")
@@ -549,7 +572,7 @@ def _fetch_root_prompts_sync():
         if cursor:
             cursor.close()
         if conn:
-            conn.close()
+            return_db_conn(conn)
 
 
 async def fetch_root_prompts():
@@ -690,7 +713,8 @@ async def send_message_stream(req: SentMessage):
                     )
                     conn.commit()
                     cursor.close()
-                    conn.close()
+
+                    return_db_conn(conn)
                     logger.info(f"[OPTIMIZED_FLOW] Updated is_active to FALSE for ended session_id={session_id}")
                 except Exception as e:
                     logger.error(f"[OPTIMIZED_FLOW] Failed to update is_active for ended session_id={session_id}: {e}")
@@ -729,7 +753,7 @@ def _delete_last_user_message_sync(session_id: str):
         return None
     finally:
         cursor.close()
-        conn.close()
+        return_db_conn(conn)
 
 
 async def delete_last_user_message(session_id: str):
@@ -756,7 +780,7 @@ def _get_session_is_active_sync(session_id: UUID) -> bool:
         return False
     finally:
         cursor.close()
-        conn.close()
+        return_db_conn(conn)
 
 
 async def get_session_is_active(session_id: UUID) -> bool:
