@@ -186,8 +186,9 @@ def format_response(
         paragraph_block = re.sub(r"^([-*])([^\s*\-\n])", r"\1 \2", paragraph_block, flags=re.MULTILINE)
         paragraph_block = re.sub(r"(#{1,6})([^\s\n])", r"\1 \2", paragraph_block)
 
-        # Ensure all double-escaped newlines are real newlines
-        paragraph_block = paragraph_block.replace("\\n", "\n")
+        # Ensure all literal newlines are converted to double newlines for UI rendering
+        # Replace occurrences of literal \n (one or more) with \n\n
+        paragraph_block = re.sub(r'(\\n)+', '\n\n', paragraph_block)
 
         # Ensure proper line breaks before lists - only at start of line
         paragraph_block = re.sub(r"([^\n])\n(^[-*]\s)", r"\1\n\n\2", paragraph_block, flags=re.MULTILINE)
