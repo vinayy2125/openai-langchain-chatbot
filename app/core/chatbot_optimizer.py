@@ -12,7 +12,7 @@ from app.utils.prompts import final_response_prompt, PROMPT_VERSION
 from app.utils.response_formatter import format_response, _normalize_url
 import asyncio
 import functools
-from app.api.models import MessageCreate
+from app.api.models import MessageCreate, UserCreate
 
 logger = get_logger("chatbot")
 
@@ -216,7 +216,7 @@ class OptimizedChatbot:
             try:
                 import asyncio
                 import functools
-                from app.api.helpers import get_user_details_from_db, get_user_details_known_from_db
+                from app.api.helpers import get_user_details_from_db, get_user_details_known_from_db, update_user_by_session
                 
                 loop = asyncio.get_event_loop()
                 
@@ -421,6 +421,28 @@ class OptimizedChatbot:
                 llm_json = json.loads(cleaned_json)
                 response_text = llm_json.get("response", "") or ""
                 funnel_stage = (llm_json.get("funnel_stage", "") or "").lower()
+                # EXTRACT AND SAVE USER DETAILS
+                # Only check for extraction if we don't already know the user details
+                if not user_details_known:
+                    extracted_info = llm_json.get("user_info")
+                    if extracted_info and isinstance(extracted_info, dict):
+                        # Check if we have at least a name or email
+                        if extracted_info.get("name") or extracted_info.get("email"):
+                            logger.info(f"[LeadCapture] Extracted details from LLM: {extracted_info}")
+                            try:
+                                # Save to DB
+                                user_update = UserCreate(
+                                    username=extracted_info.get("name"),
+                                    email=extracted_info.get("email"),
+                                    user_details_known=True
+                                )
+                                # update_user_by_session is async
+                                await update_user_by_session(session_id, user_update)
+                                user_details_known = True # Update local state for immediate feedback
+                                logger.info(f"[LeadCapture] Successfully saved extracted user details.")
+                            except Exception as e:
+                                logger.error(f"[LeadCapture] Failed to save extracted user details: {e}")
+
                 # Ignore LLM's user_details_known, always use DB value for meta chunk
                 user_network_id = llm_json.get("user_network_id") or None
                 logger.info(f"[Chatbot] Parsed JSON: {llm_json}")
@@ -445,10 +467,6 @@ class OptimizedChatbot:
             logger.info(
                 f"[Chatbot] Final output len={len(safe_final_text)}, funnel_stage='{funnel_stage}'"
             )
-            if "llm_json" in locals():
-                logger.info(
-                    f"[LLM_DEBUG] Raw LLM JSON response: {llm_json}"
-                )  # Debug what LLM actually returns
 
             # Step 5: Continue with regular response flow
 
@@ -477,43 +495,36 @@ class OptimizedChatbot:
                 
                 if funnel_stage == "action":
                     # LLM detected Action stage - user wants to connect or shows strong buying intent
+                    # MODIFIED: Instead of triggering form, we let the LLM Ask for details (as per prompt instructions)
                     if count >= 2:
-                        # Safety: minimum 2 user messages before any form
-                        trigger_form = True
-                        trigger_reason = "action_stage_llm_detected"
                         logger.info(
-                            f"[FORM_DEBUG] Action stage detected by LLM: funnel_stage='{funnel_stage}', count={count}"
+                            f"[LeadCapture] Action stage detected. Delegating data collection to LLM conversation. (count={count})"
                         )
                     else:
-                        # Too early - need at least 2 user messages
                         logger.info(
-                            f"[FORM_DEBUG] Action stage detected but count={count} < 2 - waiting for minimum messages"
+                            f"[LeadCapture] Action stage detected but count={count} < 2 - waiting for minimum messages"
                         )
                 elif funnel_stage == "intent":
                     # LLM detected Intent stage - user shows buying signals
+                    # MODIFIED: Instead of triggering form, we let the LLM Ask for details
                     if count >= 2:
-                        # Trigger form if LLM detected intent and we have minimum messages
-                        trigger_form = True
-                        trigger_reason = "intent_stage_llm_detected"
                         logger.info(
-                            f"[FORM_DEBUG] Intent stage detected by LLM: funnel_stage='{funnel_stage}', count={count}"
+                            f"[LeadCapture] Intent stage detected. Delegating data collection to LLM conversation. (count={count})"
                         )
                     else:
                         logger.info(
-                            f"[FORM_DEBUG] Intent stage detected but count={count} < 2 - waiting for minimum messages"
+                            f"[LeadCapture] Intent stage detected but count={count} < 2 - waiting for minimum messages"
                         )
                 elif funnel_stage == "interest":
                     # LLM detected Interest stage - user is engaged
+                    # MODIFIED: Instead of triggering form, we let the LLM Ask for details
                     if count >= 3:
-                        # For interest stage, wait for at least 3 messages to ensure engagement
-                        trigger_form = True
-                        trigger_reason = "interest_stage_llm_detected"
                         logger.info(
-                            f"[FORM_DEBUG] Interest stage detected by LLM with sufficient engagement: funnel_stage='{funnel_stage}', count={count}"
+                            f"[LeadCapture] Interest stage detected. Delegating data collection to LLM conversation. (count={count})"
                         )
                     else:
                         logger.info(
-                            f"[FORM_DEBUG] Interest stage detected but count={count} < 3 - continue building rapport"
+                            f"[LeadCapture] Interest stage detected but count={count} < 3 - continue building rapport"
                         )
                 elif count >= 10:
                     # Fallback: If conversation is extended without form trigger, trigger anyway
@@ -533,7 +544,9 @@ class OptimizedChatbot:
                 # from app.utils.response_formatter import format_response
 
                 # Format response immediately (no blocking URL validation)
-                formatted = format_response(cleaned, query, None)
+                # formatted = format_response(cleaned, query, None)
+                # Skip formatting to debug newline issue
+                formatted = cleaned
                 # Note: format_response already handles \\n replacement internally
 
                 # Quick URL normalization (no network calls) - fix spaces in URLs
