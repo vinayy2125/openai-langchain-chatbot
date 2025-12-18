@@ -92,25 +92,57 @@ def main() -> int:
         logger.error("Failed to connect to Redis: %s", exc)
         return 2
 
-    prompts: Optional[List[Dict[str, Any]]] = None
+    # If file is provided, load and refresh as list of prompts (legacy/archive mode)
     if args.file:
         try:
             prompts = load_prompts_from_file(args.file, args.limit)
             logger.info("Loaded %d prompts from file %s", len(prompts), args.file)
+            from app.db.redis_prompts import refresh_prompts
+            written = refresh_prompts(redis_client, prompts=prompts, limit=args.limit, ensure_idx=args.ensure_index, as_json=args.as_json)
+            logger.info("Wrote %d prompts into Redis", written)
+            print(json.dumps({"status": "success", "written": written}))
+            return 0
         except Exception as exc:
-            logger.error("Failed to load prompts from file: %s", exc)
+            logger.error("Failed to load/refresh prompts from file: %s", exc)
             return 3
 
-    # Use helper to refresh prompts
+    # Default Mode: Refresh System Prompts as Single JSON Object
     try:
+        from app.utils.prompts import DEFAULT_PROMPT_SECTIONS
+        
+        # 1. Ensure Index Exists (using helper but with empty prompts list to skip writing)
         from app.db.redis_prompts import refresh_prompts
+        refresh_prompts(redis_client, prompts=[], ensure_idx=args.ensure_index, as_json=args.as_json)
 
-        written = refresh_prompts(redis_client, prompts=prompts, limit=args.limit, ensure_idx=args.ensure_index, as_json=args.as_json)
-        logger.info("Wrote %d prompts into Redis", written)
-        print(json.dumps({"status": "success", "written": written}))
+        # 2. Push System Prompt Sections as Single JSON Object
+        logger.info("Pushing system prompt sections to Redis key 'chat_prompt_json'...")
+        redis_client.json().set("chat_prompt_json", "$", DEFAULT_PROMPT_SECTIONS)
+        logger.info("Successfully updated 'chat_prompt_json' in Redis.")
+
+        # 3. Cleanup: Remove fragmented keys that might have been created previously
+        # We want to remove chat_prompt_json:* but NOT chat_prompt_json
+        # Only cleanup if we are in this mode
+        scan_cursor = 0
+        deleted_count = 0
+        while True:
+            scan_cursor, keys = redis_client.scan(scan_cursor, match="chat_prompt_json:*", count=100)
+            if keys:
+                # filter out the main key if it happens to match (it shouldn't with :*)
+                keys_to_del = [k for k in keys if k != "chat_prompt_json"]
+                if keys_to_del:
+                    redis_client.delete(*keys_to_del)
+                    deleted_count += len(keys_to_del)
+            if scan_cursor == 0:
+                break
+        
+        if deleted_count > 0:
+            logger.info("Cleaned up %d fragmented 'chat_prompt_json:*' keys", deleted_count)
+
+        print(json.dumps({"status": "success", "written": 1, "cleaned": deleted_count}))
         return 0
+
     except Exception as exc:
-        logger.exception("Failed to refresh prompts: %s", exc)
+        logger.exception("Failed to refresh system prompts: %s", exc)
         return 4
 
 
