@@ -8,7 +8,8 @@ from app.utils.llm_utils import generate_llm_response
 from app.utils.redis_context import get_redis_context_chunks
 
 # format_response is now imported only when needed (async version with URL validation)
-from app.utils.prompts import final_response_prompt, PROMPT_VERSION
+from app.utils.prompts import PROMPT_VERSION
+from app.utils.dynamic_prompts import build_dynamic_prompt
 from app.utils.response_formatter import format_response, _normalize_url
 import asyncio
 import functools
@@ -332,19 +333,11 @@ class OptimizedChatbot:
                 return
 
             # ============================================================
-            # PROMPT SOURCE CLARITY: Using prompts.py, NOT Redis chunks
-            # ============================================================
+            # PROMPT SOURCE: Using build_dynamic_prompt (Redis-backed, fallback to prompts.py)
             logger.info(
-                "[PROMPT_SOURCE] ✓ Loading prompt instructions from prompts.py via final_response_prompt() function"
+                "[PROMPT_SOURCE] Using build_dynamic_prompt: will use Redis prompt sections if available, else fallback to prompts.py"
             )
-            logger.info(
-                "[PROMPT_SOURCE] ✗ NOT using Redis chat_prompt_json chunks (Redis only used for knowledge base context)"
-            )
-            logger.info(
-                f"[PROMPT_SOURCE] Prompt version: {PROMPT_VERSION} from app.utils.prompts"
-            )
-            
-            prompt = final_response_prompt(
+            prompt = build_dynamic_prompt(
                 prompt_context=context,
                 conversation_summary=history or "",
                 query=query,
