@@ -26,7 +26,12 @@ def build_dynamic_prompt(
     2. Assembles the prompt using Redis sections + dynamic context
     3. Falls back to final_response_prompt from prompts.py if Redis unavailable
     """
-    from app.utils.prompts import _build_user_details_context, _greeting_instruction, final_response_prompt
+    from app.utils.prompts import (
+        _build_user_details_context, 
+        _greeting_instruction, 
+        _build_context_block,
+        final_response_prompt
+    )
     from app.utils.redis_prompt_loader import get_prompt_sections_from_redis
     
     try:
@@ -41,7 +46,7 @@ def build_dynamic_prompt(
             output_schema = sections.get("output_schema", "")
             reminders = sections.get("reminders", "")
             
-            # Build dynamic blocks using existing functions from prompts.py
+            # Build dynamic blocks using shared functions from prompts.py
             user_details_context = _build_user_details_context(user_details, user_details_known)
             greeting = _greeting_instruction(count)
             
@@ -52,28 +57,25 @@ def build_dynamic_prompt(
             if last_assistant_prompt:
                 user_entities += f"\nLast Assistant Prompt: {last_assistant_prompt}"
             
-            # Build context block
-            context_block = (
-                "### Context\n"
-                f"- KB Context: {prompt_context}\n"
-                f"- Summary: {conversation_summary}\n"
-                f"- Query: {query}\n"
-                f"- Details Known: {user_details_known}\n"
-                f"- Count: {count}\n"
-                f"{user_entities}\n"
-                f"{user_details_context}\n"
+            # Use shared context block builder
+            context_block = _build_context_block(
+                prompt_context,
+                conversation_summary,
+                query,
+                user_details_known,
+                count,
+                user_entities,
+                user_details_context,
             )
             
-            # Assemble final prompt by combining Redis sections with dynamic context
+            # Assemble final prompt
             prompt_parts = []
             
             if core:
                 try:
-                    # Apply formatting if the section contains placeholders
                     formatted_core = core.format(user_details_known=user_details_known)
                     prompt_parts.append(formatted_core)
                 except Exception:
-                    # Fallback to raw string if formatting fails or no placeholder
                     prompt_parts.append(core)
             
             if greeting and behavior:

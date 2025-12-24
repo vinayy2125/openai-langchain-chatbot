@@ -1,47 +1,74 @@
 from typing import Optional
-from app.utils.redis_context import get_chat_history, summarize_chunks_with_llm
+from app.utils.redis_context import get_chat_history
+from app.utils.llm_client import call_llm_conversation_summary
+from app.logger import get_logger
+
+logger = get_logger("chat_state")
 
 
 def build_llm_context_from_history(session_id: str, query: Optional[str] = None) -> str:
     """
-    Build a robust LLM context from chat history:
-    - Summarize all previous messages except the latest user message.
-    - Include the latest user message in full.
-    - Returns a string suitable for LLM prompt context.
+    Build a robust LLM context from chat history using conversation-aware summarization.
+    
+    This function:
+    1. Retrieves chat history from Redis/DB
+    2. Uses a specialized LLM prompt to extract ALL user-provided details
+    3. Returns a structured summary that preserves:
+       - User details (name, email, location, industry, etc.)
+       - Meeting availability and preferences
+       - Questions already asked to prevent repetition
+       - Key conversation context
+    
+    Returns a string suitable for LLM prompt context.
     """
     chat_history = get_chat_history(session_id)
     if not chat_history:
+        logger.info(f"[ChatState] No chat history found for session {session_id}")
         return ""
 
-    # Find the latest user message (from the end)
-    latest_user_idx = None
-    for idx in range(len(chat_history) - 1, -1, -1):
-        role = chat_history[idx].get("role") or chat_history[idx].get("sender")
-        if role == "user":
-            latest_user_idx = idx
-            break
+    # For very short conversations (1-2 messages), skip summarization
+    # Just return the messages directly to save LLM call
+    if len(chat_history) <= 2:
+        logger.info(f"[ChatState] Short conversation ({len(chat_history)} msgs), skipping summary")
+        parts = []
+        for msg in chat_history:
+            role = msg.get("role") or msg.get("sender", "unknown")
+            content = msg.get("content", "")
+            if content:
+                parts.append(f"{role.capitalize()}: {content}")
+        return "\n".join(parts)
 
-    if latest_user_idx is None:
-        # No user message found, summarize all
-        summary = summarize_chunks_with_llm([
-            m.get("content", "") for m in chat_history if m.get("content")
-        ], query or "")
-        return summary
-
-    # Split history: all before latest user message, and the latest user message
-    earlier_msgs = chat_history[:latest_user_idx]
-    latest_user_msg = chat_history[latest_user_idx]
-
-    # Summarize earlier messages (if any)
-    summary = ""
-    if earlier_msgs:
-        summary = summarize_chunks_with_llm([
-            m.get("content", "") for m in earlier_msgs if m.get("content")
-        ], query or latest_user_msg.get("content", ""))
-
-    # Build context: summary (if any) + latest user message
-    context_parts = []
+    # For longer conversations, use the conversation-aware summarizer
+    logger.info(f"[ChatState] Building conversation summary for {len(chat_history)} messages")
+    
+    # Use the specialized conversation summarizer that extracts user details
+    summary = call_llm_conversation_summary(chat_history)
+    
     if summary:
-        context_parts.append(f"Summary of previous conversation:\n{summary}")
-    context_parts.append(f"Latest user message:\n{latest_user_msg.get('content', '')}")
-    return "\n\n".join(context_parts)
+        logger.info(f"[ChatState] Generated structured summary ({len(summary)} chars)")
+        # Log a preview for debugging
+        preview = summary[:300] + "..." if len(summary) > 300 else summary
+        logger.debug(f"[ChatState] Summary preview: {preview}")
+        return summary
+    
+    # Fallback: If summarization fails, return basic formatted history
+    logger.warning("[ChatState] Summary generation failed, using basic format")
+    return _format_history_basic(chat_history)
+
+
+def _format_history_basic(chat_history: list) -> str:
+    """
+    Basic fallback formatter for chat history.
+    Used when LLM summarization fails.
+    """
+    if not chat_history:
+        return ""
+    
+    parts = []
+    for msg in chat_history:
+        role = msg.get("role") or msg.get("sender", "unknown")
+        content = msg.get("content", "")
+        if content:
+            parts.append(f"{role.capitalize()}: {content}")
+    
+    return "\n".join(parts)

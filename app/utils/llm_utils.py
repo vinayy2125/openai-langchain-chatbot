@@ -3,12 +3,12 @@ from typing import Any, Dict, List, Optional, Union
 from app.utils.llm_client import llm
 from app.logger import get_logger
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 
 logger = get_logger(__name__)
 
 # Configuration (move to top for SonarQube / maintainability)
-DEFAULT_MODEL: str = "gpt-4o"
+DEFAULT_MODEL: str = "openai/gpt-oss-120b"
 DEFAULT_TEMPERATURE: float = 0.7
 FALLBACK_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"  # kept for reference if needed
 
@@ -69,13 +69,13 @@ def _validate_and_build_messages(
 
 def _invoke_with_local_wrapper(messages: List[Any]) -> Any:
     """
-    Try to invoke a local ChatOpenAI wrapper if available and compatible.
+    Try to invoke a local ChatGroq wrapper if available and compatible.
     This isolates local-specific invocation attempts.
     """
     model_name = getattr(llm, "model", DEFAULT_MODEL)
     temperature = getattr(llm, "temperature", DEFAULT_TEMPERATURE)
 
-    local_llm = ChatOpenAI(model=model_name, temperature=temperature, streaming=False)
+    local_llm = ChatGroq(model=model_name, temperature=temperature, streaming=False)
 
     # support multiple call patterns to be resilient across versions
     if hasattr(local_llm, "invoke"):
@@ -86,7 +86,7 @@ def _invoke_with_local_wrapper(messages: List[Any]) -> Any:
     if callable(local_llm):
         return local_llm(messages)
 
-    raise RuntimeError("Local ChatOpenAI has no usable call method")
+    raise RuntimeError("Local ChatGroq has no usable call method")
 
 
 def _invoke_with_configured_llm(messages: List[Any]) -> Any:

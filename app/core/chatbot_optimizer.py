@@ -2,7 +2,7 @@ import json
 import re
 import tiktoken
 from functools import lru_cache
-from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from app.logger import get_logger
 from app.utils.llm_utils import generate_llm_response
 from app.utils.redis_context import get_redis_context_chunks
@@ -14,8 +14,25 @@ from app.utils.response_formatter import format_response, _normalize_url
 import asyncio
 import functools
 from app.api.models import MessageCreate, UserCreate
+from email_validator import validate_email, EmailNotValidError
 
 logger = get_logger("chatbot")
+
+
+def _validate_email(email: str) -> str | None:
+    """
+    Validate email format using email-validator library.
+    Returns the normalized email if valid, None if invalid.
+    """
+    if not email:
+        return None
+    try:
+        # Validate and normalize the email
+        valid = validate_email(email, check_deliverability=False)
+        return valid.normalized
+    except EmailNotValidError as e:
+        logger.warning(f"[LeadCapture] Invalid email format rejected: '{email}' - {e}")
+        return None
 
 
 def _calculate_dynamic_top_n(query: str, conversation_history: list) -> int:
@@ -120,11 +137,15 @@ class ContextOptimizer:
     while maximizing relevance and information retention.
     """
 
-    def __init__(self, model: str = "gpt-4o"):
+    def __init__(self, model: str = "openai/gpt-oss-120b"):
         self.model = model
-        self.encoding = tiktoken.encoding_for_model(model)
-        self.model_limits = {"gpt-4o": 128000}
-        self.context_limit = self.model_limits.get(model, 4096)
+        # Use cl100k_base encoding as fallback for non-OpenAI models
+        try:
+            self.encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            self.encoding = tiktoken.get_encoding("cl100k_base")
+        self.model_limits = {"openai/gpt-oss-120b": 128000, "llama-3.1-8b-instant": 131072, "mixtral-8x7b-32768": 32768}
+        self.context_limit = self.model_limits.get(model, 128000)
 
     @lru_cache(maxsize=1000)
     def count_tokens_cached(self, text: str) -> int:
@@ -143,7 +164,8 @@ class OptimizedChatbot:
             "thanks", "thank you", "thx",
             "good morning", "good afternoon", "good evening",
             "bye", "goodbye", "see you",
-            "ok", "okay", "sure", "cool"
+            "ok", "okay", "sure", "cool",
+            "no", "yes", "nope", "yep"
         }
         
         # Exact match
@@ -171,12 +193,12 @@ class OptimizedChatbot:
         ).ratio()
         return ratio >= threshold
 
-    def __init__(self, llm=None, model: str = "gpt-4o"):
+    def __init__(self, llm=None, model: str = "openai/gpt-oss-120b"):
         """Initialize OptimizedChatbot.
 
         Parameters:
         - llm: optional external LLM client object to use (must implement .invoke or content access). If provided, it will be used as self.query_llm.
-        - model: model name to instantiate a default ChatOpenAI if llm is not provided.
+        - model: model name to instantiate a default ChatGroq if llm is not provided.
         """
         self.model = model
         # ContextOptimizer is unused in the critical path, skipping initialization to save overhead
@@ -185,7 +207,7 @@ class OptimizedChatbot:
         # self.model_limits = self.context_optimizer.model_limits
         # self.context_limit = self.context_optimizer.context_limit
 
-        self.query_llm = llm if llm is not None else ChatOpenAI(model=model)
+        self.query_llm = llm if llm is not None else ChatGroq(model=model)
 
     async def get_detailed_response(
         self, query: str, chat_history, session_id: str, stream: bool = True
@@ -416,22 +438,60 @@ class OptimizedChatbot:
                 funnel_stage = (llm_json.get("funnel_stage", "") or "").lower()
                 # EXTRACT AND SAVE USER DETAILS
                 # Only check for extraction if we don't already know the user details
+                email_was_invalid = False  # Track for response post-processing
                 if not user_details_known:
                     extracted_info = llm_json.get("user_info")
                     if extracted_info and isinstance(extracted_info, dict):
-                        # Check if we have at least a name or email
-                        if extracted_info.get("name") or extracted_info.get("email"):
-                            logger.info(f"[LeadCapture] Extracted details from LLM: {extracted_info}")
+                        # Validate email if present
+                        raw_email = extracted_info.get("email")
+                        validated_email = _validate_email(raw_email) if raw_email else None
+                        
+                        # Track if email was provided but invalid (for response correction)
+                        if raw_email and not validated_email:
+                            email_was_invalid = True
+                            # Fix the response_text to not show the invalid email
+                            if raw_email in response_text:
+                                # First, remove the invalid email entirely from response
+                                # Handle various patterns: "email vinay.com", "email (vinay.com)", "email you provided (vinay.com)"
+                                response_text = re.sub(
+                                    rf'\s*\(?\s*{re.escape(raw_email)}\s*\)?\s*',
+                                    ' ',
+                                    response_text
+                                )
+                                # Clean up any "email you provided ()" or "email ()" remnants
+                                response_text = re.sub(
+                                    r'email\s+you\s+provided\s*\(\s*\)',
+                                    'email',
+                                    response_text,
+                                    flags=re.IGNORECASE
+                                )
+                                response_text = re.sub(
+                                    r'email\s*\(\s*\)',
+                                    'email',
+                                    response_text,
+                                    flags=re.IGNORECASE
+                                )
+                                # Clean up double spaces
+                                response_text = re.sub(r'\s{2,}', ' ', response_text)
+                                
+                            # Always add a request for valid email when invalid
+                            if "valid email" not in response_text.lower():
+                                response_text += "\n\n⚠️ **The email format provided doesn't appear to be valid.** Could you please share a valid email address (e.g., name@company.com) so we can send you the proposal?"
+                            logger.info(f"[LeadCapture] Fixed response to remove invalid email mention: '{raw_email}'")
+                        
+                        # Check if we have at least a name or a VALID email
+                        if extracted_info.get("name") or validated_email:
+                            logger.info(f"[LeadCapture] Extracted details from LLM: name={extracted_info.get('name')}, email={validated_email or '(invalid/none)'}")
                             try:
-                                # Save to DB
+                                # Save to DB - only use validated email
                                 user_update = UserCreate(
                                     username=extracted_info.get("name"),
-                                    email=extracted_info.get("email"),
-                                    user_details_known=True
+                                    email=validated_email,  # Only save if validated
+                                    user_details_known=True if validated_email else False  # Only mark known if we have valid email
                                 )
                                 # update_user_by_session is async
                                 await update_user_by_session(session_id, user_update)
-                                user_details_known = True # Update local state for immediate feedback
+                                user_details_known = True if validated_email else user_details_known
                                 logger.info(f"[LeadCapture] Successfully saved extracted user details.")
                             except Exception as e:
                                 logger.error(f"[LeadCapture] Failed to save extracted user details: {e}")

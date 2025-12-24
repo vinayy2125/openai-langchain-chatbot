@@ -45,7 +45,7 @@ def create_index_from_yaml(yaml_path: str):
     # Check if required Redis modules are loaded
     try:
         # Use separate args; some redis-py versions expect the command and args separately
-        modules = get_redis.execute_command('MODULE', 'LIST')
+        modules = get_redis().execute_command('MODULE', 'LIST')
         # modules is typically a list of module-info arrays; make a safe string representation
         modules_normalized = []
         for mod in modules:
@@ -87,7 +87,7 @@ def create_index_from_yaml(yaml_path: str):
     # Check if index exists
     index_exists = False
     try:
-        get_redis.ft(index_name).info()
+        get_redis().ft(index_name).info()
         logger.info(f"🔍 Index '{index_name}' already exists")
         index_exists = True
     except ResponseError as e:
@@ -147,7 +147,7 @@ def create_index_from_yaml(yaml_path: str):
 
     try:
         definition = IndexDefinition(prefix=[prefix], index_type=IndexType.JSON)
-        get_redis.ft(index_name).create_index(redis_schema, definition=definition)
+        get_redis().ft(index_name).create_index(redis_schema, definition=definition)
         logger.info(f"✅ Created RediSearch index '{index_name}' on prefix '{prefix}'")
         return True
     except Exception as e:
@@ -203,7 +203,7 @@ def store_chunk_document(chunk_id: str, data: Dict[str, Any]) -> bool:
     """Store a single chunk as a Redis JSON document."""
     try:
         key = f"chunk:{chunk_id}"
-        get_redis.json().set(key, "$", data)
+        get_redis().json().set(key, "$", data)
         return True
     except ResponseError as e:
         if "unknown command" in str(e).lower():

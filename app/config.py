@@ -38,6 +38,20 @@ def get_redis_client(connect_timeout: int = 5):
         raise RuntimeError("Could not connect to Redis; is the server running?")
     except Exception as exc:
         raise RuntimeError(f"Unexpected Redis error: {exc}")
+
+
+# Lazy-loaded Redis client (initialized on first access)
+_redis_client = None
+
+
+def get_redis():
+    """Get the lazily-initialized Redis client.
     
-get_redis = get_redis_client()
- 
+    Uses lazy initialization to:
+    - Avoid failures at module import time if Redis is temporarily unavailable
+    - Allow for connection retry on transient failures
+    """
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = get_redis_client()
+    return _redis_client
