@@ -66,8 +66,9 @@ def build_redis_client(host: Optional[str], port: Optional[int], password: Optio
         try:
             from app.config import get_redis
 
-            if get_redis:
-                return get_redis
+            client = get_redis()
+            if client:
+                return client
         except Exception:
             pass
         # Fallback to default local Redis

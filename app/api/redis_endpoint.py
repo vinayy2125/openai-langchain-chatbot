@@ -39,7 +39,7 @@ async def redis_context_endpoint(payload: RedisContextRequest):
         strt_time = datetime.now(timezone.utc)
         # Use similarity_search to get queries with similarity scores
         key = f"session:{payload.session_id}"
-        stored_results = get_redis.json().get(key)
+        stored_results = get_redis().json().get(key)
         if stored_results and "created_at" in stored_results:
             created_at = stored_results["created_at"]
         else:
@@ -88,7 +88,7 @@ async def refresh_prompts_endpoint(limit: int = 100, ensure_index: bool = True):
     Returns JSON with number of prompts written.
     """
     try:
-        redis_client = get_redis
+        redis_client = get_redis()
         if not redis_client:
             raise HTTPException(status_code=500, detail="Redis client not configured")
         count = refresh_prompts(redis_client, prompts=None, limit=limit, ensure_idx=ensure_index)

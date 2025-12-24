@@ -2,7 +2,7 @@
 # build_llm_context_from_history moved to app.utils.chat_state
 from app.logger import get_logger
 from typing import List, Dict, Any, Optional
-from app.db.redis_vector_helper import similarity_search, similarity_search_chat_history
+from app.db.redis_vector_helper import similarity_search_chat_history
 from app.utils.llm_client import call_llm_summarize_chunks
 import json
 from app.db import base
@@ -17,6 +17,22 @@ _EMBEDDING_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 from pathlib import Path
 
 logger = get_logger("chatbot")
+
+# ChromaDB for knowledge base search (lazy-loaded)
+_chroma_manager = None
+
+
+def _get_chroma_manager():
+    """Get or create ChromaDB manager instance (lazy-loaded)."""
+    global _chroma_manager
+    if _chroma_manager is None:
+        try:
+            from app.db.chroma_manager import get_chroma_manager
+            _chroma_manager = get_chroma_manager()
+        except Exception as e:
+            logger.warning(f"ChromaDB not available, falling back to Redis: {e}")
+            return None
+    return _chroma_manager
 
 
 def _safe_json_set(client, key, path, value):
@@ -59,7 +75,10 @@ def get_redis_client():
     connection logic.
     """
     try:
-        # Prefer the already-instantiated client if present
+        # config_redis_client is a function (get_redis), call it to get the client
+        if callable(config_redis_client):
+            return config_redis_client()
+        # If it's already a client instance, return it directly
         if config_redis_client:
             return config_redis_client
     except Exception:
@@ -114,11 +133,24 @@ def save_chat_history(session_id, chat_history):
 
         # Offload embedding computation to background thread to avoid blocking
         def _compute_and_set_embedding(k, text):
+            """Background task to compute and store embedding. Errors are logged but never propagate."""
             try:
                 if not text or not text.strip():
                     return
                 vec = get_embedding(text)
-                client = get_redis_client()
+                
+                # Get Redis client with validation
+                try:
+                    client = get_redis_client()
+                except Exception as client_err:
+                    logger.warning("Failed to get Redis client for embedding: %s", client_err)
+                    return
+                
+                # Validate client is usable
+                if client is None or not hasattr(client, 'json'):
+                    logger.warning("Redis client is invalid or missing json() method for key %s", k)
+                    return
+                
                 # Try to update existing JSON root with embedding
                 try:
                     # If key contains a valid JSON root, this will return the object
@@ -157,7 +189,7 @@ def save_chat_history(session_id, chat_history):
                             _safe_json_set(client, k, '$', payload)
                             return
                         except Exception as e:
-                            logger.exception("Failed to create JSON root for %s: %s", k, e)
+                            logger.warning("Failed to create JSON root for %s: %s (non-fatal, continuing)", k, e)
                             return
 
                     # existing JSON root present, set embedding path
@@ -171,28 +203,18 @@ def save_chat_history(session_id, chat_history):
                             _safe_json_set(client, k, '$', existing)
                             return
                         except Exception:
-                            logger.exception("Failed to store embedding into Redis JSON for %s", k)
+                            logger.warning("Failed to store embedding into Redis JSON for %s (non-fatal)", k)
                 except Exception:
-                    logger.exception("Background embedding computation failed while writing JSON for session %s", session_id)
+                    logger.warning("Background embedding write failed for session %s (non-fatal)", session_id)
             except Exception:
-                logger.exception("Background embedding computation failed for session %s", session_id)
+                logger.warning("Background embedding computation failed for session %s (non-fatal)", session_id)
 
         try:
             _EMBEDDING_EXECUTOR.submit(_compute_and_set_embedding, key, messages_text)
         except Exception:
             # best-effort; ignore if executor fails
             pass
-        except Exception:
-            # ignore JSON storage errors
-            pass
 
-        # Also store string form for compatibility with tests/mocks that expect .set/.get
-        try:
-            if hasattr(r, 'set'):
-                r.set(key, json.dumps(chat_history))
-        except Exception:
-            # ignore string set errors
-            pass
         return True
     except Exception as e:
         logger.error(f"Redis save failed for chat_history: {e}, falling back to DB.")
@@ -284,11 +306,10 @@ def get_redis_context_chunks(
     fallback_keywords: str = "capabilities",
 ) -> List[str]:
     """
-    Retrieve context chunks from Redis using dynamic semantic similarity search.
+    Retrieve context chunks using ChromaDB (primary) and Redis chat history.
 
-    Uses semantic similarity search to find relevant chunks from the knowledge base
-    dynamically based on query meaning and context. No static keyword matching -
-    relies on vector similarity to find the most relevant content.
+    Uses ChromaDB for knowledge base semantic similarity search and Redis
+    for chat history search. Falls back to Redis-only if ChromaDB is unavailable.
 
     Args:
         session_id: Session identifier
@@ -301,25 +322,43 @@ def get_redis_context_chunks(
     Returns:
         List of relevant context chunks, ordered by semantic similarity
     """
-    # Use key_terms if provided, otherwise rely on semantic similarity alone
-    # Semantic search will handle relevance ranking dynamically
-
     chat_history = get_chat_history(session_id)
 
     # Derive search query from chat history and user query
     search_query = derive_search_query(chat_history, query, domain_prefix, fallback_keywords)
 
-    # Perform KB similarity search (chunk_index)
+    # Perform KB similarity search using ChromaDB (primary)
     kb_results = []
-    try:
-        kb_results = similarity_search(session_id, search_query, top_n=top_n)
-    except Exception as e:
-        logger.warning(f"KB similarity search failed: {e}")
+    chroma = _get_chroma_manager()
+    
+    if chroma:
+        try:
+            # Use ChromaDB for knowledge base search
+            chroma_results = chroma.similarity_search(search_query, n_results=top_n)
+            # Convert ChromaDB results to common format
+            for result in chroma_results:
+                kb_results.append({
+                    "text": result.get("text", ""),
+                    "metadata": result.get("metadata", {}),
+                    "similarity": result.get("similarity", 0),
+                })
+            logger.debug(f"ChromaDB returned {len(kb_results)} results for query")
+        except Exception as e:
+            logger.warning(f"ChromaDB similarity search failed: {e}")
+    else:
+        # Fallback to Redis if ChromaDB is not available
+        try:
+            from app.db.redis_vector_helper import similarity_search
+            kb_results = similarity_search(session_id, search_query, top_n=top_n)
+            logger.debug(f"Redis fallback returned {len(kb_results)} results")
+        except Exception as e:
+            logger.warning(f"Redis KB similarity search failed: {e}")
 
-    # Perform chat-history similarity search (chat_history_index)
+    # Perform chat-history similarity search (Redis - chat_history_index)
+    # IMPORTANT: Pass session_id to filter to current session only (prevents data leakage)
     history_results = []
     try:
-        history_results = similarity_search_chat_history(search_query, top_n=top_n)
+        history_results = similarity_search_chat_history(search_query, session_id=session_id, top_n=top_n)
     except Exception as e:
         logger.warning(f"Chat-history similarity search failed: {e}")
 
@@ -332,7 +371,7 @@ def get_redis_context_chunks(
 
     processed_kb = []
     for item in kb_results:
-        text = item.get("response") or item.get("text") or item.get("query") or ""
+        text = item.get("text") or item.get("response") or item.get("query") or ""
         if text:
             processed_kb.append(str(text))
 

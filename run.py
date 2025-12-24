@@ -1,6 +1,7 @@
 import uvicorn
 
 if __name__ == "__main__":
+    print("Starting Backend API...")
     uvicorn.run(
         "app.main:create_app",
         factory=True,

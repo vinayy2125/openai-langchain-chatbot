@@ -72,14 +72,6 @@ def get_user_details_from_db(session_id: str) -> Dict[str, Any]:
 
     Returns a dictionary with user details if available, empty dict otherwise.
     """
-    # Try cache first
-    from app.core.cache import get_cached_user_details, cache_user_details
-    
-    cached = get_cached_user_details(session_id)
-    if cached is not None:
-        logger.debug(f"[get_user_details_from_db] Cache hit for session_id={session_id}")
-        return cached
-    
     logger.info(
         f"[get_user_details_from_db] Fetching user details for session_id={session_id}"
     )
@@ -112,8 +104,6 @@ def get_user_details_from_db(session_id: str) -> Dict[str, Any]:
                     logger.info(
                         f"[get_user_details_from_db] Found user details for session_id={session_id}: {list(user_details.keys())}"
                     )
-                    # Cache for 5 minutes
-                    cache_user_details(session_id, user_details, ttl=300)
                     return user_details
     except Exception as e:
         logger.warning(
@@ -248,11 +238,7 @@ def _update_user_by_session_sync(session_id: str, user: UserCreate):
             logger.info(
                 f"[update_user_by_session] User updated successfully for user_id={user_id}"
             )
-            
-            # Invalidate user details cache
-            from app.core.cache import invalidate_user_details
-            invalidate_user_details(session_id)
-            logger.debug(f"[update_user_by_session] Invalidated cache for session_id={session_id}")
+
 
         # Session state management removed - using optimized flow only
         logger.info(
@@ -468,13 +454,6 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
 
 
 def _fetch_root_prompts_sync():
-    # Try cache first
-    from app.core.cache import get_cached_root_prompts, cache_root_prompts
-    
-    cached = get_cached_root_prompts()
-    if cached is not None:
-        logger.debug("[_fetch_root_prompts_sync] Cache hit for root prompts")
-        return cached
     
     conn = None
     cursor = None
@@ -482,7 +461,7 @@ def _fetch_root_prompts_sync():
         conn = get_db_conn()
         cursor = conn.cursor()
 
-        greeting_text = "Hello! I'm **DITS AI** 👋 — your smart assistant from Ditstek Innovations.\\n\\n**What brings you here today?**"
+        greeting_text = "Hello! I'm **DITS AI** 👋 — your smart assistant from Ditstek Innovations.\n\n**What brings you here today?**"
         bottom_hint_text = "**Feel free to type if you're looking for something else!**"
         desired_order = [
             "See our Work",
@@ -560,9 +539,6 @@ def _fetch_root_prompts_sync():
             "root_prompts": desired_order_prompts_sorted,
             "bottom_hint_text": hint["prompt_text"] if hint else None
         }
-        
-        # Cache for 1 hour
-        cache_root_prompts(result, ttl=3600)
         
         return result
     except Exception as e:

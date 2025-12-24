@@ -13,6 +13,18 @@ services:
     depends_on:
       - db
 
+  utility_app:
+    build: .
+    container_name: chatbot_utility_app
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    depends_on:
+      - api
+      - db
+    command: ["python", "run_utility.py"]
+
 
   db:
     image: postgres:16
