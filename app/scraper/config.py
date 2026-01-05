@@ -66,6 +66,22 @@ class ScraperConfig:
         os.getenv("SCRAPER_DETAILED_LOGGING", "true").lower() == "true"
     )
     
+    # Speed & Optimization settings
+    use_sitemap: bool = field(default_factory=lambda:
+        os.getenv("SCRAPER_USE_SITEMAP", "true").lower() == "true"
+    )
+    exclude_resources: List[str] = field(default_factory=lambda:
+        os.getenv("SCRAPER_EXCLUDE_RESOURCES", "image,media,font,stylesheet").split(",")
+    )
+    
+    # Interaction settings for dynamic content
+    interaction_wait_ms: int = field(default_factory=lambda: int(
+        os.getenv("SCRAPER_INTERACTION_WAIT_MS", "500")
+    ))
+    scroll_to_bottom: bool = field(default_factory=lambda:
+        os.getenv("SCRAPER_SCROLL_TO_BOTTOM", "true").lower() == "true"
+    )
+    
     # ChromaDB settings
     chroma_db_path: Path = field(default_factory=lambda: Path(
         os.getenv("CHROMA_DB_PATH", "./chroma_db")
@@ -85,6 +101,14 @@ class ScraperConfig:
         os.getenv("SCRAPER_WAIT_NETWORK_IDLE", "true").lower() == "true"
     )
     
+    # Retry settings for transient network errors
+    max_retries: int = field(default_factory=lambda: int(
+        os.getenv("SCRAPER_MAX_RETRIES", "3")
+    ))
+    retry_base_delay: float = field(default_factory=lambda: float(
+        os.getenv("SCRAPER_RETRY_BASE_DELAY", "1.0")  # Base delay in seconds (exponential: 1s, 2s, 4s)
+    ))
+    
     # Content extraction settings
     # Token-based chunking: 400 tokens chunk size, 80 tokens overlap
     # Approximate conversion: 1 token ≈ 4 characters for English text
@@ -96,13 +120,13 @@ class ScraperConfig:
     ))
     
     # Validation & Deduplication settings
-    # Minimum content length to accept a page (skip near-empty pages)
+    # Minimum content length to accept a page (0 = accept all pages)
     min_content_length: int = field(default_factory=lambda: int(
-        os.getenv("SCRAPER_MIN_CONTENT_LENGTH", "200")
+        os.getenv("SCRAPER_MIN_CONTENT_LENGTH", "0")
     ))
-    # Minimum chunk length to keep (skip very short chunks)
+    # Minimum chunk length to keep (lowered to keep service lists)
     min_chunk_length: int = field(default_factory=lambda: int(
-        os.getenv("SCRAPER_MIN_CHUNK_LENGTH", "100")
+        os.getenv("SCRAPER_MIN_CHUNK_LENGTH", "30")
     ))
     # Enable content hash deduplication (skip duplicate content across URLs)
     enable_content_dedup: bool = field(default_factory=lambda:

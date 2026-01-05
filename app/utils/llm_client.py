@@ -10,6 +10,37 @@ logger = get_logger(__name__)
 
 load_dotenv()
 
+# Token limits for Groq API (keep synchronized with llm_utils.py)
+MAX_SUMMARY_INPUT_TOKENS: int = 5000  # Conservative limit for summarization
+CHARS_PER_TOKEN: float = 4.0  # Approximate: 1 token ≈ 4 characters
+
+
+def _estimate_tokens(text: str) -> int:
+    """Estimate token count for a string."""
+    if not text:
+        return 0
+    return int(len(text) / CHARS_PER_TOKEN)
+
+
+def _truncate_text(text: str, max_tokens: int) -> str:
+    """Truncate text to approximately fit within max_tokens."""
+    if not text:
+        return text
+    
+    estimated = _estimate_tokens(text)
+    if estimated <= max_tokens:
+        return text
+    
+    target_chars = int(max_tokens * CHARS_PER_TOKEN)
+    truncated = text[:target_chars]
+    
+    # Try to find a good break point
+    last_newline = truncated.rfind('\n')
+    if last_newline > target_chars * 0.5:
+        return truncated[:last_newline] + "\n[...conversation history truncated...]"
+    
+    return truncated + "\n[...conversation history truncated...]"
+
 # Define LLM instance here so it always exists
 # ChatGroq will read the API key from the environment (GROQ_API_KEY) loaded via load_dotenv()
 llm = ChatGroq(
@@ -50,104 +81,7 @@ def call_llm_summarize_chunks(prompt: str) -> str:
         return ""
 
 
-# Conversation-specific summarization prompt template
-CONVERSATION_SUMMARY_PROMPT = """Analyze this conversation history and extract a structured summary. 
-Your task is to preserve ALL user-provided information so the AI assistant knows what has already been discussed.
+# NOTE: CONVERSATION_SUMMARY_PROMPT and call_llm_conversation_summary removed in v3.1.0
+# LangChain ConversationSummaryBufferMemory in conversation_memory.py replaces this functionality
+# with incremental summarization (no separate LLM call per message)
 
-CONVERSATION HISTORY:
-{conversation}
-
----
-
-Extract and return a structured summary in this EXACT format:
-
-## USER DETAILS COLLECTED
-- Name: {name or "Not provided"}
-- Email: {email or "Not provided"}
-- Phone: {phone or "Not provided"}
-- Location: {location/city or "Not provided"}
-- Industry: {industry or "Not provided"}
-- Role/Profession: {role or "Not provided"}
-- Meeting Availability: {availability or "Not provided"}
-
-## USER REQUIREMENTS
-- What they're looking for: {brief description}
-- Their goals/objectives: {goals if mentioned}
-- Budget mentioned: {any budget info or "Not discussed"}
-- Timeline mentioned: {any timeline or "Not discussed"}
-
-## QUESTIONS ALREADY ASKED BY ASSISTANT
-{list of questions the assistant already asked - DO NOT ask these again}
-
-## KEY CONVERSATION POINTS
-{brief bullet points of important topics discussed}
-
-CRITICAL RULES:
-1. NEVER omit any user-provided information - every detail matters
-2. If the user said "IT" for industry, write "IT" not "Not provided"
-3. If user said "Delhi" or any location, capture it exactly
-4. If user mentioned any time for meeting (e.g., "Saturday 12 noon"), capture it exactly
-5. List ALL questions the assistant already asked to prevent repetition
-"""
-
-
-def call_llm_conversation_summary(messages: list) -> str:
-    """
-    Summarize conversation history with explicit extraction of user-provided details.
-    
-    This function uses a specialized prompt that instructs the LLM to:
-    1. Extract all user personal details (name, email, location, industry, etc.)
-    2. Capture meeting availability and preferences
-    3. List questions already asked to prevent repetition
-    4. Preserve key conversation context
-    
-    Args:
-        messages: List of message dicts with 'role' and 'content' keys
-        
-    Returns:
-        Structured summary string with all extracted information
-    """
-    if not messages:
-        return ""
-    
-    try:
-        # Format conversation for the prompt
-        conversation_text = []
-        for msg in messages:
-            role = msg.get("role") or msg.get("sender", "unknown")
-            content = msg.get("content", "")
-            if content:
-                role_label = "User" if role.lower() == "user" else "Assistant"
-                conversation_text.append(f"{role_label}: {content}")
-        
-        if not conversation_text:
-            return ""
-        
-        conversation_str = "\n".join(conversation_text)
-        prompt = CONVERSATION_SUMMARY_PROMPT.format(conversation=conversation_str)
-        
-        logger.info("[LLMClient] Generating conversation-aware summary...")
-        response = llm.invoke(prompt)
-        
-        # Extract content from response
-        if isinstance(response, str):
-            summary = response
-        elif hasattr(response, "content"):
-            content = response.content
-            if isinstance(content, str):
-                summary = content
-            elif isinstance(content, list):
-                summary = " ".join(str(item) for item in content)
-            else:
-                summary = str(content)
-        elif hasattr(response, "text"):
-            summary = response.text
-        else:
-            summary = str(response)
-        
-        logger.info(f"[LLMClient] Conversation summary generated ({len(summary)} chars)")
-        return summary.strip() if summary else ""
-        
-    except Exception as e:
-        logger.error(f"[LLMClient] Error generating conversation summary: {e}")
-        return ""

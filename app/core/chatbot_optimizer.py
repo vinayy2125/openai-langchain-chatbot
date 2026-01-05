@@ -121,8 +121,9 @@ def _calculate_dynamic_top_n(query: str, conversation_history: list) -> int:
     if "?" in query:
         top_n += 2
 
-    # Cap the maximum (to avoid excessive token usage) but allow for comprehensive searches
-    top_n = min(max(top_n, 4), 30)  # Range: 4-10
+    # Cap the maximum - balance between accuracy and token limits
+    # Increased from 10 to 12 to improve result coverage for all queries
+    top_n = min(max(top_n, 4), 12)
 
     logger.info(
         f"[DynamicTopN] Calculated top_n={top_n} for query length={query_length}, words={query_words}"
@@ -308,12 +309,27 @@ class OptimizedChatbot:
                 user_details_known = False
 
             context = "\n\n---\n\n".join(map(str, context_chunks or []))
-            # Build a concise LLM-ready context from history (summary + latest user message)
+            # Build conversation context using LangChain memory (efficient: summary + recent buffer)
             try:
-                from app.utils.chat_state import build_llm_context_from_history
-
-                history = build_llm_context_from_history(session_id, query) or self._format_history(chat_history)
-            except Exception:
+                from app.utils.conversation_memory import get_session_memory_manager
+                
+                memory_mgr = get_session_memory_manager()
+                history = memory_mgr.get_context(session_id)
+                
+                # If memory is empty, try to initialize from chat_history passed in
+                if not history and chat_history:
+                    memory_mgr.initialize_from_history(session_id, [
+                        {"role": msg[0], "content": msg[1]} if isinstance(msg, (list, tuple)) else msg
+                        for msg in chat_history
+                    ])
+                    history = memory_mgr.get_context(session_id)
+                
+                if not history:
+                    history = self._format_history(chat_history)
+                    
+                logger.debug(f"[Chatbot] Using LangChain memory context ({len(history)} chars)")
+            except Exception as e:
+                logger.warning(f"[Chatbot] LangChain memory failed, using fallback: {e}")
                 history = self._format_history(chat_history)
             
             count = len(chat_history)
@@ -406,6 +422,9 @@ class OptimizedChatbot:
             # Step 4: Parse LLM JSON output (if present)
             funnel_stage = ""
             response_text = ""
+            # Initialize early to ensure always defined (robustness)
+            prospect_profile = None
+            sources = []
 
             def extract_json_from_markdown(txt: str) -> str:
                 # First look for a fenced JSON block
@@ -496,6 +515,18 @@ class OptimizedChatbot:
                             except Exception as e:
                                 logger.error(f"[LeadCapture] Failed to save extracted user details: {e}")
 
+                # Extract prospect profile for in-session tracking (not persisted to DB)
+                prospect_profile = llm_json.get("prospect_profile")
+                if prospect_profile and isinstance(prospect_profile, dict):
+                    logger.info(f"[ProspectProfile] Extracted: user_type={prospect_profile.get('user_type')}, stage={prospect_profile.get('stage')}, budget={prospect_profile.get('budget_sensitivity')}")
+                
+                # Extract sources for response traceability (metadata footnotes)
+                sources = llm_json.get("sources", [])
+                if sources and isinstance(sources, list):
+                    sources = [s for s in sources if s and isinstance(s, str) and s.startswith("http")]
+                    if sources:
+                        logger.info(f"[SourceTracing] Response sources: {sources}")
+
                 # Ignore LLM's user_details_known, always use DB value for meta chunk
                 user_network_id = llm_json.get("user_network_id") or None
                 logger.info(f"[Chatbot] Parsed JSON: {llm_json}")
@@ -516,6 +547,8 @@ class OptimizedChatbot:
                 else:
                     response_text = safe_final_text
                 user_network_id = None
+                sources = []
+                prospect_profile = None
 
             logger.info(
                 f"[Chatbot] Final output len={len(safe_final_text)}, funnel_stage='{funnel_stage}'"
@@ -675,9 +708,12 @@ class OptimizedChatbot:
 
             # Step 7: Emit meta update if present, but skip if form_trigger is about to be yielded
             # Use cached user_details_known
+            # Include sources for traceability and prospect_profile for session context
             meta_chunk = {
                 "user_details_known": user_details_known,
                 **({"user_network_id": user_network_id} if user_network_id else {}),
+                **({"sources": sources} if sources else {}),
+                **({"prospect_profile": prospect_profile} if prospect_profile else {}),
             }
             if not trigger_form and meta_chunk:
                 yield {"status": "meta", "chunk": meta_chunk}

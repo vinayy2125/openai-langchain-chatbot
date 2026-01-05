@@ -367,6 +367,7 @@ class ChromaManager:
         for page in pages:
             url = page.get("url", "")
             title = page.get("title", "")
+            page_metadata = page.get("metadata", {})
             
             for i, chunk in enumerate(page.get("chunks", [])):
                 if not chunk or not chunk.strip():
@@ -380,6 +381,10 @@ class ChromaManager:
                     "title": title,
                     "scrape_id": scrape_id,
                     "chunk_index": i,
+                    # Enhanced metadata from page extraction
+                    "page_type": page_metadata.get("page_type", "general"),
+                    "service_category": page_metadata.get("service_category", ""),
+                    "scraped_at": scrape_data.get("created_at", ""),
                 })
                 ids.append(doc_id)
         

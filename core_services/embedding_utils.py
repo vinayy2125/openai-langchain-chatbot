@@ -72,18 +72,18 @@ def get_embeddings_batch(texts: List[str], batch_size: int = 32, show_progress: 
     all_embeddings = []
     total_batches = (len(texts) + batch_size - 1) // batch_size
     
-    for i in range(0, len(texts), batch_size):
+    for batch_idx, i in enumerate(range(0, len(texts), batch_size), 1):
         batch = texts[i:i + batch_size]
         try:
-            # model.encode() handles batches efficiently
+            # Log progress for visibility during long operations
+            if show_progress and total_batches > 1:
+                logger.info(f"🧠 Embedding batch {batch_idx}/{total_batches} ({len(batch)} texts)...")
             embs = model.encode(batch, show_progress_bar=False)
             all_embeddings.extend([_to_float_list(e) for e in embs])
         except Exception as e:
-            logger.error(f"Batch embedding failed at index {i}: {e}")
+            logger.error(f"Batch {batch_idx}/{total_batches} embedding failed: {e}")
             # Fallback: add zero vectors for failed batch
             all_embeddings.extend([[0.0] * 768 for _ in batch])
     
-    if show_progress and len(texts) > 100:
-        logger.info(f"Generated {len(all_embeddings)} embeddings in {total_batches} batches")
-    
+    logger.info(f"✅ Embedding complete: {len(all_embeddings)} vectors in {total_batches} batches")
     return all_embeddings

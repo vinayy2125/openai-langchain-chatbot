@@ -2,12 +2,11 @@
 # build_llm_context_from_history moved to app.utils.chat_state
 from app.logger import get_logger
 from typing import List, Dict, Any, Optional
-from app.db.redis_vector_helper import similarity_search_chat_history
+# Note: similarity_search_chat_history removed - chat history now uses LangChain memory
 from app.utils.llm_client import call_llm_summarize_chunks
 import json
 from app.db import base
 from app.config import get_redis_client as config_get_redis_client, get_redis as config_redis_client
-from app.ingestion.scrape_to_redis import create_index_from_yaml
 from core_services.embedding_utils import get_embedding
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -15,11 +14,18 @@ import threading
 # Single-threaded executor for background embedding tasks (small default)
 _EMBEDDING_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 from pathlib import Path
+import os
 
 logger = get_logger("chatbot")
 
 # ChromaDB for knowledge base search (lazy-loaded)
 _chroma_manager = None
+
+# Hybrid search manager (lazy-loaded)
+_hybrid_search_manager = None
+
+# Environment flag to enable/disable hybrid search (default: enabled)
+ENABLE_HYBRID_SEARCH = os.getenv("ENABLE_HYBRID_SEARCH", "true").lower() == "true"
 
 
 def _get_chroma_manager():
@@ -30,9 +36,67 @@ def _get_chroma_manager():
             from app.db.chroma_manager import get_chroma_manager
             _chroma_manager = get_chroma_manager()
         except Exception as e:
-            logger.warning(f"ChromaDB not available, falling back to Redis: {e}")
+            logger.warning(f"ChromaDB not available: {e}")
             return None
     return _chroma_manager
+
+
+def _get_hybrid_search_manager():
+    """Get or create HybridSearchManager instance (lazy-loaded)."""
+    global _hybrid_search_manager
+    if _hybrid_search_manager is None:
+        try:
+            from core_services.hybrid_search import get_hybrid_search_manager
+            _hybrid_search_manager = get_hybrid_search_manager()
+        except Exception as e:
+            logger.warning(f"HybridSearchManager not available: {e}")
+            return None
+    return _hybrid_search_manager
+
+
+def _semantic_rerank(query: str, results: List[Dict], top_n: int) -> List[Dict]:
+    """
+    Re-rank results based on semantic relevance to query.
+    Boosts results that contain query keywords for better accuracy.
+    
+    Args:
+        query: The user's search query
+        results: List of ChromaDB results with text and similarity
+        top_n: Number of results to return after re-ranking
+        
+    Returns:
+        Re-ranked list of results
+    """
+    if not results:
+        return results
+    
+    query_lower = query.lower()
+    query_words = [w for w in query_lower.split() if len(w) > 3]  # Skip short words
+    
+    scored_results = []
+    for result in results:
+        text = (result.get("text", "") or "").lower()
+        base_score = result.get("similarity", 0)
+        
+        # Boost for exact query term presence
+        keyword_matches = sum(1 for word in query_words if word in text)
+        keyword_boost = keyword_matches * 0.05
+        
+        # Boost for "services" related content when query is about services
+        service_keywords = ["services", "development", "consulting", "software", "ai", "cloud"]
+        if any(sk in query_lower for sk in ["service", "offer", "list", "explore", "capabilities"]):
+            service_boost = sum(0.02 for sk in service_keywords if sk in text)
+        else:
+            service_boost = 0
+        
+        final_score = base_score + keyword_boost + service_boost
+        scored_results.append((final_score, result))
+    
+    # Sort by adjusted score (highest first)
+    scored_results.sort(key=lambda x: x[0], reverse=True)
+    
+    logger.debug(f"[ReRank] Re-ranked {len(results)} results, returning top {top_n}")
+    return [r for _, r in scored_results[:top_n]]
 
 
 def _safe_json_set(client, key, path, value):
@@ -219,81 +283,80 @@ def save_chat_history(session_id, chat_history):
     except Exception as e:
         logger.error(f"Redis save failed for chat_history: {e}, falling back to DB.")
         try:
-            conn = base.get_db_conn()
-            cur = conn.cursor()
-            insert_sql = (
-                "INSERT INTO messages (session_id, content, role, metadata) VALUES (%s, %s, %s, %s)"
-            )
-            for msg in chat_history:
+            # ONLY insert the LAST message (the new one being appended)
+            # The other messages already exist in the DB (that's where they were loaded from)
+            if chat_history:
+                msg = chat_history[-1]  # Get only the newest message
                 content = msg.get("content")
                 role = msg.get("role") or msg.get("sender")
                 metadata = msg.get("metadata") or {}
-                cur.execute(insert_sql, (session_id, content, role, json.dumps(metadata)))
-            conn.commit()
-            cur.close()
-            conn.close()
+                
+                # Skip if no content
+                if content:
+                    conn = base.get_db_conn()
+                    cur = conn.cursor()
+                    
+                    # Use the same duplicate prevention as _save_message_sync
+                    insert_sql = """
+                        INSERT INTO messages (session_id, content, role, metadata, created_at, updated_at)
+                        SELECT %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM messages 
+                            WHERE session_id = %s 
+                              AND role = %s 
+                              AND content = %s 
+                              AND created_at > CURRENT_TIMESTAMP - INTERVAL '5 seconds'
+                        )
+                    """
+                    cur.execute(insert_sql, (session_id, content, role, json.dumps(metadata), session_id, role, content))
+                    conn.commit()
+                    cur.close()
+                    base.return_db_conn(conn)
             return True
         except Exception as db_e:
             logger.error(f"DB save failed for chat_history: {db_e}")
             return False
 
-# Retrieve chat history chunk from Redis, fallback to DB
+# Retrieve chat history from PostgreSQL (single source of truth)
 def get_chat_history(session_id):
-    """Retrieve chat history chunk from Redis; fallback to DB messages table."""
+    """Retrieve chat history from PostgreSQL messages table.
+    
+    PostgreSQL is now the single source of truth for chat history.
+    LangChain memory is used for efficient LLM context building.
+    """
     try:
-        r = get_redis_client()
-        key = get_chat_history_chunk_key(session_id)
-        # First try legacy string GET (tests/mocks often implement this).
-        try:
-            if hasattr(r, 'get'):
-                data = r.get(key)
-                if data:
-                    if isinstance(data, bytes):
-                        data = data.decode('utf-8')
-                    return json.loads(data)
-        except Exception:
-            pass
-
-        # Fall back to RedisJSON get
-        try:
-            data = r.json().get(key)
-            if data and isinstance(data, dict):
-                return data.get("messages", [])
-        except Exception:
-            pass
-
+        conn = base.get_db_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT content, role, metadata, created_at FROM messages WHERE session_id = %s ORDER BY created_at ASC",
+            (session_id,)
+        )
+        rows = cur.fetchall()
+        chat_history = []
+        for row in rows:
+            content, role, metadata, created_at = row
+            chat_history.append({
+                "role": role,  # Use 'role' consistently (not 'sender')
+                "content": content,
+                "metadata": metadata,
+                "timestamp": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            })
+        cur.close()
+        base.return_db_conn(conn)
+        return chat_history
+    except Exception as db_e:
+        logger.error(f"DB retrieval failed for chat_history: {db_e}")
         return []
-    except Exception as e:
-        logger.warning(f"Redis retrieval failed for chat_history: {e}, falling back to DB.")
-        try:
-            conn = base.get_db_conn()
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT content, role, metadata, created_at FROM messages WHERE session_id = %s ORDER BY created_at ASC",
-                (session_id,)
-            )
-            rows = cur.fetchall()
-            chat_history = []
-            for row in rows:
-                content, role, metadata, created_at = row
-                chat_history.append({
-                    "sender": role,
-                    "content": content,
-                    "metadata": metadata,
-                    "timestamp": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
-                })
-            cur.close()
-            conn.close()
-            return chat_history
-        except Exception as db_e:
-            logger.error(f"DB retrieval failed for chat_history: {db_e}")
-            return []
 
-# Append a message to the chat history chunk, with Redis and DB fallback
+# DEPRECATED: No longer used - messages are saved via save_message() in helpers.py
+# Kept for backwards compatibility but does nothing
 def append_message_to_chat_history(session_id, message):
-    history = get_chat_history(session_id)
-    history.append(message)
-    save_chat_history(session_id, history)
+    """DEPRECATED: Messages are now saved directly via save_message() in helpers.py.
+    
+    This function is kept for backwards compatibility but is a no-op.
+    Use save_message() for persistence and LangChain memory for context.
+    """
+    logger.debug(f"[DEPRECATED] append_message_to_chat_history called but is now a no-op")
     return True
 
 
@@ -327,58 +390,84 @@ def get_redis_context_chunks(
     # Derive search query from chat history and user query
     search_query = derive_search_query(chat_history, query, domain_prefix, fallback_keywords)
 
-    # Perform KB similarity search using ChromaDB (primary)
+    # Perform knowledge base search using hybrid search (semantic + BM25) or fallback to ChromaDB-only
     kb_results = []
-    chroma = _get_chroma_manager()
     
-    if chroma:
-        try:
-            # Use ChromaDB for knowledge base search
-            chroma_results = chroma.similarity_search(search_query, n_results=top_n)
-            # Convert ChromaDB results to common format
-            for result in chroma_results:
-                kb_results.append({
-                    "text": result.get("text", ""),
-                    "metadata": result.get("metadata", {}),
-                    "similarity": result.get("similarity", 0),
-                })
-            logger.debug(f"ChromaDB returned {len(kb_results)} results for query")
-        except Exception as e:
-            logger.warning(f"ChromaDB similarity search failed: {e}")
-    else:
-        # Fallback to Redis if ChromaDB is not available
-        try:
-            from app.db.redis_vector_helper import similarity_search
-            kb_results = similarity_search(session_id, search_query, top_n=top_n)
-            logger.debug(f"Redis fallback returned {len(kb_results)} results")
-        except Exception as e:
-            logger.warning(f"Redis KB similarity search failed: {e}")
+    if ENABLE_HYBRID_SEARCH:
+        # Try hybrid search first (combines semantic and BM25 keyword matching)
+        hybrid_manager = _get_hybrid_search_manager()
+        if hybrid_manager:
+            try:
+                # Use hybrid search with balanced alpha (0.5 = equal weight semantic + BM25)
+                # Retrieve more candidates for better fusion, then take top_n
+                hybrid_results = hybrid_manager.hybrid_search(
+                    search_query,
+                    top_n=top_n,
+                    alpha=0.5,
+                    semantic_top_n=top_n * 2,
+                    bm25_top_n=top_n * 2,
+                )
+                # Convert to common format
+                for result in hybrid_results:
+                    kb_results.append({
+                        "text": result.get("text", ""),
+                        "metadata": result.get("metadata", {}),
+                        "similarity": result.get("similarity", 0),
+                    })
+                logger.info(f"[HybridSearch] Returned {len(kb_results)} results for query")
+            except Exception as e:
+                logger.warning(f"Hybrid search failed, falling back to ChromaDB-only: {e}")
+                kb_results = []
+    
+    # Fallback to ChromaDB-only if hybrid search disabled or failed
+    if not kb_results:
+        chroma = _get_chroma_manager()
+        if chroma:
+            try:
+                # Use ChromaDB for knowledge base search
+                chroma_results = chroma.similarity_search(search_query, n_results=top_n)
+                # Convert ChromaDB results to common format
+                for result in chroma_results:
+                    kb_results.append({
+                        "text": result.get("text", ""),
+                        "metadata": result.get("metadata", {}),
+                        "similarity": result.get("similarity", 0),
+                    })
+                logger.debug(f"ChromaDB returned {len(kb_results)} results for query")
+                
+                # Apply semantic re-ranking for better accuracy
+                if kb_results:
+                    kb_results = _semantic_rerank(query, kb_results, top_n)
+                    logger.debug(f"After re-ranking: {len(kb_results)} results")
+            except Exception as e:
+                logger.warning(f"ChromaDB similarity search failed: {e}")
 
-    # Perform chat-history similarity search (Redis - chat_history_index)
-    # IMPORTANT: Pass session_id to filter to current session only (prevents data leakage)
-    history_results = []
-    try:
-        history_results = similarity_search_chat_history(search_query, session_id=session_id, top_n=top_n)
-    except Exception as e:
-        logger.warning(f"Chat-history similarity search failed: {e}")
+    # Chat history context is now handled by LangChain ConversationBufferMemory
+    # No need for separate Redis chat_history semantic search
 
-    # Normalize both result sets to simple text chunks and deduplicate (history first)
-    processed_history = []
-    for item in history_results:
-        text = item.get("messages_text") or item.get("response") or item.get("messages_text", "")
-        if text:
-            processed_history.append(str(text))
-
+    # Process KB results into text chunks with source URLs
     processed_kb = []
     for item in kb_results:
         text = item.get("text") or item.get("response") or item.get("query") or ""
         if text:
-            processed_kb.append(str(text))
+            # Include source URL for traceability if available
+            metadata = item.get("metadata", {})
+            source_url = metadata.get("url", "")
+            # Validate URL format before including
+            if source_url and isinstance(source_url, str) and source_url.startswith(("http://", "https://")):
+                # Sanitize: strip whitespace and ensure no newlines
+                source_url = source_url.strip().split()[0] if source_url.strip() else ""
+                if source_url:
+                    processed_kb.append(f"{str(text)}\n[Source: {source_url}]")
+                else:
+                    processed_kb.append(str(text))
+            else:
+                processed_kb.append(str(text))
 
-    # Merge while preserving uniqueness (history prioritized)
+    # Deduplicate results
     seen = set()
     merged: List[str] = []
-    for t in processed_history + processed_kb:
+    for t in processed_kb:
         key = t.strip().lower()
         if not key or key in seen:
             continue
@@ -441,24 +530,6 @@ def process_similarity_results(results) -> List[str]:
     # (end of get_redis_context_chunks)
 
 
-# Helper function to summarize chunks with LLM
-def summarize_chunks_with_llm(chunks: List[str], query: str) -> str:
-    """
-    Use the LLM to summarize the provided chunks, extracting links and detailed info relevant to the query.
-    Returns a single summary string.
-    """
-    if not chunks:
-        return ""
+# NOTE: summarize_chunks_with_llm removed in v3.1.0
+# LangChain ConversationSummaryBufferMemory handles summarization incrementally
 
-    prompt = (
-        f"Summarize the following context chunks for the query: '{query}'. "
-        "Extract any relevant links and provide detailed information. "
-        "Return a single, concise summary for use as AI context.\n\n"
-        "Context Chunks:\n" + "\n---\n".join(chunks)
-    )
-    try:
-        summary = call_llm_summarize_chunks(prompt)
-        return summary.strip() if summary else ""
-    except Exception as e:
-        logger.error(f"[RedisContext] LLM summarization failed: {e}")
-        return ""
