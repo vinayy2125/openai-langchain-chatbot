@@ -26,3 +26,4 @@ playwright>=1.40.0
 chromadb>=0.4.22
 APScheduler>=3.10.4
 lxml>=5.0.0
+rank-bm25>=0.2.2

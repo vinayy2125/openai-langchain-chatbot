@@ -20,7 +20,6 @@ from fastapi import HTTPException
 from datetime import datetime
 from app.api.models import PromptType
 from app.db.base import get_db_conn, return_db_conn, DatabaseConnection
-from app.utils.redis_context import append_message_to_chat_history
 
 
 logger = get_logger(__name__)
@@ -331,6 +330,12 @@ async def initialize_session_with_prompt(
 
 def _save_message_sync(message_data: MessageCreate) -> Message:
     """Synchronous implementation of save_message."""
+    import traceback
+    # Debug: Log call stack to identify duplicate call sources
+    stack_summary = ''.join(traceback.format_stack()[-5:-1])
+    logger.info(f"[save_message] Called for session={message_data.session_id}, role={message_data.role}, content_len={len(message_data.content)}")
+    logger.debug(f"[save_message] Call stack:\n{stack_summary}")
+    
     conn = get_db_conn()
     cursor = conn.cursor()
     try:
@@ -348,6 +353,39 @@ def _save_message_sync(message_data: MessageCreate) -> Message:
 
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail="Session not found")
+
+        # Check for duplicate message (same session, role, content within 5 seconds)
+        # This prevents duplicate messages from being saved when API is called multiple times
+        cursor.execute(
+            """
+            SELECT id, session_id, content, role, reply_to, follow_up_to, 
+                   follow_up_depth, metadata, created_at, updated_at
+            FROM messages 
+            WHERE session_id = %s 
+              AND role = %s 
+              AND content = %s 
+              AND created_at > CURRENT_TIMESTAMP - INTERVAL '5 seconds'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (message_data.session_id, message_data.role, message_data.content),
+        )
+        existing = cursor.fetchone()
+        if existing:
+            # Return existing message instead of creating duplicate
+            logger.info(f"[save_message] Duplicate message detected, returning existing message id={existing[0]}")
+            return Message(
+                id=existing[0],
+                session_id=existing[1],
+                content=existing[2],
+                role=existing[3],
+                reply_to=existing[4] if existing[4] else None,
+                follow_up_to=existing[5] if existing[5] else None,
+                follow_up_depth=existing[6],
+                metadata=json.loads(existing[7]) if existing[7] else {},
+                created_at=existing[8],
+                updated_at=existing[9]
+            )
 
         # Insert the message
         cursor.execute(
@@ -594,16 +632,17 @@ async def send_message_stream(req: SentMessage):
             )
 
         # Save user message asynchronously to improve response time
-        # Start user message saving in background
+        # Single flow: PostgreSQL (persistence) + LangChain memory (LLM context)
         if user_msg_to_save:
             asyncio.create_task(save_message(user_msg_to_save))
+            
+            # Update LangChain memory for efficient context building
             try:
-                # also persist to Redis chat_history asynchronously
-                asyncio.create_task(asyncio.to_thread(append_message_to_chat_history, session_id, {"role": "user", "content": req.query, "timestamp": None}))
-            except Exception:
-                # if asyncio.to_thread not available, fallback to run_in_executor
-                loop = asyncio.get_event_loop()
-                loop.run_in_executor(None, append_message_to_chat_history, session_id, {"role": "user", "content": req.query, "timestamp": None})
+                from app.utils.conversation_memory import get_session_memory_manager
+                memory_mgr = get_session_memory_manager()
+                memory_mgr.add_user_message(session_id, req.query)
+            except Exception as mem_err:
+                logger.debug(f"Memory update skipped (non-critical): {mem_err}")
 
         # Always use the optimized chatbot flow
         # logger.info("[send_message_stream] Using optimized chatbot flow.")
@@ -664,12 +703,16 @@ async def send_message_stream(req: SentMessage):
                     metadata={}
                 )
                 # Fire and forget save to close stream immediately
+                # Single flow: PostgreSQL (persistence) + LangChain memory (LLM context)
                 asyncio.create_task(save_message(assistant_msg))
+                
+                # Update LangChain memory for efficient context building
                 try:
-                    asyncio.create_task(asyncio.to_thread(append_message_to_chat_history, session_id, {"role": "assistant", "content": full_assistant_response, "timestamp": None}))
+                    from app.utils.conversation_memory import get_session_memory_manager
+                    memory_mgr = get_session_memory_manager()
+                    memory_mgr.add_ai_message(session_id, full_assistant_response)
                 except Exception:
-                    loop = asyncio.get_event_loop()
-                    loop.run_in_executor(None, append_message_to_chat_history, session_id, {"role": "assistant", "content": full_assistant_response, "timestamp": None})
+                    pass  # Non-critical, context still works from fallback
                 # logger.info(f"[OPTIMIZED_FLOW] Saved complete response: {len(full_assistant_response)} chars")
                         
             except Exception as e:

@@ -26,6 +26,7 @@ class PageData:
     links: List[str] = field(default_factory=list)
     images: List[Dict[str, str]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    sections: List['Section'] = field(default_factory=list)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -39,21 +40,55 @@ class PageData:
             "links": self.links,
             "images": self.images,
             "metadata": self.metadata,
+            "sections": [s.to_dict() for s in self.sections] if self.sections else [],
+        }
+
+
+@dataclass
+class Section:
+    """A content section with heading and body text."""
+    heading: str
+    level: int  # h1=1, h2=2, etc.
+    content: str
+    url_anchor: str = ""  # URL fragment for direct linking
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "heading": self.heading,
+            "level": self.level,
+            "content": self.content,
+            "url_anchor": self.url_anchor,
         }
 
 
 class ContentExtractor:
-    """Extract structured content from HTML pages."""
+    """Extract structured content from HTML pages with section-based chunking."""
     
-    # Tags to exclude from content extraction
+    # Tags to exclude from content extraction - MINIMAL set to preserve max content
     EXCLUDED_TAGS = {
-        'script', 'style', 'noscript', 'header', 'footer', 'nav',
-        'aside', 'form', 'button', 'input', 'select', 'textarea',
+        'script', 'style', 'noscript', 'form', 'button', 'input', 'select', 'textarea',
         'iframe', 'embed', 'object', 'svg', 'canvas', 'video', 'audio'
     }
     
+    # Tags that contain navigation/menu content we want to preserve
+    NAV_TAGS = {'nav', 'header', 'footer', 'aside'}
+    
     # Tags that typically contain main content
-    CONTENT_TAGS = {'p', 'article', 'section', 'main', 'div', 'span', 'li', 'td', 'th'}
+    CONTENT_TAGS = {
+        'p', 'article', 'section', 'main', 'div', 'span', 'li', 'td', 'th', 'a',
+        'footer', 'header', 'nav', 'aside'
+    }
+    
+    # Page type classification patterns
+    PAGE_TYPE_PATTERNS = {
+        'service': ['services/', '/service', 'consulting', 'development', 'solutions'],
+        'portfolio': ['portfolio', 'case-study', 'case-studies', 'project', 'work'],
+        'blog': ['blog', 'article', 'news', 'post', 'insights'],
+        'about': ['about', 'team', 'company', 'who-we-are', 'our-story'],
+        'contact': ['contact', 'get-in-touch', 'reach-us', 'location'],
+        'career': ['career', 'jobs', 'hiring', 'join-us'],
+        'technology': ['technology', 'tech-stack', 'tools'],
+    }
     
     def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50):
         """
@@ -68,18 +103,44 @@ class ContentExtractor:
     
     def extract(self, html: str, url: str) -> PageData:
         """
-        Extract structured content from HTML.
+        Extract structured content from HTML with section-based organization.
         
         Args:
             html: Raw HTML content
             url: Source URL of the page
             
         Returns:
-            PageData object with extracted content
+            PageData object with extracted content and sections
         """
         soup = BeautifulSoup(html, 'lxml')
         
-        # Remove unwanted elements
+        page_data = PageData(url=url)
+        
+        # Classify page type based on URL
+        page_type = self._classify_page_type(url)
+        page_data.metadata['page_type'] = page_type
+        page_data.metadata['service_category'] = self._extract_service_category(url)
+        page_data.metadata['source_url'] = url
+        
+        # FIRST: Extract navigation content BEFORE removing any elements
+        nav_content = self._extract_nav_content(soup)
+        
+        # Extract metadata before cleanup
+        page_data.title = self._extract_title(soup)
+        page_data.description = self._extract_description(soup)
+        page_data.headings = self._extract_headings(soup)
+        page_data.metadata.update(self._extract_metadata(soup))
+        
+        # Extract links for crawling (before removing elements)
+        page_data.links = self._extract_links(soup, url)
+        
+        # Extract images with alt text
+        page_data.images = self._extract_images(soup, url)
+        
+        # Extract sections with heading hierarchy
+        page_data.sections = self._extract_sections(soup, url)
+        
+        # Now remove truly unwanted elements (scripts, styles, forms)
         for tag in soup(self.EXCLUDED_TAGS):
             tag.decompose()
         
@@ -87,29 +148,156 @@ class ContentExtractor:
         for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
             comment.extract()
         
-        page_data = PageData(url=url)
-        
-        # Extract metadata
-        page_data.title = self._extract_title(soup)
-        page_data.description = self._extract_description(soup)
-        page_data.headings = self._extract_headings(soup)
-        page_data.metadata = self._extract_metadata(soup)
-        
         # Extract main content
-        page_data.content = self._extract_text_content(soup)
+        main_content = self._extract_text_content(soup)
         
-        # Extract links for crawling
-        page_data.links = self._extract_links(soup, url)
+        # Combine navigation content with main content
+        if nav_content:
+            page_data.content = f"Navigation & Services:\n{nav_content}\n\nMain Content:\n{main_content}"
+            page_data.metadata['nav_items'] = nav_content
+        else:
+            page_data.content = main_content
         
-        # Extract images with alt text
-        page_data.images = self._extract_images(soup, url)
+        # Create section-based chunks for embeddings with source tracking
+        page_data.chunks = self._chunk_content_by_sections(page_data)
         
-        # Create chunks for embeddings
-        page_data.chunks = self._chunk_content(page_data)
-        
-        logger.debug(f"Extracted {len(page_data.chunks)} chunks from {url}")
+        logger.debug(f"Extracted {len(page_data.chunks)} chunks from {url} (type: {page_type})")
         
         return page_data
+    
+    def _classify_page_type(self, url: str) -> str:
+        """Classify page type based on URL patterns."""
+        url_lower = url.lower()
+        
+        # Check if it's the homepage
+        parsed = urlparse(url)
+        if parsed.path in ('', '/', '/index.html', '/home'):
+            return 'home'
+        
+        # Match against patterns
+        for page_type, patterns in self.PAGE_TYPE_PATTERNS.items():
+            if any(pattern in url_lower for pattern in patterns):
+                return page_type
+        
+        return 'general'
+    
+    def _extract_service_category(self, url: str) -> str:
+        """Extract service/capability category from URL patterns."""
+        url_lower = url.lower()
+        
+        # Service category patterns mapped to capability areas
+        SERVICE_CATEGORIES = {
+            'ai_ml': ['ai-', 'artificial-intelligence', 'machine-learning', 'chatbot', 'ai-agent', 'generative-ai'],
+            'web_development': ['web-development', 'full-stack', 'frontend', 'backend', 'asp-net', 'php', 'react', 'angular', 'node'],
+            'mobile_development': ['mobile-app', 'cross-platform', 'ios', 'android', 'flutter', 'react-native'],
+            'cloud_devops': ['cloud', 'devops', 'aws', 'azure', 'docker', 'kubernetes', 'ci-cd'],
+            'healthcare': ['healthcare', 'hipaa', 'ehr', 'telemedicine', 'medical', 'patient', 'health-insurance'],
+            'consulting': ['consulting', 'it-consulting', 'digital-transformation', 'strategy'],
+            'qa_testing': ['qa', 'testing', 'quality-assurance', 'automation-testing'],
+            'enterprise': ['enterprise', 'erp', 'crm', 'saas', 'legacy-modernization'],
+            'iot': ['iot', 'internet-of-things', 'embedded', 'smart-'],
+            'fintech': ['fintech', 'payment', 'banking', 'financial'],
+        }
+        
+        for category, patterns in SERVICE_CATEGORIES.items():
+            if any(pattern in url_lower for pattern in patterns):
+                return category
+        
+        return ''
+    
+    def _extract_sections(self, soup: BeautifulSoup, url: str) -> List[Section]:
+        """
+        Extract content organized by heading sections.
+        Groups content under each heading for structured retrieval.
+        """
+        sections = []
+        
+        # Find all headings in order
+        headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        
+        for i, heading in enumerate(headings):
+            heading_text = heading.get_text(strip=True)
+            if not heading_text or len(heading_text) < 2:
+                continue
+            
+            level = int(heading.name[1])
+            
+            # Create URL-safe anchor
+            anchor = re.sub(r'[^a-z0-9]+', '-', heading_text.lower()).strip('-')
+            
+            # Get content between this heading and the next
+            content_parts = []
+            sibling = heading.find_next_sibling()
+            
+            while sibling:
+                # Stop at next heading of same or higher level
+                if sibling.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                    sibling_level = int(sibling.name[1])
+                    if sibling_level <= level:
+                        break
+                
+                # Extract text from this element
+                if sibling.name not in self.EXCLUDED_TAGS:
+                    text = sibling.get_text(strip=True)
+                    if text and len(text) > 3:
+                        content_parts.append(text)
+                
+                sibling = sibling.find_next_sibling()
+            
+            section_content = ' '.join(content_parts)
+            if section_content or heading_text:  # Keep even if content is empty
+                sections.append(Section(
+                    heading=heading_text,
+                    level=level,
+                    content=section_content,
+                    url_anchor=anchor
+                ))
+        
+        return sections
+    
+    def _extract_nav_content(self, soup: BeautifulSoup) -> str:
+        """
+        Extract content from navigation elements (menus, headers, footers).
+        Captures services, products, and important site-wide links.
+        """
+        nav_items = []
+        seen = set()
+        
+        # Extract from nav, header, footer, aside elements
+        for tag_name in self.NAV_TAGS:
+            for element in soup.find_all(tag_name):
+                # Get all links with meaningful text
+                for link in element.find_all('a', href=True):
+                    text = link.get_text(strip=True)
+                    # Also check for title or aria-label if text is empty
+                    if not text:
+                        text = link.get('title') or link.get('aria-label') or ''
+                    
+                    # Filter criteria: meaningful length, not seen
+                    if text and len(text) >= 2 and len(text) <= 150:
+                        text_lower = text.lower()
+                        # Skip very common generic navigation items
+                        skip_terms = {'menu', 'toggle', 'close', 'open'}
+                        if text_lower not in skip_terms and text_lower not in seen:
+                            nav_items.append(text)
+                            seen.add(text_lower)
+                
+                # Also get non-link text in lists and divs (often service descriptions)
+                for item_tag in ['li', 'div', 'span', 'p']:
+                    for item in element.find_all(item_tag):
+                        # Only take items that are direct or near-direct children to avoid duplication
+                        if len(item.get_text(strip=True)) < 5: continue
+                        text = item.get_text(strip=True)
+                        if text and len(text) >= 5 and len(text) <= 200:
+                            text_lower = text.lower()
+                            if text_lower not in seen:
+                                nav_items.append(text)
+                                seen.add(text_lower)
+        
+        # Return as formatted string
+        if nav_items:
+            return "\n".join(f"• {item}" for item in nav_items)
+        return ""
     
     def _extract_title(self, soup: BeautifulSoup) -> str:
         """Extract page title."""
@@ -202,8 +390,9 @@ class ContentExtractor:
         text_parts = []
         
         # Target elements that typically contain meaningful content
+        # Added 'a' to capture link text and 'span' for inline content
         content_selectors = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li', 'td', 'th', 
-                            'blockquote', 'figcaption', 'article', 'section']
+                            'blockquote', 'figcaption', 'article', 'section', 'a', 'span']
         
         for element in main_content.find_all(content_selectors):
             # Skip if parent is an excluded tag
@@ -211,8 +400,8 @@ class ContentExtractor:
                 continue
             
             text = element.get_text(strip=True)
-            # Filter out very short fragments (likely noise) and duplicates
-            if text and len(text) > 15:
+            # Reduced minimum from 15 to 5 chars to capture short service names
+            if text and len(text) > 5:
                 # Add heading markers for context
                 if element.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
                     text = f"\n## {text}\n"
@@ -281,9 +470,88 @@ class ContentExtractor:
         
         return images
     
+    def _chunk_content_by_sections(self, page_data: PageData) -> List[str]:
+        """
+        Create structured chunks organized by sections with source tracking.
+        
+        Each chunk includes:
+        - Page title and type
+        - Section heading for context
+        - Source URL for transparency
+        - Structured content
+        """
+        chunks = []
+        page_type = page_data.metadata.get('page_type', 'general')
+        source_url = page_data.metadata.get('source_url', page_data.url)
+        
+        # Create header template for chunks
+        def create_chunk_header(section_heading: str = "", section_anchor: str = "") -> str:
+            header_parts = [
+                f"[Page: {page_data.title}]",
+                f"[Type: {page_type}]",
+            ]
+            if section_heading:
+                header_parts.append(f"[Section: {section_heading}]")
+            
+            # Include direct link to section if anchor exists
+            if section_anchor:
+                header_parts.append(f"[Source: {source_url}#{section_anchor}]")
+            else:
+                header_parts.append(f"[Source: {source_url}]")
+            
+            return "\n".join(header_parts) + "\n\n"
+        
+        # First, create chunks from structured sections
+        if page_data.sections:
+            for section in page_data.sections:
+                if not section.content and not section.heading:
+                    continue
+                
+                section_header = create_chunk_header(section.heading, section.url_anchor)
+                section_text = f"## {section.heading}\n\n{section.content}" if section.content else f"## {section.heading}"
+                
+                # If section content fits in one chunk
+                if len(section_header) + len(section_text) <= self.chunk_size:
+                    chunks.append(section_header + section_text)
+                else:
+                    # Split large sections into multiple chunks, preserving section context
+                    sentences = re.split(r'(?<=[.!?])\s+', section.content)
+                    current_chunk = []
+                    current_len = len(section_header) + len(f"## {section.heading}\n\n")
+                    
+                    for sentence in sentences:
+                        if current_len + len(sentence) > self.chunk_size and current_chunk:
+                            chunk_content = section_header + f"## {section.heading}\n\n" + ' '.join(current_chunk)
+                            chunks.append(chunk_content)
+                            # Keep overlap
+                            overlap = current_chunk[-2:] if len(current_chunk) >= 2 else current_chunk
+                            current_chunk = overlap.copy()
+                            current_len = len(section_header) + len(f"## {section.heading}\n\n") + sum(len(s) for s in current_chunk)
+                        
+                        current_chunk.append(sentence)
+                        current_len += len(sentence) + 1
+                    
+                    if current_chunk:
+                        chunk_content = section_header + f"## {section.heading}\n\n" + ' '.join(current_chunk)
+                        chunks.append(chunk_content)
+        
+        # Also create a navigation/services chunk if available
+        nav_items = page_data.metadata.get('nav_items', '')
+        if nav_items:
+            nav_header = create_chunk_header("Navigation & Services")
+            nav_chunk = nav_header + "Available Services and Navigation:\n" + nav_items
+            if len(nav_chunk) <= self.chunk_size * 2:  # Allow larger nav chunk
+                chunks.insert(0, nav_chunk)  # Put at beginning
+        
+        # Fallback to original chunking if no sections found
+        if not chunks:
+            chunks = self._chunk_content(page_data)
+        
+        return chunks
+    
     def _chunk_content(self, page_data: PageData) -> List[str]:
         """
-        Split content into chunks suitable for embeddings.
+        Split content into chunks suitable for embeddings (fallback method).
         
         Optimized for RAG retrieval with:
         1. Page context prefix on EVERY chunk (title, URL) for source attribution
@@ -293,7 +561,8 @@ class ContentExtractor:
         chunks = []
         
         # Build page context prefix for attribution (added to every chunk)
-        page_context = f"[Source: {page_data.title}]\n[URL: {page_data.url}]\n\n"
+        page_type = page_data.metadata.get('page_type', 'general')
+        page_context = f"[Page: {page_data.title}]\n[Type: {page_type}]\n[Source: {page_data.url}]\n\n"
         
         # Build full text with metadata context for first chunk only
         full_text_parts = []

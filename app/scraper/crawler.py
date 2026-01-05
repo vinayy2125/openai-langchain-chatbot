@@ -18,6 +18,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 
 from .config import ScraperConfig, get_scraper_config
 from .content_extractor import ContentExtractor, PageData
+from .site_profiles import get_site_profile, SiteProfile
 
 logger = logging.getLogger(__name__)
 
@@ -208,15 +209,17 @@ class WebCrawler:
         self._browser = None
         self._context = None
     
-    def _get_content_hash(self, content: str) -> str:
-        """Generate MD5 hash of content for deduplication."""
-        return hashlib.md5(content.encode()).hexdigest()
+    def _get_content_hash(self, content: str, url: str = "") -> str:
+        """Generate MD5 hash including URL path for smarter deduplication."""
+        # Include URL path to differentiate pages with similar template content
+        path = urlparse(url).path if url else ""
+        return hashlib.md5(f"{path}|{content}".encode()).hexdigest()
     
-    def _is_duplicate_content(self, content: str) -> bool:
-        """Check if content has been seen before (hash-based deduplication)."""
+    def _is_duplicate_content(self, content: str, url: str = "") -> bool:
+        """Check if content has been seen before (URL-aware deduplication)."""
         if not self.config.enable_content_dedup:
             return False
-        content_hash = self._get_content_hash(content)
+        content_hash = self._get_content_hash(content, url)
         if content_hash in self._content_hashes:
             return True
         self._content_hashes.add(content_hash)
@@ -251,6 +254,18 @@ class WebCrawler:
                 ),
                 viewport={"width": 1920, "height": 1080},
             )
+            
+            # Set up resource blocking for speed
+            if self.config.exclude_resources:
+                async def block_resources(route):
+                    if route.request.resource_type in self.config.exclude_resources:
+                        await route.abort()
+                    else:
+                        await route.continue_()
+                
+                await self._context.route("**/*", block_resources)
+                logger.info(f"🚀 Resource blocking enabled: {', '.join(self.config.exclude_resources)}")
+
             logger.info("✅ Browser initialized successfully")
         except Exception as e:
             logger.error(f"❌ Failed to initialize browser: {e}")
@@ -272,7 +287,7 @@ class WebCrawler:
     
     async def _fetch_page(self, url: str) -> Optional[str]:
         """
-        Fetch a page and return its HTML content.
+        Fetch a page and return its HTML content with retry logic.
         
         Args:
             url: URL to fetch
@@ -280,30 +295,68 @@ class WebCrawler:
         Returns:
             HTML content or None if fetch failed
         """
-        try:
-            page = await self._context.new_page()
-            page.set_default_timeout(self.config.page_timeout_ms)
-            
-            # Navigate to URL
-            await page.goto(url, wait_until="domcontentloaded")
-            
-            # Wait for dynamic content if configured
-            if self.config.wait_for_network_idle:
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=10000)
-                except Exception:
-                    # Network idle timeout is acceptable, page may still have content
-                    pass
-            
-            # Get final HTML after JS execution
-            html = await page.content()
-            await page.close()
-            
-            return html
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to fetch {url}: {e}")
-            return None
+        last_error = None
+        max_retries = self.config.max_retries
+        
+        for attempt in range(max_retries):
+            page = None
+            try:
+                page = await self._context.new_page()
+                page.set_default_timeout(self.config.page_timeout_ms)
+                
+                # Navigate to URL
+                wait_until = "networkidle" if self.config.wait_for_network_idle else "domcontentloaded"
+                await page.goto(url, wait_until=wait_until)
+                
+                # Trigger dynamic content based on site profile
+                profile = get_site_profile(url)
+                if profile:
+                    await self._interact_with_page(page, profile)
+                
+                # Scroll if configured
+                if self.config.scroll_to_bottom:
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await asyncio.sleep(0.5)
+                
+                # Get final HTML after JS execution and interactions
+                html = await page.content()
+                await page.close()
+                
+                return html
+                
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                
+                # Close page if it was opened
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                
+                # Check if error is retryable (network/protocol errors)
+                retryable_errors = [
+                    'net::err_http2',
+                    'net::err_connection',
+                    'net::err_timed_out',
+                    'net::err_name_not_resolved',
+                    'timeout',
+                    'protocol error',
+                ]
+                
+                is_retryable = any(err in error_str for err in retryable_errors)
+                
+                if is_retryable and attempt < max_retries - 1:
+                    # Exponential backoff using config base delay
+                    wait_time = self.config.retry_base_delay * (2 ** attempt)
+                    logger.debug(f"🔄 Retry {attempt + 1}/{max_retries} for {url} in {wait_time:.1f}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    break
+        
+        logger.warning(f"⚠️ Failed to fetch {url}: {last_error}")
+        return None
     
     async def _process_single_page(
         self, 
@@ -375,6 +428,33 @@ class WebCrawler:
                     error=error_msg,
                     time_ms=(time.time() - page_start_time) * 1000
                 )
+
+    async def _interact_with_page(self, page, profile: SiteProfile):
+        """Perform dynamic interactions on the page to reveal hidden content."""
+        try:
+            # Wait for specific elements if defined
+            for selector in profile.selectors_to_wait_for:
+                try:
+                    await page.wait_for_selector(selector, timeout=2000)
+                except Exception:
+                    continue
+            
+            # Hover over elements (to trigger dropdowns)
+            for selector in profile.selectors_to_hover:
+                try:
+                    elements = await page.query_selector_all(selector)
+                    for element in elements[:5]: # Limit to first 5 for speed
+                        await element.hover()
+                        await asyncio.sleep(0.1)
+                except Exception:
+                    continue
+            
+            # Short wait for any triggered animations/renders
+            if profile.selectors_to_hover:
+                await asyncio.sleep(self.config.interaction_wait_ms / 1000)
+                
+        except Exception as e:
+            logger.debug(f"⚠️ Interaction failed for {page.url}: {e}")
     
     def _should_visit(self, url: str, visited: Set[str]) -> bool:
         """
@@ -472,6 +552,16 @@ class WebCrawler:
         
         # BFS queue: (url, current_depth)
         queue: List[Tuple[str, int]] = [(url, 0) for url in urls]
+        
+        # Fastlining: Try to discover more URLs via Sitemap if enabled
+        if self.config.use_sitemap:
+            sitemap_urls = await self._discover_urls_from_sitemaps(urls)
+            for s_url in sitemap_urls:
+                if s_url not in [q[0] for q in queue]:
+                    queue.append((s_url, 0)) # Treat sitemap URLs as depth 0
+            if sitemap_urls:
+                logger.info(f"🛰️ Sitemap discovery found {len(sitemap_urls)} additional URLs")
+
         visited: Set[str] = set()
         pages_scraped = 0
         batch_num = 0
@@ -554,8 +644,8 @@ class WebCrawler:
                                 result.errors[page_result.url] = f"Skipped: {reason}"
                                 continue
                             
-                            # Check for duplicate content (hash-based)
-                            if self._is_duplicate_content(page_data.content):
+                            # Check for duplicate content (URL-aware hash)
+                            if self._is_duplicate_content(page_data.content, page_result.url):
                                 self.scrape_logger.log_page_skipped(page_result.url, "Duplicate content")
                                 result.errors[page_result.url] = "Skipped: Duplicate content"
                                 continue
@@ -620,6 +710,30 @@ class WebCrawler:
         )
         
         return result
+
+    async def _discover_urls_from_sitemaps(self, base_urls: List[str]) -> Set[str]:
+        """Discover URLs from sitemap.xml for fastlining."""
+        discovered = set()
+        for base_url in base_urls:
+            profile = get_site_profile(base_url)
+            sitemap_url = profile.sitemap_url if profile and profile.sitemap_url else f"{base_url.rstrip('/')}/sitemap.xml"
+            
+            try:
+                import aiohttp
+                from bs4 import BeautifulSoup
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(sitemap_url, timeout=10) as response:
+                        if response.status == 200:
+                            content = await response.text()
+                            soup = BeautifulSoup(content, 'xml')
+                            for loc in soup.find_all('loc'):
+                                url = loc.get_text().strip()
+                                if self._should_visit(url, set()):
+                                    discovered.add(url)
+            except Exception as e:
+                logger.debug(f"⚠️ Sitemap discovery failed for {sitemap_url}: {e}")
+                
+        return discovered
     
     async def crawl_single(self, url: str) -> Optional[PageData]:
         """
