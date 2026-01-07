@@ -176,11 +176,32 @@ async def get_chat_messages(session_id: str):
         # Also fetch session is_active flag
         is_active = await helpers.get_session_is_active(session_uuid)
 
+        # Try to include UC1 slot state (if present in conversation memory or in-memory)
+        uc1_slots = None
+        try:
+            # Import locally to avoid top-level circular import
+            from app.orchestrator.slot_manager import SlotManager
+
+            if session_id in SlotManager._session_slots:
+                uc1_slots = SlotManager(session_id).slots.to_dict()
+            else:
+                # Attempt to load from conversation memory metadata
+                try:
+                    from app.utils.conversation_memory import get_session_metadata
+                    data = get_session_metadata(session_id, "uc1_slots", default=None)
+                    if data and isinstance(data, dict):
+                        uc1_slots = data
+                except Exception:
+                    uc1_slots = None
+        except Exception:
+            uc1_slots = None
+
         return {
             "root_prompts": root_prompts,
             "session_id": session_id,
             "is_active": is_active,
             "messages": formatted_messages,
+            "uc1_slots": uc1_slots,
         }
     except Exception as e:
         logger.error(f"Error retrieving chat messages: {str(e)}")

@@ -35,6 +35,50 @@ def _validate_email(email: str) -> str | None:
         return None
 
 
+def _get_source_label(url: str) -> str:
+    """
+    Extract a readable label from source URL for display.
+    
+    Parses URL fragment or path to create human-readable link text.
+    Example: 'https://ditstek.com/blog/ai-chatbot#section-name' -> 'Section Name'
+    
+    Args:
+        url: The source URL
+        
+    Returns:
+        str: Human-readable label (max 60 chars)
+    """
+    if not url:
+        return "Source"
+    try:
+        from urllib.parse import urlparse, unquote
+        parsed = urlparse(url)
+        
+        # Use fragment if present (e.g., #section-name)
+        if parsed.fragment:
+            label = unquote(parsed.fragment.replace("-", " ").replace("_", " "))
+            # Clean up and title case
+            label = " ".join(word.capitalize() for word in label.split())
+            return label[:60] if label else parsed.netloc
+        
+        # Otherwise use last meaningful path segment
+        path = parsed.path.rstrip("/")
+        if path:
+            segment = path.split("/")[-1]
+            # Skip common file extensions
+            if segment and not segment.endswith((".html", ".php", ".aspx", ".htm")):
+                label = unquote(segment.replace("-", " ").replace("_", " "))
+                label = " ".join(word.capitalize() for word in label.split())
+                if label:
+                    return label[:60]
+        
+        # Fallback to domain name
+        return parsed.netloc or "Source"
+    except Exception:
+        # Ultimate fallback
+        return url[:60] if len(url) > 60 else url
+
+
 def _calculate_dynamic_top_n(query: str, conversation_history: list) -> int:
     """
     Dynamically calculate top_n based on query characteristics rather than static keywords.
@@ -211,7 +255,8 @@ class OptimizedChatbot:
         self.query_llm = llm if llm is not None else ChatGroq(model=model)
 
     async def get_detailed_response(
-        self, query: str, chat_history, session_id: str, stream: bool = True
+        self, query: str, chat_history, session_id: str, stream: bool = True,
+        is_uc1: bool = False  # EXPLICIT UC1 flag - set by caller, not inferred
     ):
         from app.api.helpers import (
             get_user_details_known_from_db,
@@ -221,7 +266,38 @@ class OptimizedChatbot:
         Generate a detailed response for a query and stream structured events.
         Yields dict events used by the API layer: 
         {status: 'chunk'|'form_trigger'|'meta', 'chunk': ...}
+        
+        UC1 ROUTING (EXPLICIT):
+        If is_uc1=True, delegates to ConversationOrchestrator.
+        UC1 activation is NEVER inferred - it must be explicitly set by:
+        1. Session explicitly marked as UC1 at creation
+        2. Explicit UC1 trigger CTA from welcome screen
         """
+        
+        # ============================================================
+        # UC1 EXPLICIT ROUTING - Check FIRST, before any other logic
+        # ============================================================
+        if is_uc1:
+            logger.info(f"[Chatbot] UC1 mode active for session: {session_id}")
+            try:
+                from app.orchestrator import ConversationOrchestrator
+                
+                orchestrator = ConversationOrchestrator.get_or_create(session_id)
+                
+                # Process input through orchestrator
+                async for chunk in orchestrator.process_input_stream(query):
+                    yield chunk
+                
+                # UC1 handled - return early
+                return
+            except Exception as uc1_error:
+                logger.exception(f"[Chatbot] UC1 orchestrator error, falling back to standard flow: {uc1_error}")
+                # Fall through to standard flow if UC1 fails
+        
+        # ============================================================
+        # STANDARD FLOW (for non-UC1 sessions)
+        # ============================================================
+        
         # Track last assistant response for anti-repetition
         last_assistant_response = None
         for msg in reversed(chat_history or []):
@@ -690,6 +766,16 @@ class OptimizedChatbot:
                             logger.warning(
                                 f"[MARKDOWN_WARNING] Bold markdown spacing issue detected: '** ' or ' **' found in response"
                             )
+
+                # Append sources section for transparency (show where info came from)
+                if sources and isinstance(sources, list) and len(sources) > 0:
+                    sources_section = "\n\n---\n**📚 Sources:**"
+                    for src in sources[:5]:  # Limit to 5 sources for readability
+                        if src and isinstance(src, str) and src.startswith("http"):
+                            label = _get_source_label(src)
+                            sources_section += f"\n- [{label}]({src})"
+                    formatted += sources_section
+                    logger.info(f"[SourceTransparency] Appended {min(len(sources), 5)} source(s) to response")
 
                 # Only yield a chunk if it is non-empty and not just whitespace
                 if formatted and formatted.strip():

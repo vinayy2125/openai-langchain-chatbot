@@ -668,7 +668,33 @@ async def send_message_stream(req: SentMessage):
         full_assistant_response = ""
         session_ended = False
 
-        async for event in chatbot.get_detailed_response(query=query, chat_history=chat_history, session_id=session_id, stream=True):
+        # ============================================================
+        # UC1 TRIGGER DETECTION - Explicit CTA triggers UC1 mode
+        # ============================================================
+        # UC1 is triggered ONLY by explicit CTA selection, not inference
+        # Trigger CTA: "Explore DITS Services" from welcome screen
+        UC1_TRIGGER_CTAS = {
+            "explore dits services",
+            "explore services",
+            "explore dits",
+        }
+        
+        # Check if this session is in UC1 mode (stored per-session)
+        # Use a simple in-memory cache for now (can be moved to Redis/DB later)
+        from app.orchestrator.slot_manager import SlotManager
+        
+        is_uc1 = False
+        
+        # Check if query matches a UC1 trigger CTA
+        if query and query.strip().lower() in UC1_TRIGGER_CTAS:
+            is_uc1 = True
+            logger.info(f"[UC1] Trigger CTA detected: '{query}' → Activating UC1 mode")
+        # Check if session already has UC1 state (continuing UC1 flow)
+        elif session_id in SlotManager._session_slots:
+            is_uc1 = True
+            logger.info(f"[UC1] Session {session_id} already in UC1 mode")
+
+        async for event in chatbot.get_detailed_response(query=query, chat_history=chat_history, session_id=session_id, stream=True, is_uc1=is_uc1):
             # Track session ending
             if isinstance(event, dict) and event.get("status") == "end_chat":
                 session_ended = True
