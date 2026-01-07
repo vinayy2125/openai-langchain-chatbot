@@ -1,6 +1,6 @@
 import os
 from app.logger import get_logger
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 from pydantic import SecretStr
 
@@ -10,7 +10,7 @@ logger = get_logger(__name__)
 
 load_dotenv()
 
-# Token limits for Groq API (keep synchronized with llm_utils.py)
+# Token limits for OpenAI API (keep synchronized with llm_utils.py)
 MAX_SUMMARY_INPUT_TOKENS: int = 5000  # Conservative limit for summarization
 CHARS_PER_TOKEN: float = 4.0  # Approximate: 1 token ≈ 4 characters
 
@@ -42,11 +42,11 @@ def _truncate_text(text: str, max_tokens: int) -> str:
     return truncated + "\n[...conversation history truncated...]"
 
 # Define LLM instance here so it always exists
-# ChatGroq will read the API key from the environment (GROQ_API_KEY) loaded via load_dotenv()
-llm = ChatGroq(
-    model="openai/gpt-oss-120b",
+# ChatOpenAI will read the API key from the environment (OPENAI_API_KEY) loaded via load_dotenv()
+llm = ChatOpenAI(
+    model="gpt-4o",
     temperature=0.7,
-    api_key=SecretStr(os.getenv("GROQ_API_KEY") or ""),
+    api_key=SecretStr(os.getenv("OPENAI_API_KEY") or ""),
 )
 
 

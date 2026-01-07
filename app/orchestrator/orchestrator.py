@@ -1,22 +1,24 @@
-# UC1 Conversation Orchestrator - Central Controller
+# UC1 Conversation Orchestrator - Central Controller (LLM-First Architecture)
 #
-# ARCHITECTURE RULE: This is the SOLE OWNER of UC1 conversation flow.
-# - LLM NEVER decides state transitions
-# - All flow decisions are made HERE based on state machine
-# - Slot management is coordinated HERE
-# - LLM adapter is called for paraphrasing ONLY
+# ARCHITECTURE INVARIANT:
+#   The fine-tuned LLM generates 100% of user-visible language.
+#   The orchestrator generates 0%.
 #
-# The orchestrator coordinates:
-# 1. State machine transitions
-# 2. Slot updates
-# 3. LLM paraphrasing
-# 4. Output sanitization
-# 5. Response generation
+# The orchestrator is TEXT-BLIND. It:
+# 1. Controls state transitions (deterministic)
+# 2. Manages slots (deterministic)
+# 3. Returns AdapterCallSpec (WHY to speak, not WHAT)
+# 4. NEVER emits user-visible strings
+#
+# Language generation happens ONLY in llm_adapter.generate_state_response()
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Literal, AsyncGenerator
-from app.orchestrator.uc1_config import UC1Config, load_uc1_config, get_bucket_by_id, get_bucket_by_trigger
-from app.orchestrator.state_machine import UC1State, UC1StateMachine
+from app.orchestrator.uc1_config import (
+    UC1Config, load_uc1_config, get_bucket_by_id, 
+    get_bucket_by_trigger, CapabilityBucket
+)
+from app.orchestrator.state_machine import UC1State, UC1StateMachine, ResponseIntent
 from app.orchestrator.slot_manager import UC1Slots, SlotManager, EngagementEvent
 from app.orchestrator.llm_adapter import ConstrainedLLMAdapter
 from app.orchestrator.output_sanitizer import LLMOutputSanitizer
@@ -31,36 +33,48 @@ InputType = Literal["buttons", "text", "none"]
 
 
 @dataclass
-class OrchestratorResponse:
+class AdapterCallSpec:
     """
-    Explicit output schema for frontend enforcement.
+    Text-blind specification for LLM adapter.
     
-    This is the ONLY format returned by the orchestrator.
-    Frontend should render based on input_type and options.
+    This is what the orchestrator outputs - it specifies WHY something
+    must be said, not WHAT. The LLM adapter translates this to language.
+    
+    INVARIANT: Orchestrator returns only AdapterCallSpec, never strings.
     """
     state: UC1State
-    message: str
+    response_intent: ResponseIntent
+    user_input: Optional[str] = None
+    slots: Optional[UC1Slots] = None
+    bucket: Optional[CapabilityBucket] = None
+    exploration_turn: int = 0  # For exploration layer
+
+
+@dataclass 
+class OrchestratorResponse:
+    """
+    Output schema for frontend enforcement.
+    
+    The 'message' field is populated by the LLM adapter AFTER
+    the orchestrator returns, not by the orchestrator itself.
+    """
+    state: UC1State
+    call_spec: AdapterCallSpec  # What the LLM adapter needs
     input_type: InputType
-    options: Optional[List[str]] = None  # Button labels if input_type=buttons
-    terminal: bool = False  # True if EXIT state
-    metadata: Optional[Dict[str, Any]] = None  # Additional data (e.g., CTA outcomes)
+    options: Optional[List[str]] = None
+    terminal: bool = False
+    metadata: Optional[Dict[str, Any]] = None
+    
+    # Message is set by caller after LLM generation, not by orchestrator
+    message: str = ""
     
     def to_sse_chunks(self) -> List[Dict[str, Any]]:
-        """
-        Convert response to SSE-compatible chunks.
-        
-        This matches the existing streaming format used by chatbot_optimizer.py
-        """
+        """Convert response to SSE-compatible chunks."""
         chunks = []
         
-        # Main message chunk
         if self.message:
-            chunks.append({
-                "status": "chunk",
-                "chunk": self.message
-            })
+            chunks.append({"status": "chunk", "chunk": self.message})
         
-        # Meta chunk with state info
         meta = {
             "uc1_state": self.state.value,
             "uc1_input_type": self.input_type,
@@ -71,29 +85,27 @@ class OrchestratorResponse:
         if self.metadata:
             meta.update(self.metadata)
         
-        chunks.append({
-            "status": "meta",
-            "chunk": meta
-        })
-        
+        chunks.append({"status": "meta", "chunk": meta})
         return chunks
 
 
 class ConversationOrchestrator:
     """
-    Central conversation controller for UC1 flow.
+    Central conversation controller for UC1 flow (TEXT-BLIND).
     
-    SOLE OWNER of UC1 conversation flow.
-    LLM NEVER decides state transitions.
+    ARCHITECTURE INVARIANT:
+        Orchestrator controls FLOW, not LANGUAGE.
+        LLM adapter controls LANGUAGE, not FLOW.
     
     The orchestrator:
     1. Validates input against current state
-    2. Updates slots (with engagement scoring)
-    3. Determines next state DETERMINISTICALLY
-    4. Selects content DETERMINISTICALLY (alternatives, CTAs)
-    5. Passes to LLM adapter for PARAPHRASING ONLY
-    6. Sanitizes output
-    7. Returns structured response
+    2. Updates slots (deterministic)
+    3. Determines next state (deterministic)
+    4. Returns AdapterCallSpec (WHY to speak)
+    
+    The orchestrator NEVER:
+    - Emits user-visible strings
+    - Decides what words to use
     """
     
     # Class-level cache of orchestrator instances per session
@@ -191,6 +203,8 @@ class ConversationOrchestrator:
             return self._handle_context_question(user_input)
         elif self._current_state == UC1State.NAME_CAPTURE:
             return self._handle_name_capture(user_input)
+        elif self._current_state == UC1State.EXPLORATION_LAYER:
+            return self._handle_exploration_layer(user_input)
         elif self._current_state == UC1State.AI_SYNTHESIS:
             return self._handle_ai_synthesis()
         elif self._current_state == UC1State.CONSULTATIVE_ALTERNATIVES:
@@ -201,43 +215,53 @@ class ConversationOrchestrator:
             return self._handle_exit()
         else:
             logger.error(f"[Orchestrator] Unknown state: {self._current_state}")
+            bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
             return OrchestratorResponse(
                 state=self._current_state,
-                message="I'm not sure what happened. Let's start over.",
+                call_spec=AdapterCallSpec(
+                    state=UC1State.EXIT,
+                    response_intent=ResponseIntent.EXIT,
+                    user_input=user_input,
+                    slots=self.slots,
+                    bucket=bucket,
+                ),
                 input_type="none",
                 terminal=True
             )
     
     def _handle_entry(self) -> OrchestratorResponse:
-        """Handle ENTRY state - show welcome message and capability options."""
-        # Entry message from config (no bullet list - frontend renders buttons from options)
-        entry_msg = self.config.entry_message
-        
+        """Handle ENTRY state - transition to capability selection."""
         # Transition to CAPABILITY_SELECTION
         self._current_state = UC1State.CAPABILITY_SELECTION
-        
-        # Get button options for frontend
         button_options = [bucket.trigger for bucket in self.config.capability_buckets]
         
         return OrchestratorResponse(
             state=self._current_state,
-            message=entry_msg,
+            call_spec=AdapterCallSpec(
+                state=UC1State.ENTRY,
+                response_intent=ResponseIntent.PROMPT,
+                slots=self.slots,
+            ),
             input_type="buttons",
             options=button_options,
         )
     
     def _handle_capability_selection(self, user_input: str) -> OrchestratorResponse:
         """Handle CAPABILITY_SELECTION state - user selects a capability bucket."""
-        # Find the matching bucket
         bucket = get_bucket_by_trigger(self.config, user_input)
         
         if not bucket:
-            # Invalid selection - increment retry and ask again
+            # Invalid selection - retry
             self.slot_manager.increment_engagement(EngagementEvent.RETRY)
             button_options = [b.trigger for b in self.config.capability_buckets]
             return OrchestratorResponse(
                 state=self._current_state,
-                message="I didn't catch that. Please select one of the options above:",
+                call_spec=AdapterCallSpec(
+                    state=UC1State.CAPABILITY_SELECTION,
+                    response_intent=ResponseIntent.RETRY,
+                    user_input=user_input,
+                    slots=self.slots,
+                ),
                 input_type="buttons",
                 options=button_options,
             )
@@ -249,25 +273,33 @@ class ConversationOrchestrator:
         # Transition to CONTEXT_QUESTION
         self._current_state = UC1State.CONTEXT_QUESTION
         
-        # Get the context question for this bucket
-        question = self.llm_adapter.generate_context_question_prompt(bucket)
-        
         return OrchestratorResponse(
             state=self._current_state,
-            message=question,
+            call_spec=AdapterCallSpec(
+                state=UC1State.CONTEXT_QUESTION,
+                response_intent=ResponseIntent.PROMPT,
+                slots=self.slots,
+                bucket=bucket,
+            ),
             input_type="text",
         )
     
     def _handle_context_question(self, user_input: str) -> OrchestratorResponse:
         """Handle CONTEXT_QUESTION state - user provides context answer."""
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
         if not user_input or not user_input.strip():
-            # Empty input - ask again
+            # Empty input - retry
             self.slot_manager.increment_engagement(EngagementEvent.RETRY)
-            bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
-            question = bucket.context_question if bucket else "Could you tell me more about what you're looking for?"
             return OrchestratorResponse(
                 state=self._current_state,
-                message=f"I'd love to hear more. {question}",
+                call_spec=AdapterCallSpec(
+                    state=UC1State.CONTEXT_QUESTION,
+                    response_intent=ResponseIntent.RETRY,
+                    user_input=user_input,
+                    slots=self.slots,
+                    bucket=bucket,
+                ),
                 input_type="text",
             )
         
@@ -278,30 +310,39 @@ class ConversationOrchestrator:
         # Transition to NAME_CAPTURE
         self._current_state = UC1State.NAME_CAPTURE
         
-        # Get name capture prompt
-        prompt = self.llm_adapter.generate_name_capture_prompt()
-        
         return OrchestratorResponse(
             state=self._current_state,
-            message=f"Thanks for sharing! Before I share some thoughts, {prompt}",
+            call_spec=AdapterCallSpec(
+                state=UC1State.NAME_CAPTURE,
+                response_intent=ResponseIntent.TRANSITION,
+                user_input=user_input,
+                slots=self.slots,
+                bucket=bucket,
+            ),
             input_type="text",
         )
     
     def _handle_name_capture(self, user_input: str) -> OrchestratorResponse:
         """Handle NAME_CAPTURE state - user provides their name."""
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
         if not user_input or not user_input.strip():
-            # Empty input - ask again
+            # Empty input - retry
             self.slot_manager.increment_engagement(EngagementEvent.RETRY)
             return OrchestratorResponse(
                 state=self._current_state,
-                message="I didn't catch your name. What should I call you?",
+                call_spec=AdapterCallSpec(
+                    state=UC1State.NAME_CAPTURE,
+                    response_intent=ResponseIntent.RETRY,
+                    slots=self.slots,
+                    bucket=bucket,
+                ),
                 input_type="text",
             )
         
-        # Extract name (simple: take first word or full input if short)
+        # Extract name (take first word or full input if short)
         name = user_input.strip()
         if len(name.split()) > 3:
-            # Likely a sentence, extract first capitalized word
             words = name.split()
             for word in words:
                 if word[0].isupper() and len(word) > 1:
@@ -311,50 +352,105 @@ class ConversationOrchestrator:
         self.slot_manager.set_user_name(name)
         self.slot_manager.increment_engagement(EngagementEvent.TEXT_PROVIDED)
         
-        # Transition to AI_SYNTHESIS (auto-advance)
-        self._current_state = UC1State.AI_SYNTHESIS
+        # Transition to EXPLORATION_LAYER
+        self._current_state = UC1State.EXPLORATION_LAYER
+        self.slot_manager.set_exploration_turn(1)
         
-        # Process AI synthesis immediately
-        return self._handle_ai_synthesis()
+        # Return spec for acknowledgment + first exploration question
+        return OrchestratorResponse(
+            state=self._current_state,
+            call_spec=AdapterCallSpec(
+                state=UC1State.EXPLORATION_LAYER,
+                response_intent=ResponseIntent.ACKNOWLEDGE,
+                user_input=name,  # Pass name for acknowledgment
+                slots=self.slots,
+                bucket=bucket,
+                exploration_turn=1,
+            ),
+            input_type="text",
+        )
     
-    def _handle_ai_synthesis(self) -> OrchestratorResponse:
-        """Handle AI_SYNTHESIS state - generate synthesis and show alternatives."""
+    def _handle_exploration_layer(self, user_input: str) -> OrchestratorResponse:
+        """Handle EXPLORATION_LAYER state - 2 turns of guided Q&A (TEXT-BLIND)."""
         bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
         if not bucket:
-            logger.error(f"[Orchestrator] Bucket not found: {self.slots.capability_bucket}")
+            logger.error(f"[Orchestrator] Bucket not found in exploration")
+            self._current_state = UC1State.AI_SYNTHESIS
+            return self._handle_ai_synthesis()
+        
+        current_turn = self.slots.exploration_turn
+        max_turns = 2
+        
+        # User provided a response - process it
+        if user_input:
+            self.slot_manager.add_exploration_response(user_input)
+            self.slot_manager.increment_engagement(EngagementEvent.TEXT_PROVIDED)
+        
+        # Check if we've completed enough exploration turns
+        if current_turn >= max_turns and user_input:
+            # Done exploring - transition to AI_SYNTHESIS
+            logger.info(f"[Orchestrator] Exploration complete after {current_turn} turns")
+            self._current_state = UC1State.AI_SYNTHESIS
+            return self._handle_ai_synthesis()
+        
+        # Generate next exploration prompt/reflect
+        next_turn = current_turn + 1 if user_input else current_turn
+        self.slot_manager.set_exploration_turn(next_turn)
+        
+        # Return spec - LLM adapter will generate appropriate question/reflection
+        intent = ResponseIntent.REFLECT if user_input else ResponseIntent.PROMPT
+        
+        return OrchestratorResponse(
+            state=self._current_state,
+            call_spec=AdapterCallSpec(
+                state=UC1State.EXPLORATION_LAYER,
+                response_intent=intent,
+                user_input=user_input,
+                slots=self.slots,
+                bucket=bucket,
+                exploration_turn=next_turn,
+            ),
+            input_type="text",
+        )
+
+    
+    def _handle_ai_synthesis(self) -> OrchestratorResponse:
+        """Handle AI_SYNTHESIS state - present alternatives (TEXT-BLIND)."""
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        if not bucket:
+            logger.error(f"[Orchestrator] Bucket not found in synthesis")
             return OrchestratorResponse(
                 state=UC1State.EXIT,
-                message="Something went wrong. Let's start over.",
+                call_spec=AdapterCallSpec(
+                    state=UC1State.EXIT,
+                    response_intent=ResponseIntent.EXIT,
+                    slots=self.slots,
+                ),
                 input_type="none",
                 terminal=True
             )
         
-        # Generate synthesis (no alternatives list - frontend renders buttons from options)
-        synthesis = self.llm_adapter.paraphrase_synthesis(bucket, self.slots)
-        
-        # Sanitize output
-        sanitized, error = self.sanitizer.safe_sanitize(synthesis, UC1State.AI_SYNTHESIS)
-        if error:
-            logger.warning(f"[Orchestrator] Sanitization fixed issue: {error}")
-        
         # Transition to CONSULTATIVE_ALTERNATIVES
         self._current_state = UC1State.CONSULTATIVE_ALTERNATIVES
-        
-        # Button options are the 3 alternatives
         button_options = list(bucket.alternatives)
         
         return OrchestratorResponse(
             state=self._current_state,
-            message=sanitized,
+            call_spec=AdapterCallSpec(
+                state=UC1State.AI_SYNTHESIS,
+                response_intent=ResponseIntent.PRESENT,
+                slots=self.slots,
+                bucket=bucket,
+            ),
             input_type="buttons",
             options=button_options,
         )
     
     def _handle_consultative_alternatives(self, user_input: str) -> OrchestratorResponse:
-        """Handle CONSULTATIVE_ALTERNATIVES state - user selects an alternative."""
+        """Handle CONSULTATIVE_ALTERNATIVES state - user selects alternative (TEXT-BLIND)."""
         bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
         
-        # Check if input matches one of the alternatives
+        # Track user selection
         if bucket:
             alternatives_lower = [a.lower() for a in bucket.alternatives]
             input_lower = user_input.strip().lower()
@@ -363,25 +459,23 @@ class ConversationOrchestrator:
                 self.slot_manager.set_selected_alternative(user_input)
                 self.slot_manager.increment_engagement(EngagementEvent.BUTTON_CLICK)
             else:
-                # User typed something else - that's okay, still proceed
                 self.slot_manager.set_selected_alternative(user_input)
                 self.slot_manager.increment_engagement(EngagementEvent.TEXT_PROVIDED)
         
         # Transition to RECOMMENDATION
         self._current_state = UC1State.RECOMMENDATION
-        
-        # Prepare message (no CTA list - frontend renders buttons from options)
-        full_message = "That makes sense. Here's what we can do next:"
-        
-        # Button options are the 4 CTAs
         button_options = [cta.choice for cta in self.config.exit_ctas]
-        
-        # Include outcome mapping in metadata for frontend
         outcome_map = {cta.choice: cta.outcome for cta in self.config.exit_ctas}
         
         return OrchestratorResponse(
             state=self._current_state,
-            message=full_message,
+            call_spec=AdapterCallSpec(
+                state=UC1State.RECOMMENDATION,
+                response_intent=ResponseIntent.PRESENT,
+                user_input=user_input,
+                slots=self.slots,
+                bucket=bucket,
+            ),
             input_type="buttons",
             options=button_options,
             metadata={"cta_outcomes": outcome_map}
@@ -397,12 +491,19 @@ class ConversationOrchestrator:
                 break
         
         if not selected_cta:
-            # Invalid CTA - ask again
+            # Invalid CTA - retry
+            bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
             self.slot_manager.increment_engagement(EngagementEvent.RETRY)
             button_options = [cta.choice for cta in self.config.exit_ctas]
             return OrchestratorResponse(
                 state=self._current_state,
-                message="I didn't quite get that. What would you like to do?",
+                call_spec=AdapterCallSpec(
+                    state=UC1State.RECOMMENDATION,
+                    response_intent=ResponseIntent.RETRY,
+                    user_input=user_input,
+                    slots=self.slots,
+                    bucket=bucket,
+                ),
                 input_type="buttons",
                 options=button_options,
             )
@@ -417,13 +518,19 @@ class ConversationOrchestrator:
         )
         
         if next_state == UC1State.CAPABILITY_SELECTION:
-            # Loop back - user wants to continue exploring (no bullet list - frontend renders buttons)
+            # Loop back - user wants to continue exploring
             self._current_state = UC1State.CAPABILITY_SELECTION
             button_options = [b.trigger for b in self.config.capability_buckets]
             
             return OrchestratorResponse(
                 state=self._current_state,
-                message="Great! Let's explore more. What else would you like to learn about?",
+                call_spec=AdapterCallSpec(
+                    state=UC1State.CAPABILITY_SELECTION,
+                    response_intent=ResponseIntent.TRANSITION,
+                    user_input=user_input,
+                    slots=self.slots,
+                    bucket=bucket,
+                ),
                 input_type="buttons",
                 options=button_options,
             )
@@ -433,15 +540,17 @@ class ConversationOrchestrator:
             return self._handle_exit()
     
     def _handle_exit(self) -> OrchestratorResponse:
-        """Handle EXIT state - generate exit summary."""
+        """Handle EXIT state (TEXT-BLIND)."""
         bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
-        
-        # Generate exit summary
-        summary = self.llm_adapter.generate_exit_summary(self.slots, bucket)
         
         return OrchestratorResponse(
             state=self._current_state,
-            message=summary,
+            call_spec=AdapterCallSpec(
+                state=UC1State.EXIT,
+                response_intent=ResponseIntent.EXIT,
+                slots=self.slots,
+                bucket=bucket,
+            ),
             input_type="none",
             terminal=True,
         )

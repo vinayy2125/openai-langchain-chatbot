@@ -18,10 +18,11 @@ logger = get_logger("state_machine")
 
 class UC1State(Enum):
     """
-    The 8 states of the UC1 conversation flow.
+    The 9 states of the UC1 conversation flow.
     
     Flow: ENTRY → CAPABILITY_SELECTION → CONTEXT_QUESTION → NAME_CAPTURE 
-          → AI_SYNTHESIS → CONSULTATIVE_ALTERNATIVES → RECOMMENDATION → EXIT
+          → EXPLORATION_LAYER (2-3 turns) → AI_SYNTHESIS → CONSULTATIVE_ALTERNATIVES 
+          → RECOMMENDATION → EXIT
     
     Note: Some transitions allow looping (e.g., RECOMMENDATION → CAPABILITY_SELECTION
     via "Continue exploring" CTA).
@@ -30,10 +31,27 @@ class UC1State(Enum):
     CAPABILITY_SELECTION = "capability_selection"
     CONTEXT_QUESTION = "context_question"
     NAME_CAPTURE = "name_capture"
+    EXPLORATION_LAYER = "exploration_layer"
     AI_SYNTHESIS = "ai_synthesis"
     CONSULTATIVE_ALTERNATIVES = "consultative_alternatives"
     RECOMMENDATION = "recommendation"
     EXIT = "exit"
+
+
+class ResponseIntent(Enum):
+    """
+    WHY something must be said (not WHAT).
+    
+    The orchestrator specifies intent; the LLM adapter generates language.
+    This separation ensures the orchestrator remains text-blind.
+    """
+    PROMPT = "prompt"           # Initial state prompt (ask appropriate question)
+    RETRY = "retry"             # Invalid/empty input, ask again
+    TRANSITION = "transition"   # Acknowledge and move to next state
+    ACKNOWLEDGE = "acknowledge" # Acknowledge user input (e.g., name)
+    REFLECT = "reflect"         # Reflect on user's response
+    PRESENT = "present"         # Present options/alternatives
+    EXIT = "exit"               # Closing conversation
 
 
 # Input types that the user can provide
@@ -77,9 +95,16 @@ STATE_CONFIGS: Dict[UC1State, StateConfig] = {
     ),
     UC1State.NAME_CAPTURE: StateConfig(
         input_type="text",  # User provides their name
-        next_states=(UC1State.AI_SYNTHESIS,),
+        next_states=(UC1State.EXPLORATION_LAYER,),  # Go to exploration first
         required_slots=("user_name",),
         system_message_key="name_capture_prompt",
+    ),
+    UC1State.EXPLORATION_LAYER: StateConfig(
+        input_type="text",  # User provides free-form exploration answers
+        next_states=(UC1State.AI_SYNTHESIS,),  # After 2-3 turns, proceed to synthesis
+        required_slots=(),  # No slots required to advance
+        retry_limit=3,
+        system_message_key=None,  # Questions come from LLM adapter
     ),
     UC1State.AI_SYNTHESIS: StateConfig(
         input_type="none",  # System auto-advances after generating synthesis

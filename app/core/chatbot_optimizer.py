@@ -2,7 +2,7 @@ import json
 import re
 import tiktoken
 from functools import lru_cache
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from app.logger import get_logger
 from app.utils.llm_utils import generate_llm_response
 from app.utils.redis_context import get_redis_context_chunks
@@ -182,14 +182,14 @@ class ContextOptimizer:
     while maximizing relevance and information retention.
     """
 
-    def __init__(self, model: str = "openai/gpt-oss-120b"):
+    def __init__(self, model: str = "gpt-4o"):
         self.model = model
         # Use cl100k_base encoding as fallback for non-OpenAI models
         try:
             self.encoding = tiktoken.encoding_for_model(model)
         except KeyError:
             self.encoding = tiktoken.get_encoding("cl100k_base")
-        self.model_limits = {"openai/gpt-oss-120b": 128000, "llama-3.1-8b-instant": 131072, "mixtral-8x7b-32768": 32768}
+        self.model_limits = {"gpt-4o": 128000, "gpt-4o": 128000, "gpt-4-turbo": 128000, "gpt-3.5-turbo": 16385}
         self.context_limit = self.model_limits.get(model, 128000)
 
     @lru_cache(maxsize=1000)
@@ -238,12 +238,12 @@ class OptimizedChatbot:
         ).ratio()
         return ratio >= threshold
 
-    def __init__(self, llm=None, model: str = "openai/gpt-oss-120b"):
+    def __init__(self, llm=None, model: str = "gpt-4o"):
         """Initialize OptimizedChatbot.
 
         Parameters:
         - llm: optional external LLM client object to use (must implement .invoke or content access). If provided, it will be used as self.query_llm.
-        - model: model name to instantiate a default ChatGroq if llm is not provided.
+        - model: model name to instantiate a default ChatOpenAI if llm is not provided.
         """
         self.model = model
         # ContextOptimizer is unused in the critical path, skipping initialization to save overhead
@@ -252,7 +252,7 @@ class OptimizedChatbot:
         # self.model_limits = self.context_optimizer.model_limits
         # self.context_limit = self.context_optimizer.context_limit
 
-        self.query_llm = llm if llm is not None else ChatGroq(model=model)
+        self.query_llm = llm if llm is not None else ChatOpenAI(model=model)
 
     async def get_detailed_response(
         self, query: str, chat_history, session_id: str, stream: bool = True,
@@ -284,8 +284,23 @@ class OptimizedChatbot:
                 
                 orchestrator = ConversationOrchestrator.get_or_create(session_id)
                 
-                # Process input through orchestrator
-                async for chunk in orchestrator.process_input_stream(query):
+                # Process input through orchestrator (returns text-blind response)
+                response = orchestrator.process_input(query)
+                
+                # Generate message from call_spec using LLM adapter (sole language authority)
+                if hasattr(response, 'call_spec') and response.call_spec:
+                    spec = response.call_spec
+                    response.message = orchestrator.llm_adapter.generate_state_response(
+                        state=spec.state,
+                        response_intent=spec.response_intent,
+                        user_input=spec.user_input,
+                        slots=spec.slots,
+                        bucket=spec.bucket,
+                        exploration_turn=spec.exploration_turn,
+                    )
+                
+                # Yield SSE chunks (message now populated)
+                for chunk in response.to_sse_chunks():
                     yield chunk
                 
                 # UC1 handled - return early

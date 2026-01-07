@@ -12,7 +12,7 @@ from .helpers import (
     get_messages_for_session
 )
 from . import helpers
-from app.db.base import get_db_conn, return_db_conn
+from app.db.base import DatabaseConnection
 # Get centralized logger
 logger = get_logger(__name__)
 
@@ -31,55 +31,46 @@ SSE_HEADERS = {
 @router.post("/user/register", response_model=UserRegisterResponse)
 async def register_user(user: UserCreate):
     """Create a new session with browser and IP information."""
-    conn = get_db_conn()
-    cursor = conn.cursor()
-
     try:
-        # Create new user entry - let Postgres generate the UUID
-        cursor.execute(
-            """
-            INSERT INTO users (browser, ip)
-            VALUES (%s, %s)
-            RETURNING id::text
-        """,
-            (user.browser, user.ip),
-        )
-        user_row = cursor.fetchone()
-        if not user_row or not user_row[0]:
-            raise HTTPException(status_code=500, detail="Failed to create user")
-        user_id = user_row[0]  # Get the UUID as string
+        with DatabaseConnection() as (conn, cursor):
+            # Create new user entry - let Postgres generate the UUID
+            cursor.execute(
+                """
+                INSERT INTO users (browser, ip)
+                VALUES (%s, %s)
+                RETURNING id::text
+                """,
+                (user.browser, user.ip),
+            )
+            user_row = cursor.fetchone()
+            if not user_row or not user_row[0]:
+                raise HTTPException(status_code=500, detail="Failed to create user")
+            user_id = user_row[0]
 
-        # Create new session - let Postgres handle both UUIDs
-        cursor.execute(
-            """
-            INSERT INTO sessions (user_id, browser, ip, is_active)
-            VALUES (%s, %s, %s, TRUE)
-            RETURNING session_id::text
-        """,
-            (user_id, user.browser, user.ip),
-        )
-
-        session_row = cursor.fetchone()
-        if not session_row or not session_row[0]:
-            raise HTTPException(status_code=500, detail="Failed to create session")
-        session_id = session_row[0]  # Get the UUID as string
-        conn.commit()
-
-        return UserRegisterResponse(
-            status="success",
-            message="Session created successfully",
-            session_id=session_id,
-        )
+            # Create new session - let Postgres handle both UUIDs
+            cursor.execute(
+                """
+                INSERT INTO sessions (user_id, browser, ip, is_active)
+                VALUES (%s, %s, %s, TRUE)
+                RETURNING session_id::text
+                """,
+                (user_id, user.browser, user.ip),
+            )
+            session_row = cursor.fetchone()
+            if not session_row or not session_row[0]:
+                raise HTTPException(status_code=500, detail="Failed to create session")
+            
+            conn.commit()
+            return UserRegisterResponse(
+                status="success",
+                message="Session created successfully",
+                session_id=session_row[0],
+            )
+    except HTTPException:
+        raise
     except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.error(f"Error in register_user: {str(e)}")
+        logger.error(f"Error in register_user: {e}")
         raise HTTPException(status_code=500, detail="Could not create session")
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            return_db_conn(conn)
 
 
 # Health Check Route

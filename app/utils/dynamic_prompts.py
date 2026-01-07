@@ -7,7 +7,7 @@ from app.logger import get_logger
 
 logger = get_logger("dynamic_prompts")
 
-# Token limits for Groq API - keep synchronized with llm_utils.py
+# Token limits for OpenAI API - keep synchronized with llm_utils.py
 MAX_PROMPT_TOKENS: int = 6000  # Leave room for response and overhead
 CHARS_PER_TOKEN: float = 4.0  # Approximate: 1 token ≈ 4 characters
 
@@ -128,7 +128,7 @@ def build_dynamic_prompt(
     1. Tries to fetch structured prompt sections from Redis
     2. Assembles the prompt using Redis sections + dynamic context
     3. Falls back to final_response_prompt from prompts.py if Redis unavailable
-    4. Enforces token limits to prevent Groq API rate limit errors
+    4. Enforces token limits to prevent OpenAI API rate limit errors
     """
     from app.utils.prompts import (
         _build_user_details_context, 
