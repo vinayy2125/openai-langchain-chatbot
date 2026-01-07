@@ -12,7 +12,7 @@
 # -0.1 per retry on same state
 
 from dataclasses import dataclass, field
-from typing import Optional, Set, Dict, Any, Literal
+from typing import Optional, Set, Dict, Any, Literal, List
 from enum import Enum
 from app.logger import get_logger
 from app.utils.conversation_memory import (
@@ -65,6 +65,11 @@ class UC1Slots:
     user_name: Optional[str] = None
     context_signal: Optional[str] = None  # User's answer to context question
     
+    # Exploration layer tracking (for S5 state)
+    exploration_turn: int = 0  # Current turn in exploration (1, 2, or 3)
+    exploration_responses: Optional[List[str]] = None  # User's exploration answers
+    last_user_message: Optional[str] = None  # For LLM context
+    
     # Selected alternative (informational, not blocking)
     selected_alternative: Optional[str] = None
     
@@ -92,6 +97,9 @@ class UC1Slots:
             "capability_bucket": self.capability_bucket,
             "user_name": self.user_name,
             "context_signal": self.context_signal,
+            "exploration_turn": self.exploration_turn,
+            "exploration_responses": self.exploration_responses,
+            "last_user_message": self.last_user_message,
             "selected_alternative": self.selected_alternative,
             "selected_cta_outcome": self.selected_cta_outcome,
             "engagement_score": self.engagement_score,
@@ -105,6 +113,9 @@ class UC1Slots:
             capability_bucket=data.get("capability_bucket"),
             user_name=data.get("user_name"),
             context_signal=data.get("context_signal"),
+            exploration_turn=data.get("exploration_turn", 0),
+            exploration_responses=data.get("exploration_responses"),
+            last_user_message=data.get("last_user_message"),
             selected_alternative=data.get("selected_alternative"),
             selected_cta_outcome=data.get("selected_cta_outcome"),
             engagement_score=data.get("engagement_score", 0.0),
@@ -154,46 +165,60 @@ class SlotManager:
         """Set the selected capability bucket."""
         self.slots.capability_bucket = bucket_id
         logger.info(f"[SlotManager] Set capability_bucket: {bucket_id}")
-        try:
-            self.persist()
-        except Exception:
-            pass
+        self._safe_persist()
     
     def set_user_name(self, name: str) -> None:
         """Set the user's name."""
         self.slots.user_name = name.strip() if name else None
         logger.info(f"[SlotManager] Set user_name: {self.slots.user_name}")
-        try:
-            self.persist()
-        except Exception:
-            pass
+        self._safe_persist()
     
     def set_context_signal(self, signal: str) -> None:
         """Set the user's context answer."""
         self.slots.context_signal = signal.strip() if signal else None
         logger.info(f"[SlotManager] Set context_signal: {self.slots.context_signal[:50] if self.slots.context_signal else None}...")
-        try:
-            self.persist()
-        except Exception:
-            pass
+        self._safe_persist()
     
     def set_selected_alternative(self, alternative: str) -> None:
         """Set the user's selected alternative (informational)."""
         self.slots.selected_alternative = alternative
         logger.info(f"[SlotManager] Set selected_alternative: {alternative}")
-        try:
-            self.persist()
-        except Exception:
-            pass
+        self._safe_persist()
     
     def set_selected_cta_outcome(self, outcome: str) -> None:
         """Set the user's selected CTA outcome."""
         self.slots.selected_cta_outcome = outcome
         logger.info(f"[SlotManager] Set selected_cta_outcome: {outcome}")
+        self._safe_persist()
+    
+    def set_exploration_turn(self, turn: int) -> None:
+        """Set the current exploration turn (1, 2, or 3)."""
+        self.slots.exploration_turn = turn
+        if self.slots.exploration_responses is None:
+            self.slots.exploration_responses = []
+        logger.info(f"[SlotManager] Set exploration_turn: {turn}")
+        self._safe_persist()
+    
+    def add_exploration_response(self, response: str) -> None:
+        """Add a user's exploration response and increment turn."""
+        if self.slots.exploration_responses is None:
+            self.slots.exploration_responses = []
+        self.slots.exploration_responses.append(response)
+        self.slots.last_user_message = response
+        logger.info(f"[SlotManager] Added exploration response #{len(self.slots.exploration_responses)}")
+        self._safe_persist()
+    
+    def set_last_user_message(self, message: str) -> None:
+        """Set the last user message for LLM context."""
+        self.slots.last_user_message = message
+        self._safe_persist()
+    
+    def _safe_persist(self) -> None:
+        """Persist with proper error logging (not silent)."""
         try:
             self.persist()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[SlotManager] Persist failed (continuing): {e}")
     
     def increment_engagement(self, event: EngagementEvent) -> None:
         """
@@ -214,10 +239,7 @@ class SlotManager:
             f"score: {old_score:.2f} → {self.slots.engagement_score:.2f}, "
             f"retries: {self.slots.retry_count}"
         )
-        try:
-            self.persist()
-        except Exception:
-            pass
+        self._safe_persist()
     
     def get_filled_slots(self) -> Set[str]:
         """Get set of filled slot names."""

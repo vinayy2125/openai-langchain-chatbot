@@ -1,0 +1,121 @@
+# UC1 Configuration - YAML Data File
+#
+# This file is the SINGLE SOURCE OF TRUTH for UC1 behavior.
+# It is loaded at startup and validated by PolicyValidator.
+#
+# INVARIANTS (must be maintained):
+# - Exactly 6 capability buckets (UC1-A to UC1-F)
+# - Exactly 4 exit CTAs
+# - Exactly 3 alternatives per bucket
+# - Exactly 1 context question per bucket
+#
+# LOCK VERSION: Increment when making changes for audit trail.
+
+intent_id: "explore_services_capabilities"
+lock_version: "1.0.0"
+
+# Fixed entry message - shown when user enters UC1 flow
+entry_message: |
+  Welcome to DITSTEK.
+  Here, we focus on building products, engineering teams, and careers that last.
+  
+  How would you like to start?
+
+# The 6 capability buckets (sub-use cases)
+capability_buckets:
+  - id: UC1-A
+    trigger: "Product development & engineering"
+    goal: "Orient product"
+    context_question: "Are you building something new, or evolving an existing product?"
+    alternatives:
+      - "Clarify priorities first"
+      - "Incremental improvements"
+      - "Pause and reassess"
+
+  - id: UC1-B
+    trigger: "Application Modernization"
+    goal: "Modernize system"
+    context_question: "What's the primary goal — cloud migration, or rebuilding for scale?"
+    alternatives:
+      - "Start with assessment"
+      - "Phase the migration"
+      - "Parallel track approach"
+
+  - id: UC1-C
+    trigger: "Staff Augmentation & Talent"
+    goal: "Build team"
+    context_question: "Are you looking to augment your existing team, or build a new capability?"
+    alternatives:
+      - "Start with key roles"
+      - "Full team setup"
+      - "Flexible engagement"
+
+  - id: UC1-D
+    trigger: "AI/ML & Automation"
+    goal: "Add intelligence"
+    context_question: "Is this about adding AI to an existing product, or exploring new possibilities?"
+    alternatives:
+      - "Discovery workshop first"
+      - "Proof of concept"
+      - "Production-ready solution"
+
+  - id: UC1-E
+    trigger: "Cloud, DevOps & Scalability"
+    goal: "Prepare for scale"
+    context_question: "Are you preparing for growth, or solving current scaling challenges?"
+    alternatives:
+      - "Architecture review first"
+      - "Quick wins approach"
+      - "Full transformation"
+
+  - id: UC1-F
+    trigger: "Not sure yet / need guidance"
+    goal: "Reduce confusion"
+    context_question: "What's the biggest challenge you're facing right now?"
+    alternatives:
+      - "Clarify the problem first"
+      - "Explore options together"
+      - "Get expert guidance"
+
+# The 4 exit CTAs (exactly 4, no more, no less)
+exit_ctas:
+  - choice: "Discuss my requirement now"
+    outcome: "UC2"
+  - choice: "Schedule a quick call"
+    outcome: "calendar"
+  - choice: "Continue exploring"
+    outcome: "loop"
+  - choice: "I'll explore on my own"
+    outcome: "exit"
+
+# Forbidden topics - LLM must NEVER mention these
+forbidden_topics:
+  - "pricing"
+  - "price"
+  - "cost"
+  - "budget"
+  - "$"
+  - "dollar"
+  - "rupee"
+  - "technology stack"
+  - "framework"
+  - "React"
+  - "Angular"
+  - "Python"
+  - "JavaScript"
+  - "AWS"
+  - "Azure"
+  - "healthcare"
+  - "finance"
+  - "banking"
+  - "retail"
+  - "manufacturing"
+
+# System prompt for name capture state
+name_capture_prompt: "What should I call you?"
+
+# Template for AI synthesis - {slots} are filled by orchestrator
+synthesis_template: |
+  Thanks, {user_name}. You're focused on {goal_description}, and {context_summary}.
+  
+  Here are a few ways we typically approach this:
