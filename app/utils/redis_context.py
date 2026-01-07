@@ -24,8 +24,14 @@ _chroma_manager = None
 # Hybrid search manager (lazy-loaded)
 _hybrid_search_manager = None
 
+# ParentDocumentRetriever (lazy-loaded)
+_parent_retriever = None
+
 # Environment flag to enable/disable hybrid search (default: enabled)
 ENABLE_HYBRID_SEARCH = os.getenv("ENABLE_HYBRID_SEARCH", "true").lower() == "true"
+
+# Environment flag to enable/disable ParentDocumentRetriever (default: disabled for gradual rollout)
+ENABLE_PARENT_RETRIEVER = os.getenv("ENABLE_PARENT_RETRIEVER", "false").lower() == "true"
 
 
 def _get_chroma_manager():
@@ -52,6 +58,19 @@ def _get_hybrid_search_manager():
             logger.warning(f"HybridSearchManager not available: {e}")
             return None
     return _hybrid_search_manager
+
+
+def _get_parent_retriever():
+    """Get or create ParentDocumentRetriever instance (lazy-loaded)."""
+    global _parent_retriever
+    if _parent_retriever is None:
+        try:
+            from core_services.parent_document_retriever import get_parent_document_retriever
+            _parent_retriever = get_parent_document_retriever()
+        except Exception as e:
+            logger.warning(f"ParentDocumentRetriever not available: {e}")
+            return None
+    return _parent_retriever
 
 
 def _semantic_rerank(query: str, results: List[Dict], top_n: int) -> List[Dict]:
@@ -390,10 +409,30 @@ def get_redis_context_chunks(
     # Derive search query from chat history and user query
     search_query = derive_search_query(chat_history, query, domain_prefix, fallback_keywords)
 
-    # Perform knowledge base search using hybrid search (semantic + BM25) or fallback to ChromaDB-only
+    # Perform knowledge base search
+    # Priority: ParentDocumentRetriever > Hybrid Search > ChromaDB-only
     kb_results = []
     
-    if ENABLE_HYBRID_SEARCH:
+    # Try ParentDocumentRetriever first (returns larger context chunks)
+    if ENABLE_PARENT_RETRIEVER:
+        parent_retriever = _get_parent_retriever()
+        if parent_retriever:
+            try:
+                parent_results = parent_retriever.retrieve(search_query, k=top_n)
+                for result in parent_results:
+                    kb_results.append({
+                        "text": result.get("content", ""),
+                        "metadata": result.get("metadata", {}),
+                        "similarity": result.get("similarity", 0),
+                        "source": result.get("source", "parent"),
+                    })
+                logger.info(f"[ParentRetriever] Returned {len(kb_results)} parent context results")
+            except Exception as e:
+                logger.warning(f"ParentDocumentRetriever failed, falling back: {e}")
+                kb_results = []
+    
+    # Fallback: Try hybrid search if ParentRetriever disabled or failed
+    if not kb_results and ENABLE_HYBRID_SEARCH:
         # Try hybrid search first (combines semantic and BM25 keyword matching)
         hybrid_manager = _get_hybrid_search_manager()
         if hybrid_manager:
@@ -447,22 +486,31 @@ def get_redis_context_chunks(
 
     # Process KB results into text chunks with source URLs
     processed_kb = []
-    for item in kb_results:
+    logger.info(f"[SourceURL_DEBUG] Processing {len(kb_results)} KB results for source URLs")
+    for idx, item in enumerate(kb_results):
         text = item.get("text") or item.get("response") or item.get("query") or ""
         if text:
             # Include source URL for traceability if available
             metadata = item.get("metadata", {})
-            source_url = metadata.get("url", "")
+            # Check common keys for URL
+            source_url = (
+                metadata.get("url") or 
+                metadata.get("source_url") or 
+                metadata.get("source") or 
+                metadata.get("link") or 
+                ""
+            )
+            
+            # Debug log to trace missing URLs
+            if not source_url and idx < 3:
+                logger.warning(f"[SourceURL_MISSING] Item {idx} metadata: {list(metadata.keys())}")
+            
             # Validate URL format before including
-            if source_url and isinstance(source_url, str) and source_url.startswith(("http://", "https://")):
-                # Sanitize: strip whitespace and ensure no newlines
-                source_url = source_url.strip().split()[0] if source_url.strip() else ""
-                if source_url:
-                    processed_kb.append(f"{str(text)}\n[Source: {source_url}]")
-                else:
-                    processed_kb.append(str(text))
+            if source_url and isinstance(source_url, str):
+                # Clean up URL if needed
+                processed_kb.append(f"{text}\n[Source: {source_url}]")
             else:
-                processed_kb.append(str(text))
+                processed_kb.append(text)
 
     # Deduplicate results
     seen = set()

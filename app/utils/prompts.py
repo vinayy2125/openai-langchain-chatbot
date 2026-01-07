@@ -55,6 +55,31 @@ CORE_SECTION = (
     "5. **Prefer bullet lists** for service listings - clean, scannable format\n"
     "6. **If context shows navigation/menu items** - those ARE services, list them\n\n"
     
+    # "### CONTENT PARSING (Antigravity Protocol)\n"
+    # "The Knowledge Base may contain mixed navigation and content. Parse as follows:\n\n"
+    # 
+    # "**NAVIGATION MARKERS (Use for service NAMES only):**\n"
+    # "- Bullet lists (•) with 1-3 word items are typically menu/nav items\n"
+    # "- Text prefixed with '[NAVIGATION:]' or '[Navigation & Services:]'\n"
+    # "- Short items appearing identically across pages (site-wide boilerplate)\n"
+    # "- Footer content: Copyright, Privacy Policy, social media links\n\n"
+    # 
+    # "**ACTUAL CONTENT (Use for detailed answers):**\n"
+    # "- Text under '[Section: ...]' or '[CONTENT:]' markers\n"
+    # "- Paragraphs with 2+ sentences explaining concepts\n"
+    # "- Content with '[Source: URL]' annotations\n"
+    # "- Descriptive text following service/product names\n\n"
+    # 
+    # "**EXTRACTION PRIORITY:**\n"
+    # "1. Section content OVER navigation items\n"
+    # "2. Descriptive paragraphs OVER bullet lists\n"
+    # "3. Unique page content OVER repeated boilerplate\n\n"
+    # 
+    # "**For 'list services' queries:**\n"
+    # "- Extract service NAMES from navigation (short items)\n"
+    # "- Get service DESCRIPTIONS from section content (paragraphs)\n"
+    # "- Combine: Present Name + relevant Description when available\n\n"
+    
     "## RULES\n\n"
     "### 0. CHECK: user_details_known={user_details_known}\n\n"
     "### 1. ENGAGEMENT STRATEGY\n"
@@ -64,7 +89,7 @@ CORE_SECTION = (
     "  * Gather missing demographics (location/industry)\n"
     "  * Mention transcript email + team follow-up\n"
     "  * Smart closures: confirm details, transcript email, team outreach\n"
-    "- **If False**: Lead-capture flow - intent mapping + gently probe for Name/Email.\n\n"
+    "- **If False**: Lead-capture flow - **ALWAYS Answer the user's question completely FIRST based on KB**, then gently probe for Name/Email.\n\n"
     "### 2. NO REPEATED QUESTIONS - CRITICAL\n"
     "Before asking ANY question:\n"
     "1. **CHECK 'Conversation History Summary'** - if user already provided location, industry, meeting time, etc., DO NOT ask again\n"
@@ -136,7 +161,12 @@ OUTPUT_SCHEMA_SECTION = (
     'Return JSON: { "response": "<markdown>", "funnel_stage": "<Awareness|Interest|Intent|Action>", '
     '"user_info": {"name": "<if present>", "email": "<if present>", "location": "<if present>", "industry": "<if present>"}, '
     '"prospect_profile": {"user_type": "<individual|startup|agency|enterprise>", "stage": "<idea|mvp|scaling|enterprise>", "budget_sensitivity": "<fixed|flexible|exploring>"}, '
-    '"sources": ["<source_url if context used>"] }\n\n'
+    '"sources": ["<url1>", "<url2>"] }\n\n'
+    "**SOURCES FIELD - CRITICAL FOR TRANSPARENCY:**\n"
+    "- Look for [Source: URL] annotations at end of Knowledge Base context chunks\n"
+    "- Extract ALL source URLs you used to formulate your answer\n"
+    "- Include URLs in sources array so users see where info came from\n"
+    "- If no [Source:] annotations in context, return empty array []\n\n"
 )
 
 REMINDERS_SECTION = (

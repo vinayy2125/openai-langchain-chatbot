@@ -258,3 +258,51 @@ class SessionMemoryManager:
 def get_session_memory_manager() -> SessionMemoryManager:
     """Get the singleton SessionMemoryManager instance."""
     return SessionMemoryManager.get_instance()
+
+
+def set_session_metadata(session_id: str, key: str, value) -> None:
+    """Set arbitrary metadata for a session's memory object.
+
+    This stores metadata on the memory instance associated with the session.
+    It's useful for small per-session flags (like UC1 state) that should live
+    alongside the conversation buffer memory.
+    """
+    try:
+        mgr = get_session_memory_manager()
+        memory = mgr.get_or_create_memory(session_id)
+        lock = mgr._get_session_lock(session_id)
+        with lock:
+            if not hasattr(memory, "_session_metadata"):
+                setattr(memory, "_session_metadata", {})
+            memory._session_metadata[key] = value
+            logger.debug(f"Set session metadata for {session_id}: {key}")
+    except Exception as e:
+        logger.error(f"Failed to set session metadata: {e}")
+
+
+def get_session_metadata(session_id: str, key: str, default=None):
+    """Get metadata previously stored for a session, or `default` if missing."""
+    try:
+        mgr = get_session_memory_manager()
+        memory = mgr.get_or_create_memory(session_id)
+        lock = mgr._get_session_lock(session_id)
+        with lock:
+            meta = getattr(memory, "_session_metadata", {})
+            return meta.get(key, default)
+    except Exception as e:
+        logger.error(f"Failed to get session metadata: {e}")
+        return default
+
+
+def delete_session_metadata(session_id: str, key: str) -> None:
+    """Delete a metadata key for a session if present."""
+    try:
+        mgr = get_session_memory_manager()
+        memory = mgr.get_or_create_memory(session_id)
+        lock = mgr._get_session_lock(session_id)
+        with lock:
+            if hasattr(memory, "_session_metadata") and key in memory._session_metadata:
+                del memory._session_metadata[key]
+                logger.debug(f"Deleted session metadata for {session_id}: {key}")
+    except Exception as e:
+        logger.error(f"Failed to delete session metadata: {e}")

@@ -3,8 +3,14 @@ ChromaDB Manager Module
 
 Central manager for ChromaDB vector database operations.
 Replaces Redis vector storage for RAG functionality.
+
+Supports two modes:
+- HttpClient: Connects to external ChromaDB server (production)
+- PersistentClient: Embedded local storage (development)
 """
 import logging
+import os
+import time
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import hashlib
@@ -18,7 +24,11 @@ from app.scraper.config import get_scraper_config, ScraperConfig
 logger = logging.getLogger(__name__)
 
 # ChromaDB max batch size (default is 5461)
-CHROMA_BATCH_SIZE = 5000  # Use slightly less than max for safety
+CHROMA_BATCH_SIZE = 500  # Reduced to 500 for better stability with Docker
+
+# Configuration for HttpClient
+CHROMA_SERVER_URL = os.getenv("CHROMA_SERVER_URL", "")
+CHROMA_USE_HTTP_CLIENT = os.getenv("CHROMA_USE_HTTP_CLIENT", "false").lower() == "true"
 
 
 class ChromaManager:
@@ -26,35 +36,57 @@ class ChromaManager:
     Manages ChromaDB collections for storing and querying embeddings.
     
     Features:
-    - Persistent storage on disk
+    - Dual client support: HttpClient (production) or PersistentClient (dev)
+    - Persistent storage on disk or remote server
     - Uses existing embedding_utils for vector generation
     - Semantic similarity search
     - Collection management (create, update, delete)
+    - Connection retry logic for HttpClient
     """
     
     _instance: Optional["ChromaManager"] = None
     
-    def __init__(self, persist_directory: Optional[str] = None):
+    def __init__(self, persist_directory: Optional[str] = None, server_url: Optional[str] = None):
         """
         Initialize ChromaDB client.
         
         Args:
-            persist_directory: Path for persistent storage. 
+            persist_directory: Path for persistent storage (PersistentClient mode).
                              Uses config default if not provided.
+            server_url: Optional URL for ChromaDB server (HttpClient mode).
+                       If provided, uses HttpClient instead of PersistentClient.
         """
         config = get_scraper_config()
         
+        self.collection_name = config.chroma_collection_name
+        self._collection = None
+        
+        # Determine which client to use
+        effective_server_url = server_url or CHROMA_SERVER_URL
+        use_http = CHROMA_USE_HTTP_CLIENT or bool(effective_server_url)
+        
+        if use_http and effective_server_url:
+            # Use HttpClient for production (separate server process)
+            try:
+                self.client = self._create_http_client(effective_server_url)
+                self.persist_directory = None
+                self.client_mode = "http"
+                logger.info(f"✅ ChromaDB initialized with HttpClient at {effective_server_url}")
+                return  # Successfully initialized HTTP client
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to connect to ChromaDB server at {effective_server_url}: {e}")
+                logger.warning("🔄 Falling back to local PersistentClient...")
+                # Fall through to PersistentClient initialization
+        
+        # Use PersistentClient for local development (embedded) or fallback
         if persist_directory:
             self.persist_directory = Path(persist_directory)
         else:
             self.persist_directory = config.chroma_db_path
         
-        self.collection_name = config.chroma_collection_name
-        
         # Ensure directory exists
         self.persist_directory.mkdir(parents=True, exist_ok=True)
         
-        # Initialize ChromaDB client with persistence
         self.client = chromadb.PersistentClient(
             path=str(self.persist_directory),
             settings=Settings(
@@ -62,9 +94,61 @@ class ChromaManager:
                 allow_reset=True,
             )
         )
+        self.client_mode = "persistent"
+        logger.info(f"✅ ChromaDB initialized with PersistentClient at {self.persist_directory}")
+    
+    def _create_http_client(self, server_url: str, max_retries: int = 3) -> chromadb.HttpClient:
+        """
+        Create HttpClient with retry logic for connection resilience.
         
-        self._collection = None
-        logger.info(f"✅ ChromaDB initialized at {self.persist_directory}")
+        Args:
+            server_url: ChromaDB server URL (e.g., http://localhost:8000)
+            max_retries: Number of connection retries
+            
+        Returns:
+            chromadb.HttpClient instance
+        """
+        # Parse URL to extract host and port
+        from urllib.parse import urlparse
+        parsed = urlparse(server_url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 8000
+        
+        for attempt in range(max_retries):
+            try:
+                client = chromadb.HttpClient(
+                    host=host,
+                    port=port,
+                    settings=Settings(
+                        anonymized_telemetry=False,
+                    )
+                )
+                # Test connection with heartbeat
+                client.heartbeat()
+                logger.info(f"ChromaDB HttpClient connected to {host}:{port}")
+                return client
+            except Exception as e:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                logger.warning(f"ChromaDB connection attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Failed to connect to ChromaDB server at {server_url}")
+                    raise
+    
+    def is_healthy(self) -> bool:
+        """Check if ChromaDB connection is healthy."""
+        try:
+            if self.client_mode == "http":
+                self.client.heartbeat()
+            else:
+                # For PersistentClient, try to access collection
+                self.collection.count()
+            return True
+        except Exception as e:
+            logger.error(f"ChromaDB health check failed: {e}")
+            return False
     
     @classmethod
     def get_instance(cls, persist_directory: Optional[str] = None) -> "ChromaManager":
@@ -337,11 +421,15 @@ class ChromaManager:
             Dict with count and other stats
         """
         count = self.collection.count()
-        return {
+        stats = {
             "collection_name": self.collection_name,
             "document_count": count,
-            "persist_directory": str(self.persist_directory),
+            "client_mode": self.client_mode,
+            "is_healthy": self.is_healthy(),
         }
+        if self.persist_directory:
+            stats["persist_directory"] = str(self.persist_directory)
+        return stats
     
     def ingest_from_scrape(self, scrape_data: Dict[str, Any], clear_existing: bool = False) -> int:
         """

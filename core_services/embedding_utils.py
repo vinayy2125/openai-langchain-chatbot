@@ -25,7 +25,16 @@ if HF_TOKEN:
 
 try:
     model = SentenceTransformer(MODEL_NAME)
-    logger.info("Loaded SentenceTransformer model: %s", MODEL_NAME)
+    
+    # Move to GPU if available
+    import torch
+    if torch.cuda.is_available():
+        model = model.to('cuda')
+        device = "cuda"
+    else:
+        device = "cpu"
+        
+    logger.info(f"Loaded SentenceTransformer model: {MODEL_NAME} on {device}")
 except Exception as e:
     logger.exception("Failed to load embedding model %s: %s", MODEL_NAME, e)
     # re-raise so calling code notices configuration issues early
@@ -48,7 +57,7 @@ def get_embedding(text: str) -> List[float]:
 
     Returns a plain Python list[float].
     """
-    emb = model.encode_query(text)
+    emb = model.encode(text, device=device)
     return _to_float_list(emb)
 
 
@@ -77,8 +86,9 @@ def get_embeddings_batch(texts: List[str], batch_size: int = 32, show_progress: 
         try:
             # Log progress for visibility during long operations
             if show_progress and total_batches > 1:
-                logger.info(f"🧠 Embedding batch {batch_idx}/{total_batches} ({len(batch)} texts)...")
-            embs = model.encode(batch, show_progress_bar=False)
+                logger.info(f"🧠 Embedding batch {batch_idx}/{total_batches} ({len(batch)} texts) on {device}...")
+            
+            embs = model.encode(batch, batch_size=batch_size, show_progress_bar=False, device=device)
             all_embeddings.extend([_to_float_list(e) for e in embs])
         except Exception as e:
             logger.error(f"Batch {batch_idx}/{total_batches} embedding failed: {e}")
