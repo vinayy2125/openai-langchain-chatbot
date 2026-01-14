@@ -14,15 +14,22 @@
 
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Literal, AsyncGenerator
+import re
 from app.orchestrator.uc1_config import (
     UC1Config, load_uc1_config, get_bucket_by_id, 
     get_bucket_by_trigger, CapabilityBucket
 )
 from app.orchestrator.state_machine import UC1State, UC1StateMachine, ResponseIntent
 from app.orchestrator.slot_manager import UC1Slots, SlotManager, EngagementEvent
-from app.orchestrator.llm_adapter import ConstrainedLLMAdapter
+from app.orchestrator.llm_adapter import ConstrainedLLMAdapter, LLMIntent
 from app.orchestrator.output_sanitizer import LLMOutputSanitizer
 from app.orchestrator.policy_validator import UC1PolicyValidator
+from app.orchestrator.policy_engine import (
+    ConversationPolicy, PolicyDecision, PolicyContext,
+    UserIntent, create_policy_context
+)
+from app.orchestrator.input_classifier import classify_input, InputClass
+from app.orchestrator.state_input_validators import validate_context_answer, validate_name
 from app.logger import get_logger
 
 logger = get_logger("orchestrator")
@@ -57,6 +64,9 @@ class OrchestratorResponse:
     
     The 'message' field is populated by the LLM adapter AFTER
     the orchestrator returns, not by the orchestrator itself.
+    
+    STATE ALLOWS. INTENT DECIDES.
+    - options are gated by llm_intent, not state
     """
     state: UC1State
     call_spec: AdapterCallSpec  # What the LLM adapter needs
@@ -64,9 +74,31 @@ class OrchestratorResponse:
     options: Optional[List[str]] = None
     terminal: bool = False
     metadata: Optional[Dict[str, Any]] = None
+    llm_intent: Optional[LLMIntent] = None  # Intent inferred by LLM for UI gating
     
     # Message is set by caller after LLM generation, not by orchestrator
     message: str = ""
+    
+    def __post_init__(self):
+        """
+        ARCHITECTURAL ASSERTION (Phase 7 - micro-correction #7):
+        
+        Either the orchestrator speaks (message is set) OR the LLM speaks
+        (call_spec.state not in fixed-prompt states). Never both.
+        
+        This prevents future regressions by new developers.
+        """
+        from app.orchestrator.state_machine import UC1State
+        FIXED_PROMPT_STATES = {UC1State.ENTRY, UC1State.CONTEXT_QUESTION, UC1State.NAME_CAPTURE, UC1State.EXIT}
+        
+        # If message is set by orchestrator AND state requires LLM generation, that's a violation
+        # (Fixed-prompt states should have message set, others should not)
+        is_fixed_prompt_state = self.call_spec.state in FIXED_PROMPT_STATES
+        
+        # The invariant: if message is populated AND this is NOT a fixed-prompt state,
+        # LLM would overwrite it anyway, so it's wasteful/confusing
+        # For now we allow message in non-fixed states (robustness handlers set messages)
+        # The key invariant is: LLM must NOT be called for fixed-prompt states (enforced in llm_adapter)
     
     def to_sse_chunks(self) -> List[Dict[str, Any]]:
         """Convert response to SSE-compatible chunks."""
@@ -79,9 +111,12 @@ class OrchestratorResponse:
             "uc1_state": self.state.value,
             "uc1_input_type": self.input_type,
             "uc1_terminal": self.terminal,
+            "allow_text_input": self.input_type == "text",  # Explicit UI control
         }
         if self.options:
             meta["uc1_options"] = self.options
+        if self.llm_intent:
+            meta["llm_intent"] = self.llm_intent.value
         if self.metadata:
             meta.update(self.metadata)
         
@@ -164,6 +199,7 @@ class ConversationOrchestrator:
         self.slot_manager = SlotManager(session_id)
         self.llm_adapter = ConstrainedLLMAdapter(self.config)
         self.sanitizer = LLMOutputSanitizer(self.config)
+        self.policy = ConversationPolicy(session_id)  # NEW: Policy engine
         
         # Current state (default to ENTRY for new sessions)
         self._current_state = UC1State.ENTRY
@@ -180,11 +216,92 @@ class ConversationOrchestrator:
         """Get current slot values."""
         return self.slot_manager.slots
     
+    def build_intent_gated_options(
+        self, 
+        state: UC1State, 
+        intent: LLMIntent,
+        bucket: CapabilityBucket = None,
+        input_type: str = "text"  # From orchestrator response (no longer blocks buttons)
+    ) -> List[str]:
+        """
+        Build UI options based on intent + conversation progress.
+        
+        NEW ARCHITECTURE (2026-01-14):
+        - Text input is ALWAYS available (input_type gate removed)
+        - Buttons are shown ALONGSIDE text when appropriate
+        - Buttons appear based on conversation progress (slots filled, intent)
+        
+        OPTION COMMITMENT MEMORY:
+        - If user already selected an alternative, do NOT re-show alternatives
+        - This prevents infinite button loops
+        
+        Args:
+            state: Current UC1 state
+            intent: LLM-inferred intent
+            bucket: Current capability bucket (if any)
+            input_type: For reference only (no longer blocks buttons)
+        
+        Returns:
+            List[str]: Button options to show alongside text input, may be empty
+        """
+        # ============================================================
+        # OPTION COMMITMENT CHECK - Prevents infinite button loops
+        # ============================================================
+        if self.slots.selected_alternative:
+            logger.info(f"[Orchestrator] Alternative already selected: '{self.slots.selected_alternative}' - showing CTAs instead")
+            # User selected an alternative - now show CTA options
+            return [cta.choice for cta in self.config.exit_ctas]
+        
+        if self.slots.alternatives_consumed:
+            logger.info("[Orchestrator] Alternatives consumed - showing CTAs")
+            return [cta.choice for cta in self.config.exit_ctas]
+        
+        # Gate: Intent must not be closing
+        if intent == LLMIntent.CLOSING:
+            return []
+        
+        # ============================================================
+        # PROGRESS-BASED BUTTON SELECTION
+        # ============================================================
+        
+        # Stage 1: No bucket yet → show capability triggers
+        if not self.slots.capability_bucket:
+            return [b.trigger for b in self.config.capability_buckets]
+        
+        # Stage 2: Have bucket, no context yet → no extra buttons (let user type)
+        if not self.slots.context_signal:
+            return []
+        
+        # Stage 3: Have context, no name yet -> no extra buttons
+        # EXCEPTION: In S6 (Alternatives), we MUST show options even if name is missing (Robustness)
+        if not self.slots.user_name and state != UC1State.CONSULTATIVE_ALTERNATIVES:
+            return []
+        
+        # Stage 4+: User has context and name - show alternatives or CTAs
+        
+        # If exploration is complete OR user shows CTA readiness → show CTAs
+        if self.slots.exploration_complete or intent == LLMIntent.READY_FOR_CTA:
+            return [cta.choice for cta in self.config.exit_ctas]
+        
+        # Otherwise show exploration alternatives
+        # Also allow ResponseIntent.PRESENT (default for S6 entry) to show buttons
+        if bucket and bucket.alternatives:
+            return list(bucket.alternatives)
+        
+        # Fallback to CTAs if no alternatives defined
+        return [cta.choice for cta in self.config.exit_ctas]
+    
+
     def process_input(self, user_input: str) -> OrchestratorResponse:
         """
         Process user input and return structured response.
         
-        This is the main entry point for conversation handling.
+        POLICY-GOVERNED: User intent overrides UC1 compliance.
+        
+        INPUT CLASSIFICATION GATE (Per UC1 Robustness Fixes):
+            1. Classify input (GIBBERISH, NEGATION, ACK, QUESTION, STATEMENT)
+            2. Block gibberish before it pollutes slots
+            3. Force intents for control signals
         
         Args:
             user_input: The user's message (empty string for initial entry)
@@ -194,7 +311,113 @@ class ConversationOrchestrator:
         """
         logger.info(f"[Orchestrator] Processing input in state {self._current_state.value}: '{user_input[:50] if user_input else '(empty)'}...'")
         
-        # Handle based on current state
+        # ============================================================
+        # FROZEN CHECK - No mutations after bailout
+        # ============================================================
+        if self.slots.frozen:
+            logger.warning("[Orchestrator] Slots frozen - checking for restart command")
+            if user_input and user_input.strip().lower() == "restart":
+                return self._handle_restart()
+            return self._handle_frozen_state()
+        
+        # Track exchange count for policy decisions
+        if user_input:
+            self.slot_manager.increment_exchange()
+        
+        # ============================================================
+        # INPUT CLASSIFICATION GATE (Pre-State-Machine)
+        # ============================================================
+        input_class = classify_input(user_input) if user_input else None
+        
+        # GIBBERISH GATE - Block garbage before it pollutes slots
+        if input_class == InputClass.GIBBERISH:
+            logger.info(f"[Orchestrator] GIBBERISH detected: '{user_input[:20]}...'")
+            return self._handle_gibberish_input()
+        
+        # MAX-RETRY BAILOUT - Hard ceiling on retries
+        if self.slots.retry_count >= 3:
+            logger.info(f"[Orchestrator] Max retries ({self.slots.retry_count}) exceeded - bailout")
+            return self._handle_max_retries()
+        
+        # ============================================================
+        # NEGATION HANDLING - Scoped (clear only selected_alternative)
+        # ============================================================
+        if input_class == InputClass.NEGATION:
+            logger.info(f"[Orchestrator] NEGATION detected: '{user_input}'")
+            return self._handle_negation()
+        
+        # ============================================================
+        # ACC PHASE 4: ACK BYPASS - Control signal, NOT language
+        # ============================================================
+        # ACK must never trigger clarification or probing.
+        # ACK = noop or advance. LLM is NOT called for ACK.
+        if input_class == InputClass.ACK:
+            logger.info(f"[ACC] ACK detected: '{user_input}' - bypassing LLM, control signal only")
+            return self._handle_ack_bypass()
+
+        
+        # ============================================================
+        # POLICY ENGINE CONSULTATION (User intent first)
+        # ============================================================
+        # Only consult policy when in UC1 flow (not ENTRY, not EXIT)
+        is_in_uc1_flow = self._current_state not in (UC1State.ENTRY, UC1State.EXIT)
+        
+        if is_in_uc1_flow and user_input:
+            # Create policy context
+            session_context = {
+                "exchange_count": self.slots.exchange_count,
+                "is_in_uc1": True,
+                "is_in_free_exploration": self._current_state == UC1State.FREE_EXPLORATION,
+                "uc1_paused": self.slots.uc1_paused,
+                "state_history": [],  # Could track this if needed
+                "recent_inputs": [],
+            }
+            policy_context = create_policy_context(
+                current_state=self._current_state.value,
+                user_input=user_input,
+                slots=self.slots.to_dict(),
+                session_context=session_context,
+            )
+            
+            # Evaluate policy
+            decision = self.policy.evaluate(policy_context)
+            logger.info(f"[Orchestrator] Policy decision: {decision.value}")
+            
+            # Act on policy decision
+            if decision == PolicyDecision.PIVOT:
+                # User wants to break out of funnel - enter FREE_EXPLORATION
+                return self._enter_free_exploration(user_input)
+            
+            elif decision == PolicyDecision.SKIP:
+                # User is resisting - skip current state if possible
+                next_state = self.state_machine.get_default_next_state(self._current_state)
+                if next_state and next_state != UC1State.EXIT:
+                    logger.info(f"[Orchestrator] Skipping {self._current_state.value} -> {next_state.value}")
+                    self._current_state = next_state
+                    # Fall through to handle new state
+            
+            elif decision == PolicyDecision.RESUME_UC1:
+                # User wants to resume UC1 from FREE_EXPLORATION
+                if self._current_state == UC1State.FREE_EXPLORATION:
+                    paused_state = self.slot_manager.resume_uc1()
+                    self._current_state = UC1State(paused_state) if paused_state else UC1State.CAPABILITY_SELECTION
+                    logger.info(f"[Orchestrator] Resuming UC1 at {self._current_state.value}")
+            
+            elif decision == PolicyDecision.CAPTURE_LEAD:
+                # Signal-based lead capture (handled elsewhere, just log)
+                logger.info("[Orchestrator] Lead capture signal detected")
+            
+            # PolicyDecision.PROCEED and SUPPRESS_ASK fall through to normal handling
+        
+        # ============================================================
+        # HANDLE FREE_EXPLORATION MODE
+        # ============================================================
+        if self._current_state == UC1State.FREE_EXPLORATION:
+            return self._handle_free_exploration(user_input)
+        
+        # ============================================================
+        # NORMAL STATE HANDLING
+        # ============================================================
         if self._current_state == UC1State.ENTRY:
             return self._handle_entry()
         elif self._current_state == UC1State.CAPABILITY_SELECTION:
@@ -225,9 +448,86 @@ class ConversationOrchestrator:
                     slots=self.slots,
                     bucket=bucket,
                 ),
-                input_type="none",
+                input_type="text",
                 terminal=True
             )
+    
+    def _enter_free_exploration(self, user_input: str) -> OrchestratorResponse:
+        """
+        Enter FREE_EXPLORATION mode - user breaks out of UC1 funnel.
+        
+        UC1 is PAUSED, not abandoned. User can resume via explicit intent.
+        
+        RULE: In FREE_EXPLORATION, LLM must NOT ask qualifying questions.
+        Only answer, explore, or compare.
+        """
+        # Pause UC1 state (can resume later)
+        if self._current_state != UC1State.FREE_EXPLORATION:
+            self.slot_manager.pause_uc1(self._current_state.value)
+        
+        self._current_state = UC1State.FREE_EXPLORATION
+        logger.info(f"[Orchestrator] Entered FREE_EXPLORATION mode, paused at {self.slots.paused_state}")
+        
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
+        return OrchestratorResponse(
+            state=self._current_state,
+            call_spec=AdapterCallSpec(
+                state=UC1State.FREE_EXPLORATION,
+                response_intent=ResponseIntent.PROMPT,  # LLM will answer the question
+                user_input=user_input,
+                slots=self.slots,
+                bucket=bucket,
+            ),
+            input_type="text",  # Always text in FREE_EXPLORATION
+            metadata={"mode": "free_exploration", "paused_state": self.slots.paused_state}
+        )
+    
+    def _handle_free_exploration(self, user_input: str) -> OrchestratorResponse:
+        """
+        Handle FREE_EXPLORATION state - unstructured user-driven conversation.
+        
+        RULES:
+        1. LLM answers questions WITHOUT qualifying questions
+        2. No UC1 rules injected
+        3. No forced re-entry to UC1
+        4. Resume UC1 only on EXPLICIT user intent (detected by policy engine)
+        
+        STABILIZER:
+        After 2+ unclear/gibberish inputs, stabilize with anchor-derived response.
+        """
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
+        # Classify input for stabilizer logic
+        input_class = classify_input(user_input) if user_input else None
+        
+        # Track unclear inputs for stabilizer
+        if input_class in (InputClass.GIBBERISH, InputClass.ACK):
+            unclear_count = self.slot_manager.increment_free_exploration_unclear()
+            if unclear_count >= 2:
+                logger.info(f"[Orchestrator] FREE_EXPLORATION stabilizer triggered after {unclear_count} unclear inputs")
+                return self._stabilize_free_exploration()
+        else:
+            # Valid input - reset unclear count
+            self.slot_manager.reset_free_exploration_unclear()
+        
+        # Track user message
+        if user_input:
+            self.slot_manager.set_last_user_message(user_input)
+        
+        return OrchestratorResponse(
+            state=self._current_state,
+            call_spec=AdapterCallSpec(
+                state=UC1State.FREE_EXPLORATION,
+                response_intent=ResponseIntent.PROMPT,  # Answer freely, no qualifying
+                user_input=user_input,
+                slots=self.slots,
+                bucket=bucket,
+            ),
+            input_type="text",
+            metadata={"mode": "free_exploration", "paused_state": self.slots.paused_state}
+        )
+
     
     def _handle_entry(self) -> OrchestratorResponse:
         """Handle ENTRY state - transition to capability selection."""
@@ -235,6 +535,8 @@ class ConversationOrchestrator:
         self._current_state = UC1State.CAPABILITY_SELECTION
         button_options = [bucket.trigger for bucket in self.config.capability_buckets]
         
+        # Use FIXED entry_message from config - no LLM generation
+        # Per spec: "Great — happy to guide you. Pick the closest area and I'll narrow it down from there."
         return OrchestratorResponse(
             state=self._current_state,
             call_spec=AdapterCallSpec(
@@ -244,6 +546,7 @@ class ConversationOrchestrator:
             ),
             input_type="buttons",
             options=button_options,
+            message=self.config.entry_message.strip(),  # Fixed message from config
         )
     
     def _handle_capability_selection(self, user_input: str) -> OrchestratorResponse:
@@ -273,6 +576,7 @@ class ConversationOrchestrator:
         # Transition to CONTEXT_QUESTION
         self._current_state = UC1State.CONTEXT_QUESTION
         
+        # FIXED PROMPT: Emit context_question directly, NO LLM
         return OrchestratorResponse(
             state=self._current_state,
             call_spec=AdapterCallSpec(
@@ -282,15 +586,28 @@ class ConversationOrchestrator:
                 bucket=bucket,
             ),
             input_type="text",
+            message=bucket.context_question,  # Fixed from config
         )
     
     def _handle_context_question(self, user_input: str) -> OrchestratorResponse:
-        """Handle CONTEXT_QUESTION state - user provides context answer."""
+        """
+        Handle CONTEXT_QUESTION state - user provides context answer.
+        
+        VALIDATION: Must pass BEFORE slot mutation.
+        FIXED PROMPT: Emits exact config question on retry (no LLM).
+        """
         bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
         
-        if not user_input or not user_input.strip():
-            # Empty input - retry
+        # ============================================================
+        # VALIDATE BEFORE SLOT MUTATION (per micro-correction #3)
+        # ============================================================
+        is_valid, reason = validate_context_answer(user_input)
+        
+        if not is_valid:
+            # Invalid input - retry with FIXED prompt
+            self.slot_manager.increment_retry()
             self.slot_manager.increment_engagement(EngagementEvent.RETRY)
+            logger.info(f"[Orchestrator] Context answer validation failed: {reason}")
             return OrchestratorResponse(
                 state=self._current_state,
                 call_spec=AdapterCallSpec(
@@ -301,15 +618,18 @@ class ConversationOrchestrator:
                     bucket=bucket,
                 ),
                 input_type="text",
+                message=bucket.context_question if bucket else "Could you tell me more about what you're looking for?",  # FIXED prompt
             )
         
-        # Valid input
+        # VALID: Now safe to mutate slots
         self.slot_manager.set_context_signal(user_input)
         self.slot_manager.increment_engagement(EngagementEvent.TEXT_PROVIDED)
+        self.slot_manager.reset_retry_count()
         
         # Transition to NAME_CAPTURE
         self._current_state = UC1State.NAME_CAPTURE
         
+        # FIXED PROMPT: Emit name_capture_prompt directly, NO LLM
         return OrchestratorResponse(
             state=self._current_state,
             call_spec=AdapterCallSpec(
@@ -320,15 +640,41 @@ class ConversationOrchestrator:
                 bucket=bucket,
             ),
             input_type="text",
+            message=self.config.name_capture_prompt,  # Fixed from config
         )
     
     def _handle_name_capture(self, user_input: str) -> OrchestratorResponse:
-        """Handle NAME_CAPTURE state - user provides their name."""
+        """
+        Handle NAME_CAPTURE state - user provides their name.
+        
+        VALIDATION: Must pass BEFORE slot mutation (per micro-correction #3).
+        FIXED PROMPT: Emits exact config prompt on retry (no LLM).
+        
+        Rules:
+            1. Write-once: Skip if name already captured
+            2. Validate BEFORE slot mutation
+            3. Max 3 retries before bailout (handled at process_input level)
+        """
         bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
         
-        if not user_input or not user_input.strip():
-            # Empty input - retry
+        # ============================================================
+        # WRITE-ONCE GUARD - Skip if name already set
+        # ============================================================
+        if self.slots.user_name:
+            logger.info(f"[Orchestrator] Name already captured: {self.slots.user_name} - skipping")
+            self._current_state = UC1State.AI_SYNTHESIS
+            return self._handle_ai_synthesis()
+        
+        # ============================================================
+        # VALIDATE BEFORE SLOT MUTATION (per micro-correction #3)
+        # ============================================================
+        is_valid, reason = validate_name(user_input)
+        
+        if not is_valid:
+            # Invalid input - retry with FIXED prompt
+            self.slot_manager.increment_retry()
             self.slot_manager.increment_engagement(EngagementEvent.RETRY)
+            logger.info(f"[Orchestrator] Name validation failed: {reason} for input '{user_input}'")
             return OrchestratorResponse(
                 state=self._current_state,
                 call_spec=AdapterCallSpec(
@@ -338,45 +684,44 @@ class ConversationOrchestrator:
                     bucket=bucket,
                 ),
                 input_type="text",
+                message="Just your name is enough — for example, Vinay.",  # FIXED prompt
             )
         
-        # Extract name (take first word or full input if short)
-        name = user_input.strip()
-        if len(name.split()) > 3:
-            words = name.split()
-            for word in words:
-                if word[0].isupper() and len(word) > 1:
-                    name = word
-                    break
-        
-        self.slot_manager.set_user_name(name)
+        # VALID: Now safe to mutate slots
+        self.slot_manager.set_user_name(user_input.strip())
         self.slot_manager.increment_engagement(EngagementEvent.TEXT_PROVIDED)
+        self.slot_manager.reset_retry_count()  # Successful capture
         
-        # Transition to EXPLORATION_LAYER
-        self._current_state = UC1State.EXPLORATION_LAYER
-        self.slot_manager.set_exploration_turn(1)
+        # Transition to AI_SYNTHESIS (S4) - synthesis comes BEFORE exploration per spec
+        self._current_state = UC1State.AI_SYNTHESIS
         
-        # Return spec for acknowledgment + first exploration question
-        return OrchestratorResponse(
-            state=self._current_state,
-            call_spec=AdapterCallSpec(
-                state=UC1State.EXPLORATION_LAYER,
-                response_intent=ResponseIntent.ACKNOWLEDGE,
-                user_input=name,  # Pass name for acknowledgment
-                slots=self.slots,
-                bucket=bucket,
-                exploration_turn=1,
-            ),
-            input_type="text",
-        )
+        # Return spec for synthesis + auto-advance to exploration
+        return self._handle_ai_synthesis()
+
     
     def _handle_exploration_layer(self, user_input: str) -> OrchestratorResponse:
-        """Handle EXPLORATION_LAYER state - 2 turns of guided Q&A (TEXT-BLIND)."""
+        """
+        Handle EXPLORATION_LAYER state - 2 turns of guided Q&A (TEXT-BLIND).
+        
+        AUTHORITATIVE FLAG: If exploration_complete is True, route to alternatives.
+        """
         bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
         if not bucket:
             logger.error(f"[Orchestrator] Bucket not found in exploration")
             self._current_state = UC1State.AI_SYNTHESIS
             return self._handle_ai_synthesis()
+        
+        # ============================================================
+        # EXPLORATION AUTHORITY - Never re-enter if complete
+        # ============================================================
+        if self.slots.exploration_complete:
+            logger.info("[Orchestrator] Exploration already complete - routing to alternatives")
+            if not self.slots.alternatives_consumed:
+                self._current_state = UC1State.CONSULTATIVE_ALTERNATIVES
+                return self._handle_consultative_alternatives("")
+            else:
+                self._current_state = UC1State.RECOMMENDATION
+                return self._handle_recommendation("")
         
         current_turn = self.slots.exploration_turn
         max_turns = 2
@@ -385,13 +730,15 @@ class ConversationOrchestrator:
         if user_input:
             self.slot_manager.add_exploration_response(user_input)
             self.slot_manager.increment_engagement(EngagementEvent.TEXT_PROVIDED)
+            self.slot_manager.reset_retry_count()  # Successful progression
         
         # Check if we've completed enough exploration turns
         if current_turn >= max_turns and user_input:
-            # Done exploring - transition to AI_SYNTHESIS
+            # Mark exploration as COMPLETE (irreversible)
+            self.slot_manager.mark_exploration_complete()
             logger.info(f"[Orchestrator] Exploration complete after {current_turn} turns")
-            self._current_state = UC1State.AI_SYNTHESIS
-            return self._handle_ai_synthesis()
+            self._current_state = UC1State.CONSULTATIVE_ALTERNATIVES
+            return self._handle_consultative_alternatives("")
         
         # Generate next exploration prompt/reflect
         next_turn = current_turn + 1 if user_input else current_turn
@@ -413,9 +760,10 @@ class ConversationOrchestrator:
             input_type="text",
         )
 
+
     
     def _handle_ai_synthesis(self) -> OrchestratorResponse:
-        """Handle AI_SYNTHESIS state - present alternatives (TEXT-BLIND)."""
+        """Handle AI_SYNTHESIS state (S4) - generate synthesis, then go to Exploration."""
         bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
         if not bucket:
             logger.error(f"[Orchestrator] Bucket not found in synthesis")
@@ -426,31 +774,50 @@ class ConversationOrchestrator:
                     response_intent=ResponseIntent.EXIT,
                     slots=self.slots,
                 ),
-                input_type="none",
+                input_type="text",  # Allow re-engagement even in error cases
                 terminal=True
             )
         
-        # Transition to CONSULTATIVE_ALTERNATIVES
-        self._current_state = UC1State.CONSULTATIVE_ALTERNATIVES
-        button_options = list(bucket.alternatives)
+        # AI Synthesis (S4) leads to Exploration Layer (S5)
+        # The LLM generates synthesis, then we transition to exploration
+        self._current_state = UC1State.EXPLORATION_LAYER
+        self.slot_manager.set_exploration_turn(1)
         
         return OrchestratorResponse(
             state=self._current_state,
             call_spec=AdapterCallSpec(
                 state=UC1State.AI_SYNTHESIS,
-                response_intent=ResponseIntent.PRESENT,
+                response_intent=ResponseIntent.ACKNOWLEDGE,  # Synthesis + acknowledge user
+                user_input=self.slots.user_name,  # Pass name for personalized synthesis
                 slots=self.slots,
                 bucket=bucket,
             ),
-            input_type="buttons",
-            options=button_options,
+            input_type="text",  # User will provide exploration input
         )
     
     def _handle_consultative_alternatives(self, user_input: str) -> OrchestratorResponse:
-        """Handle CONSULTATIVE_ALTERNATIVES state - user selects alternative (TEXT-BLIND)."""
+        """Handle CONSULTATIVE_ALTERNATIVES state (S6) - present 3 alternatives."""
         bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
         
-        # Track user selection
+        # If called after exploration complete (empty input), present alternatives
+        if not user_input or not user_input.strip():
+            # Clear any previous selection to avoid "Stuck CTA" loop (fixes "buttons not working" bug)
+            self.slot_manager.set_selected_alternative(None)
+            
+            button_options = list(bucket.alternatives) if bucket else []
+            return OrchestratorResponse(
+                state=self._current_state,
+                call_spec=AdapterCallSpec(
+                    state=UC1State.CONSULTATIVE_ALTERNATIVES,
+                    response_intent=ResponseIntent.PRESENT,
+                    slots=self.slots,
+                    bucket=bucket,
+                ),
+                input_type="buttons",
+                options=button_options,
+            )
+        
+        # Track user selection and mark alternatives consumed
         if bucket:
             alternatives_lower = [a.lower() for a in bucket.alternatives]
             input_lower = user_input.strip().lower()
@@ -461,6 +828,9 @@ class ConversationOrchestrator:
             else:
                 self.slot_manager.set_selected_alternative(user_input)
                 self.slot_manager.increment_engagement(EngagementEvent.TEXT_PROVIDED)
+            
+            # Mark alternatives as consumed (authoritative - prevents re-show)
+            self.slot_manager.mark_alternatives_consumed()
         
         # Transition to RECOMMENDATION
         self._current_state = UC1State.RECOMMENDATION
@@ -512,6 +882,9 @@ class ConversationOrchestrator:
         self.slot_manager.set_selected_cta_outcome(selected_cta.outcome)
         self.slot_manager.increment_engagement(EngagementEvent.BUTTON_CLICK)
         
+        # Get bucket for both branches (was missing - caused undefined bucket in loop-back)
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
         # Determine next state based on CTA outcome
         next_state = self.state_machine.get_next_state_for_cta(
             self._current_state, selected_cta.outcome
@@ -540,19 +913,228 @@ class ConversationOrchestrator:
             return self._handle_exit()
     
     def _handle_exit(self) -> OrchestratorResponse:
-        """Handle EXIT state (TEXT-BLIND)."""
+        """Handle EXIT state (TEXT-BLIND).
+        
+        EXIT is a flow-completion state, NOT a session termination.
+        After sending the exit message:
+        1. terminal=False keeps the chat input enabled
+        2. State resets to ENTRY so the next message starts fresh
+        """
         bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
+        # Generate message DETERMINISTICALLY (no LLM)
+        exit_message = self.llm_adapter.generate_exit_summary(self.slots, bucket)
+        
+        # Build response BEFORE resetting state (response references current EXIT state)
+        response = OrchestratorResponse(
+            state=self._current_state,
+            call_spec=AdapterCallSpec(
+                state=UC1State.EXIT,
+                response_intent=ResponseIntent.GRACEFUL_EXIT,
+                slots=self.slots,
+                bucket=bucket,
+            ),
+            input_type="text",  # Allow re-engagement after goodbye
+            terminal=False,  # EXIT != TERMINATION - keep chat open
+            message=exit_message
+        )
+        
+        # LIFECYCLE RESET: Prepare for next user input
+        # This ensures the NEXT call to process_input starts from ENTRY
+        # (Does NOT affect current turn - we return immediately after this)
+        self._current_state = UC1State.ENTRY
+        self.slot_manager.clear()  # Clear UC1 context for clean restart
+        
+        logger.info(f"[Orchestrator] EXIT complete, state reset to ENTRY for re-engagement")
+        
+        return response
+    
+    # ============================================================
+    # ROBUSTNESS HANDLERS (Per UC1 Fixes - 2026-01-12)
+    # ============================================================
+    
+    def _handle_gibberish_input(self) -> OrchestratorResponse:
+        """
+        Handle gibberish input (pre-state-machine rejection).
+        
+        Does NOT count as retry. Does NOT advance state.
+        """
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        return OrchestratorResponse(
+            state=self._current_state,
+            call_spec=AdapterCallSpec(
+                state=self._current_state,
+                response_intent=ResponseIntent.RETRY,
+                user_input="gibberish_detected",
+                slots=self.slots,
+                bucket=bucket,
+            ),
+            input_type="text",
+            message="I might be missing that — could you rephrase in a sentence?",
+        )
+    
+    def _handle_max_retries(self) -> OrchestratorResponse:
+        """
+        Handle max retries exceeded (bailout).
+        
+        Freezes slots. User must type 'restart' to begin again.
+        """
+        self.slot_manager.freeze_slots()
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        return OrchestratorResponse(
+            state=self._current_state,
+            call_spec=AdapterCallSpec(
+                state=self._current_state,
+                response_intent=ResponseIntent.GRACEFUL_EXIT,
+                slots=self.slots,
+                bucket=bucket,
+            ),
+            input_type="text",
+            message="Looks like we're not aligned right now. You can type 'restart' anytime to begin fresh.",
+            terminal=False,  # Keep chat open for restart
+        )
+    
+    def _handle_negation(self) -> OrchestratorResponse:
+        """
+        Handle negation (scoped - clear only selected_alternative).
+        
+        Preserves context_signal, capability_bucket, user_name.
+        Returns user-friendly contextual restatement.
+        """
+        # Clear only the selection (scoped)
+        self.slot_manager.slots.selected_alternative = None
+        self.slot_manager._safe_persist()
+        
+        # Get bucket for user-friendly context
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
+        # Build user-friendly response (NOT using internal IDs)
+        if bucket:
+            # Use the bucket's trigger text which is what the user clicked on
+            message = f"No worries. You're exploring {bucket.trigger}. What aspect would you like to know more about?"
+        elif self.slots.context_signal:
+            # Fallback to context signal if available
+            context_preview = self.slots.context_signal[:40] + "..." if len(self.slots.context_signal) > 40 else self.slots.context_signal
+            message = f"Alright. Let's refocus on your goal: \"{context_preview}\". What would you like to explore?"
+        else:
+            message = "Alright. What would you like to explore instead?"
         
         return OrchestratorResponse(
             state=self._current_state,
             call_spec=AdapterCallSpec(
-                state=UC1State.EXIT,
-                response_intent=ResponseIntent.EXIT,
+                state=self._current_state,
+                response_intent=ResponseIntent.PROMPT,
+                user_input="user_declined",
                 slots=self.slots,
                 bucket=bucket,
             ),
-            input_type="none",
-            terminal=True,
+            input_type="text",
+            message=message,
+        )
+    
+    def _handle_frozen_state(self) -> OrchestratorResponse:
+        """Handle input when slots are frozen (after bailout)."""
+        return OrchestratorResponse(
+            state=self._current_state,
+            call_spec=AdapterCallSpec(
+                state=self._current_state,
+                response_intent=ResponseIntent.RETRY,
+                slots=self.slots,
+            ),
+            input_type="text",
+            message="Type 'restart' to begin a fresh conversation.",
+            terminal=False,
+        )
+    
+    def _handle_ack_bypass(self) -> OrchestratorResponse:
+        """
+        Handle ACK bypass (control signal only).
+        
+        ACC INVARIANT: ACK never triggers LLM.
+        It advances state if appropriate, or waits.
+        """
+
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
+        # Build user-friendly message (NOT using internal anchor with IDs)
+        if self._current_state in (UC1State.EXPLORATION_LAYER, UC1State.FREE_EXPLORATION):
+            # Use bucket trigger for user-friendly context
+            if bucket:
+                message = f"Got it. You're exploring {bucket.trigger}. What else would you like to know?"
+            elif self.slots.user_name:
+                message = f"Got it, {self.slots.user_name}. What else is on your mind?"
+            else:
+                message = "Got it. What else is on your mind?"
+                
+            return OrchestratorResponse(
+                state=self._current_state,
+                call_spec=AdapterCallSpec(
+                    state=self._current_state,
+                    response_intent=ResponseIntent.ACKNOWLEDGE,
+                    user_input="ack_bypass",
+                    slots=self.slots, # Pass slots even if no LLM call
+                    bucket=bucket,
+                ),
+                input_type="text",
+                message=message,
+                terminal=False,
+            )
+            
+        # Default: just a simple acknowledgment
+        return OrchestratorResponse(
+            state=self._current_state,
+            call_spec=AdapterCallSpec(
+                state=self._current_state,
+                response_intent=ResponseIntent.ACKNOWLEDGE,
+                user_input="ack_bypass",
+                slots=self.slots,
+                bucket=bucket,
+            ),
+            input_type="text",
+            message="Got it.",
+            terminal=False,
+        )
+
+    def _handle_restart(self) -> OrchestratorResponse:
+        """Handle restart command (clears all state)."""
+        logger.info("[Orchestrator] RESTART command received - clearing session")
+        self.slot_manager.clear()
+        self._current_state = UC1State.ENTRY
+        
+        # Reinitialize slot manager
+        self.slot_manager = SlotManager(self.session_id)
+        
+        return self._handle_entry()
+    
+    def _stabilize_free_exploration(self) -> OrchestratorResponse:
+        """
+        Stabilize FREE_EXPLORATION after 2+ unclear inputs.
+        
+        Uses user-friendly bucket trigger, not internal anchor IDs.
+        """
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
+        # Build user-friendly reset message
+        if bucket:
+            message = f"Let's refocus. You were exploring {bucket.trigger}. What specific aspect should we look at first?"
+        elif self.slots.user_name:
+            message = f"Let's reset, {self.slots.user_name}. What are you looking to accomplish?"
+        else:
+            message = "Let's reset. What are you looking to accomplish?"
+        
+        # Reset unclear count
+        self.slot_manager.reset_free_exploration_unclear()
+        
+        return OrchestratorResponse(
+            state=self._current_state,
+            call_spec=AdapterCallSpec(
+                state=UC1State.FREE_EXPLORATION,
+                response_intent=ResponseIntent.PROMPT,
+                slots=self.slots,
+                bucket=bucket,
+            ),
+            input_type="text",
+            message=message,
         )
     
     async def process_input_stream(

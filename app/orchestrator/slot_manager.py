@@ -76,9 +76,30 @@ class UC1Slots:
     # Selected CTA outcome
     selected_cta_outcome: Optional[str] = None
     
+    # Lead capture tracking (policy engine-owned)
+    lead_capture_asked_count: int = 0
+    lead_capture_suppressed_until: int = 0  # Exchange count when suppression expires
+    lead_capture_permanently_suppressed: bool = False
+    
+    # UC1 pause/resume tracking (for FREE_EXPLORATION)
+    uc1_paused: bool = False
+    paused_state: Optional[str] = None  # State before entering FREE_EXPLORATION
+    exchange_count: int = 0  # Total exchanges in session
+    
     # Engagement scoring (orchestrator-owned)
     engagement_score: float = 0.0
     retry_count: int = 0
+    
+    # ================================================================
+    # AUTHORITATIVE FLAGS (Per UC1 Robustness Fixes - 2026-01-12)
+    # ================================================================
+    exploration_complete: bool = False      # IRREVERSIBLE - exploration layer cannot reopen
+    alternatives_consumed: bool = False     # Prevents re-showing alternative buttons
+    frozen: bool = False                    # Hard freeze after bailout - no mutations
+    free_exploration_unclear_count: int = 0 # Stabilizer trigger in FREE_EXPLORATION
+    
+    # ACC Phase 3: Question budget per state
+    question_counts: Optional[Dict[str, int]] = None  # state -> question count
     
     def get_filled_slots(self) -> Set[str]:
         """Return set of slot names that are filled (non-None, non-empty)."""
@@ -102,8 +123,24 @@ class UC1Slots:
             "last_user_message": self.last_user_message,
             "selected_alternative": self.selected_alternative,
             "selected_cta_outcome": self.selected_cta_outcome,
+            # Lead capture tracking
+            "lead_capture_asked_count": self.lead_capture_asked_count,
+            "lead_capture_suppressed_until": self.lead_capture_suppressed_until,
+            "lead_capture_permanently_suppressed": self.lead_capture_permanently_suppressed,
+            # UC1 pause/resume
+            "uc1_paused": self.uc1_paused,
+            "paused_state": self.paused_state,
+            "exchange_count": self.exchange_count,
+            # Engagement
             "engagement_score": self.engagement_score,
             "retry_count": self.retry_count,
+            # Authoritative flags
+            "exploration_complete": self.exploration_complete,
+            "alternatives_consumed": self.alternatives_consumed,
+            "frozen": self.frozen,
+            "free_exploration_unclear_count": self.free_exploration_unclear_count,
+            # ACC Phase 3
+            "question_counts": self.question_counts or {},
         }
     
     @classmethod
@@ -118,8 +155,24 @@ class UC1Slots:
             last_user_message=data.get("last_user_message"),
             selected_alternative=data.get("selected_alternative"),
             selected_cta_outcome=data.get("selected_cta_outcome"),
+            # Lead capture tracking
+            lead_capture_asked_count=data.get("lead_capture_asked_count", 0),
+            lead_capture_suppressed_until=data.get("lead_capture_suppressed_until", 0),
+            lead_capture_permanently_suppressed=data.get("lead_capture_permanently_suppressed", False),
+            # UC1 pause/resume
+            uc1_paused=data.get("uc1_paused", False),
+            paused_state=data.get("paused_state"),
+            exchange_count=data.get("exchange_count", 0),
+            # Engagement
             engagement_score=data.get("engagement_score", 0.0),
             retry_count=data.get("retry_count", 0),
+            # Authoritative flags
+            exploration_complete=data.get("exploration_complete", False),
+            alternatives_consumed=data.get("alternatives_consumed", False),
+            frozen=data.get("frozen", False),
+            free_exploration_unclear_count=data.get("free_exploration_unclear_count", 0),
+            # ACC Phase 3
+            question_counts=data.get("question_counts"),
         )
 
 
@@ -332,3 +385,236 @@ class SlotManager:
             delete_session_metadata(session_id, "uc1_slots")
         except Exception:
             pass
+    
+    # ============================================================
+    # Lead Capture Tracking (Policy Engine Integration)
+    # ============================================================
+    
+    def increment_lead_capture_asked(self) -> int:
+        """
+        Increment lead capture ask count.
+        
+        Called when lead capture is attempted.
+        After MAX_ASKS (2), permanent suppression should be applied.
+        
+        Returns:
+            int: New ask count
+        """
+        self.slots.lead_capture_asked_count += 1
+        logger.info(f"[SlotManager] Lead capture asked: {self.slots.lead_capture_asked_count}")
+        self._safe_persist()
+        return self.slots.lead_capture_asked_count
+    
+    def set_lead_capture_suppression(
+        self, 
+        until_exchange: int = 0,
+        permanent: bool = False
+    ) -> None:
+        """
+        Set lead capture suppression.
+        
+        Args:
+            until_exchange: Exchange count when suppression expires (0 = no temp suppression)
+            permanent: If True, never ask again in this session
+        """
+        if permanent:
+            self.slots.lead_capture_permanently_suppressed = True
+            logger.info("[SlotManager] Lead capture PERMANENTLY suppressed")
+        else:
+            self.slots.lead_capture_suppressed_until = until_exchange
+            logger.info(f"[SlotManager] Lead capture suppressed until exchange {until_exchange}")
+        self._safe_persist()
+    
+    def is_lead_capture_suppressed(self) -> bool:
+        """
+        Check if lead capture is currently suppressed.
+        
+        Returns:
+            bool: True if suppressed (temporary or permanent)
+        """
+        if self.slots.lead_capture_permanently_suppressed:
+            return True
+        if self.slots.exchange_count < self.slots.lead_capture_suppressed_until:
+            return True
+        return False
+    
+    # ============================================================
+    # UC1 Pause/Resume (FREE_EXPLORATION Integration)
+    # ============================================================
+    
+    def pause_uc1(self, current_state: str) -> None:
+        """
+        Pause UC1 flow for FREE_EXPLORATION.
+        
+        Args:
+            current_state: The UC1 state before entering FREE_EXPLORATION
+        """
+        self.slots.uc1_paused = True
+        self.slots.paused_state = current_state
+        logger.info(f"[SlotManager] UC1 PAUSED at state: {current_state}")
+        self._safe_persist()
+    
+    def resume_uc1(self) -> str:
+        """
+        Resume UC1 flow from FREE_EXPLORATION.
+        
+        Returns:
+            str: The state to resume from
+        """
+        paused_state = self.slots.paused_state
+        self.slots.uc1_paused = False
+        self.slots.paused_state = None
+        logger.info(f"[SlotManager] UC1 RESUMED from state: {paused_state}")
+        self._safe_persist()
+        return paused_state or "capability_selection"
+    
+    def increment_exchange(self) -> int:
+        """
+        Increment exchange count (each user message).
+        
+        Returns:
+            int: New exchange count
+        """
+        self.slots.exchange_count += 1
+        self._safe_persist()
+        return self.slots.exchange_count
+    
+    # ============================================================
+    # ROBUSTNESS METHODS (Per UC1 Fixes - 2026-01-12)
+    # ============================================================
+    
+    def build_anchor_summary(self) -> str:
+        """
+        Build single-line grounding context for LLM injection.
+        
+        ⚠️ WARNING: FOR LLM CONTEXT ONLY - NEVER SHOW TO USERS!
+        This contains internal IDs like "UC1-A" which are not user-friendly.
+        For user-facing messages, use bucket.trigger from the config.
+        
+        This is injected via user-message prefix, NOT system prompt.
+        Preserves the single-prompt invariant.
+        
+        Returns:
+            str: Anchor context string for LLM (empty if no context available)
+        """
+        parts = []
+        if self.slots.capability_bucket:
+            parts.append(f"Focus: {self.slots.capability_bucket}")
+        if self.slots.context_signal:
+            # Truncate to 50 chars
+            signal = self.slots.context_signal[:50]
+            if len(self.slots.context_signal) > 50:
+                signal += "..."
+            parts.append(f"Goal: {signal}")
+        if self.slots.user_name:
+            parts.append(f"Name: {self.slots.user_name}")
+        return " | ".join(parts) if parts else ""
+    
+    def mark_exploration_complete(self) -> None:
+        """
+        Mark exploration as complete.
+        
+        AUTHORITATIVE: Once set, exploration layer CANNOT be reopened.
+        This prevents the "exploration restart after completion" bug.
+        """
+        if self.slots.frozen:
+            logger.warning("[SlotManager] Cannot mark exploration complete - slots frozen")
+            return
+        self.slots.exploration_complete = True
+        logger.info("[SlotManager] Exploration marked COMPLETE (irreversible)")
+        self._safe_persist()
+    
+    def mark_alternatives_consumed(self) -> None:
+        """
+        Mark alternatives as consumed.
+        
+        AUTHORITATIVE: Prevents re-showing alternative buttons after selection.
+        """
+        if self.slots.frozen:
+            logger.warning("[SlotManager] Cannot mark alternatives consumed - slots frozen")
+            return
+        self.slots.alternatives_consumed = True
+        logger.info("[SlotManager] Alternatives marked CONSUMED")
+        self._safe_persist()
+    
+    def freeze_slots(self) -> None:
+        """
+        Hard freeze slots after bailout.
+        
+        No further mutations allowed. User must restart to clear.
+        """
+        self.slots.frozen = True
+        logger.info("[SlotManager] Slots FROZEN - no further mutations allowed")
+        self._safe_persist()
+    
+    def reset_retry_count(self) -> None:
+        """Reset retry count (e.g., after successful progression)."""
+        if self.slots.frozen:
+            return
+        self.slots.retry_count = 0
+        self._safe_persist()
+    
+    def increment_free_exploration_unclear(self) -> int:
+        """
+        Increment unclear count in FREE_EXPLORATION mode.
+        
+        Returns:
+            int: New unclear count (stabilizer triggers at 2+)
+        """
+        if self.slots.frozen:
+            return self.slots.free_exploration_unclear_count
+        self.slots.free_exploration_unclear_count += 1
+        logger.info(f"[SlotManager] FREE_EXPLORATION unclear count: {self.slots.free_exploration_unclear_count}")
+        self._safe_persist()
+        return self.slots.free_exploration_unclear_count
+    
+    def reset_free_exploration_unclear(self) -> None:
+        """Reset unclear count on valid input in FREE_EXPLORATION."""
+        if self.slots.frozen:
+            return
+        if self.slots.free_exploration_unclear_count > 0:
+            self.slots.free_exploration_unclear_count = 0
+            self._safe_persist()
+    
+    # ============================================================
+    # ACC PHASE 3: QUESTION BUDGET (2026-01-12)
+    # ============================================================
+    
+    def increment_question_count(self, state: str) -> int:
+        """
+        Increment question count for a state.
+        
+        ACC INVARIANT: One qualifying question per state. Period.
+        
+        Returns:
+            int: New question count for this state
+        """
+        if self.slots.frozen:
+            return self.get_question_count(state)
+        if self.slots.question_counts is None:
+            self.slots.question_counts = {}
+        self.slots.question_counts[state] = self.slots.question_counts.get(state, 0) + 1
+        logger.info(f"[ACC] Question count for {state}: {self.slots.question_counts[state]}")
+        self._safe_persist()
+        return self.slots.question_counts[state]
+    
+    def get_question_count(self, state: str) -> int:
+        """Get current question count for a state."""
+        if self.slots.question_counts is None:
+            return 0
+        return self.slots.question_counts.get(state, 0)
+    
+    def question_budget_exceeded(self, state: str, limit: int = 1) -> bool:
+        """
+        Check if question budget exceeded for a state.
+        
+        ACC INVARIANT: Once budget exceeded, force synthesis.
+        
+        Args:
+            state: The state to check
+            limit: Maximum questions allowed (default 1)
+            
+        Returns:
+            bool: True if budget exceeded
+        """
+        return self.get_question_count(state) >= limit

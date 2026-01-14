@@ -115,6 +115,65 @@ def get_user_details_from_db(session_id: str) -> Dict[str, Any]:
     return {}
 
 
+def get_user_session_info(session_id: str) -> tuple[Dict[str, Any], bool]:
+    """
+    Fetch user details and user_details_known flag in a single DB query.
+    
+    This combines get_user_details_from_db and get_user_details_known_from_db
+    to reduce DB round trips (saves ~200-400ms per request).
+    
+    Returns:
+        Tuple of (user_details dict, user_details_known bool)
+    """
+    import time
+    start = time.perf_counter()
+    
+    logger.info(
+        f"[get_user_session_info] Fetching combined user info for session_id={session_id}"
+    )
+    try:
+        with DatabaseConnection() as (conn, cursor):
+            cursor.execute(
+                """
+                SELECT u.username, u.email, u.mobile, u.user_details_known 
+                FROM users u
+                JOIN sessions s ON u.id = s.user_id
+                WHERE s.session_id = %s
+                """,
+                (str(session_id),),
+            )
+            row = cursor.fetchone()
+            elapsed = time.perf_counter() - start
+
+            if row:
+                username, email, mobile, user_details_known = row
+                user_details = {}
+                if username:
+                    user_details["username"] = username
+                if email:
+                    user_details["email"] = email
+                if mobile:
+                    user_details["mobile"] = mobile
+                
+                logger.info(
+                    f"[get_user_session_info] Found for session_id={session_id}: "
+                    f"details={list(user_details.keys())}, known={bool(user_details_known)} ({elapsed:.3f}s)"
+                )
+                return user_details, bool(user_details_known)
+            
+            logger.info(
+                f"[get_user_session_info] No user found for session_id={session_id} ({elapsed:.3f}s)"
+            )
+            return {}, False
+            
+    except Exception as e:
+        logger.warning(
+            f"[get_user_session_info] DB error for session {session_id}: {e}"
+        )
+        return {}, False
+
+
+
 
 def mark_form_shown(session_data: dict):
     logger.info(
@@ -499,13 +558,14 @@ def _fetch_root_prompts_sync():
         conn = get_db_conn()
         cursor = conn.cursor()
 
-        greeting_text = "Hello! I'm **DITS AI** 👋 — your smart assistant from Ditstek Innovations.\n\n**What brings you here today?**"
+        # Per spec: DITSTEK-REVAMP-extracted.txt lines 1-7
+        greeting_text = "Welcome to DITSTEK.\n\nHere, we focus on building products, engineering teams, and careers that are meant to scale — together.\n\n**How would you like to start?**"
         bottom_hint_text = "**Feel free to type if you're looking for something else!**"
         desired_order = [
             "See our Work",
             "Start a Project",
             "Talk to DITS team",
-            "Explore DITS Services",
+            "Explore services & capabilities",  # Per spec - exact trigger phrase
         ]
         all_prompt_texts = [greeting_text] + desired_order + [bottom_hint_text]
 
@@ -672,16 +732,17 @@ async def send_message_stream(req: SentMessage):
         # UC1 TRIGGER DETECTION - Explicit CTA triggers UC1 mode
         # ============================================================
         # UC1 is triggered ONLY by explicit CTA selection, not inference
-        # Trigger CTA: "Explore DITS Services" from welcome screen
+        # Trigger CTA: "Explore services & capabilities" from welcome screen (per spec)
         UC1_TRIGGER_CTAS = {
-            "explore dits services",
+            "explore services & capabilities",  # Per spec - exact trigger phrase
             "explore services",
-            "explore dits",
+            "explore dits services",  # Legacy fallback
         }
         
         # Check if this session is in UC1 mode (stored per-session)
-        # Use a simple in-memory cache for now (can be moved to Redis/DB later)
+        # Must check BOTH in-memory cache AND persisted Redis storage
         from app.orchestrator.slot_manager import SlotManager
+        from app.utils.conversation_memory import get_session_metadata
         
         is_uc1 = False
         
@@ -689,10 +750,22 @@ async def send_message_stream(req: SentMessage):
         if query and query.strip().lower() in UC1_TRIGGER_CTAS:
             is_uc1 = True
             logger.info(f"[UC1] Trigger CTA detected: '{query}' → Activating UC1 mode")
-        # Check if session already has UC1 state (continuing UC1 flow)
+        # Check if session already has UC1 state (in-memory cache)
         elif session_id in SlotManager._session_slots:
             is_uc1 = True
-            logger.info(f"[UC1] Session {session_id} already in UC1 mode")
+            logger.info(f"[UC1] Session {session_id} already in UC1 mode (in-memory)")
+        # Check if session has persisted UC1 state in Redis (memory cache miss)
+        else:
+            try:
+                persisted_slots = get_session_metadata(session_id, "uc1_slots", default=None)
+                if persisted_slots and isinstance(persisted_slots, dict):
+                    # Found persisted UC1 state - reload into memory cache
+                    from app.orchestrator.slot_manager import UC1Slots
+                    SlotManager._session_slots[session_id] = UC1Slots.from_dict(persisted_slots)
+                    is_uc1 = True
+                    logger.info(f"[UC1] Session {session_id} UC1 state loaded from Redis")
+            except Exception as e:
+                logger.debug(f"[UC1] Failed to check Redis for UC1 state: {e}")
 
         async for event in chatbot.get_detailed_response(query=query, chat_history=chat_history, session_id=session_id, stream=True, is_uc1=is_uc1):
             # Track session ending

@@ -52,13 +52,58 @@ def _to_float_list(emb) -> List[float]:
     return [float(x) for x in out]
 
 
+# =============================================================================
+# QUERY EMBEDDING CACHE
+# =============================================================================
+# LRU cache for query embeddings to avoid recomputing identical queries.
+# 
+# DEPLOYMENT NOTES:
+# - Cache is per-process. Multi-worker deployments (uvicorn workers > 1)
+#   will have independent caches. This is expected and safe.
+# - Memory: ~12MB per 2000 cached 768-dim embeddings per worker.
+# - Thread-safe: GIL protects lru_cache operations.
+#
+# Cache key is raw query text - lru_cache handles argument hashing internally.
+# =============================================================================
+from functools import lru_cache
+
+# Configurable cache size via environment (default 2000)
+EMBEDDING_CACHE_SIZE = int(os.getenv("EMBEDDING_CACHE_SIZE", "2000"))
+
+
+@lru_cache(maxsize=EMBEDDING_CACHE_SIZE)
+def _get_embedding_cached(text: str) -> tuple:
+    """
+    Cached embedding computation. Returns tuple for hashability.
+    
+    Internal function - use get_embedding() for public API.
+    """
+    emb = model.encode(text, device=device)
+    # Return as tuple for LRU cache compatibility
+    return tuple(_to_float_list(emb))
+
+
 def get_embedding(text: str) -> List[float]:
     """Get embedding vector for a given text using the loaded model.
 
     Returns a plain Python list[float].
+    
+    NOTE: This function uses LRU caching. Identical queries will return
+    cached embeddings. Different queries always compute fresh embeddings.
     """
-    emb = model.encode(text, device=device)
-    return _to_float_list(emb)
+    # Convert cached tuple back to list for API compatibility
+    return list(_get_embedding_cached(text))
+
+
+def get_embedding_cache_info():
+    """Get cache statistics for monitoring. Returns lru_cache cache_info."""
+    return _get_embedding_cached.cache_info()
+
+
+def clear_embedding_cache():
+    """Clear the embedding cache. Useful for testing or memory pressure."""
+    _get_embedding_cached.cache_clear()
+    logger.info("Embedding cache cleared")
 
 
 def get_embeddings_batch(texts: List[str], batch_size: int = 32, show_progress: bool = True) -> List[List[float]]:

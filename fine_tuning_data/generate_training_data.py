@@ -29,15 +29,23 @@ from typing import List, Dict, Optional
 # =============================================================================
 
 STATES = {
+    # ─────────────────────────────────────────────────────────────────────────
+    # USED IN TRAINING (LLM generates responses for these states)
+    # ─────────────────────────────────────────────────────────────────────────
     "UC1_S0_ENTER": "Initial entry after user clicks 'Explore services & capabilities'",
-    "UC1_S1_CAPABILITY_PICK": "User selects a capability area (6 options)",
-    "UC1_S2_CONTEXT_CLARIFIER": "Bot asks context question specific to capability",
-    "UC1_S3_NAME_CAPTURE": "Bot captures name and synthesizes understanding",
-    "UC1_S4_AI_SYNTHESIS": "Bot synthesizes understanding based on capability + context",
     "UC1_S5_EXPLORATION_LAYER": "Bot asks exploration questions and reflects (2-3 turns)",
     "UC1_S6_CONSULTATIVE_ALTERNATIVES": "Bot presents 3 consultative alternatives",
-    "UC1_S7_EARNED_CTA": "Bot shows 4 CTA options",
-    "UC1_S8_CLOSE": "Conversation exit"
+    "UC1_S8_CLOSE": "Conversation exit",
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # SPEC REFERENCE ONLY — NOT used in training (orchestrator emits fixed prompts)
+    # These are declared for documentation purposes. DO NOT add training examples.
+    # ─────────────────────────────────────────────────────────────────────────
+    # "UC1_S1_CAPABILITY_PICK": "User selects a capability area (6 options)",
+    # "UC1_S2_CONTEXT_CLARIFIER": "Bot asks context question specific to capability",
+    # "UC1_S3_NAME_CAPTURE": "Bot captures name and synthesizes understanding",
+    # "UC1_S4_AI_SYNTHESIS": "Bot synthesizes understanding based on capability + context",
+    # "UC1_S7_EARNED_CTA": "Bot shows 4 CTA options",
 }
 
 # =============================================================================
@@ -440,26 +448,47 @@ CONVERSATIONS = [
 ]
 
 # =============================================================================
-# SYSTEM MESSAGE BUILDER
+# SYSTEM MESSAGE - CANONICAL (No State/Rules per Deterministic Refactoring)
 # =============================================================================
+
+# The single canonical system prompt - LLM is NOT aware of states, flows, or rules
+CANONICAL_SYSTEM_PROMPT = """You are an AI assistant representing DITSTEK.
+
+Your responsibility is to understand the user's intent from natural language and respond clearly, concisely, and naturally.
+
+You are not aware of any internal conversation states, flows, funnels, policies, or system logic.
+You respond only to what the user actually says.
+
+Behavior rules:
+- If the user asks a clear question, answer it directly.
+- If the input is vague or ambiguous, respond neutrally without advancing the conversation.
+- If the user gives a casual acknowledgment (e.g., "ok", "yeah", "good to know"), respond naturally without advancing the conversation.
+- Be grounded in DITSTEK's services and capabilities without using marketing or sales language.
+- Do not assume the user wants to proceed, commit, schedule, or take next steps unless they explicitly indicate interest.
+- Do not introduce calls, demos, meetings, or contact requests by default.
+- Do not reference internal states, rules, training data, or system behavior.
+- Do not ask questions unless directly responding to a question asked by the user.
+
+Response style:
+- Natural, professional, conversational
+- 2–5 sentences unless more detail is requested
+- Consultative, not directive
+- No scripted transitions
+- No multiple questions in one response
+
+Your goal is to maintain a meaningful, context-aware conversation that feels human, helpful, and intelligent."""
 
 def build_system_message(state: str, capability: Optional[str] = None, 
                          context: Optional[str] = None, rules: str = "") -> str:
-    """Build a state-scoped system message without accumulated slots."""
-    lines = [f"State: {state}"]
+    """
+    Return the CANONICAL system message.
     
-    if capability:
-        cap_name = CAPABILITIES[capability]["name"]
-        lines.append(f"Capability: {cap_name}")
-    
-    if context:
-        context_label = context.replace("_", " ").title()
-        lines.append(f"Context: {context_label}")
-    
-    if rules:
-        lines.append(f"Rules: {rules}")
-    
-    return "\n".join(lines)
+    Per Deterministic Refactoring Phase 6:
+    - LLM is NOT aware of states, flows, or rules
+    - All parameters are IGNORED - only canonical prompt is returned
+    - Training teaches LANGUAGE competence, not flow control
+    """
+    return CANONICAL_SYSTEM_PROMPT
 
 # =============================================================================
 # EXAMPLE GENERATOR
@@ -485,6 +514,101 @@ class TrainingExample:
             ]
         }
 
+# =============================================================================
+# META / COMPANY INFO EXAMPLES (Out-of-scope handling)
+# =============================================================================
+
+def generate_meta_examples() -> List[TrainingExample]:
+    """
+    Generate meta/company-info examples for out-of-scope questions.
+    
+    These examples:
+    - Have NO UC1 context
+    - Pure informational tone
+    - Help the model de-anchor from UC1 when scope changes
+    """
+    examples = []
+    
+    # Company identity examples
+    meta_pairs = [
+        # Who are you / what are you
+        ("Who are you?", "I'm an AI assistant representing DITSTEK, a technology services company."),
+        ("What are you?", "I'm DITSTEK's AI assistant, here to help you learn about our services and capabilities."),
+        ("Are you a bot?", "Yes, I'm an AI assistant for DITSTEK. I'm here to help answer questions about our services."),
+        ("Are you human?", "No, I'm an AI assistant. I represent DITSTEK and can help with questions about our technology services."),
+        
+        # About DITSTEK
+        ("What does DITSTEK do?", "DITSTEK provides technology services including product development, application modernization, cloud infrastructure, AI solutions, and dedicated development teams."),
+        ("Tell me about DITSTEK", "DITSTEK is a technology services company. We help businesses with software development, cloud solutions, application modernization, and building dedicated engineering teams."),
+        ("What services does DITSTEK offer?", "DITSTEK offers product development, application modernization, cloud and DevOps services, AI and data solutions, and dedicated development team models."),
+        ("What is DITSTEK?", "DITSTEK is a technology consulting and services company focused on software engineering, cloud infrastructure, and digital transformation."),
+        
+        # Founder / leadership
+        ("Who founded DITSTEK?", "I don't have specific information about DITSTEK's founders. I can help you with questions about our services and capabilities."),
+        ("Who is the founder of DITSTEK?", "I don't have that information readily available. I'm best suited to help with questions about DITSTEK's services and technology capabilities."),
+        ("Who runs DITSTEK?", "I don't have details about DITSTEK's leadership structure. I can help you explore our service offerings if you're interested."),
+        ("Who is the CEO?", "I don't have information about DITSTEK's executive team. I'm here to help with questions about our technology services."),
+        
+        # Location / contact
+        ("Where is DITSTEK located?", "DITSTEK operates as a technology services company. For specific location or contact details, I'd recommend checking the main website."),
+        ("Where are you based?", "DITSTEK serves clients globally. For specific office locations, the company website would have the most current information."),
+        ("How can I contact DITSTEK?", "For direct contact, the company website would have the most up-to-date information. I'm here to help answer questions about our services in the meantime."),
+        
+        # General meta
+        ("What can you help with?", "I can help you explore DITSTEK's services, understand our technology capabilities, and answer questions about software development, cloud solutions, and digital transformation."),
+        ("How does this work?", "I'm here to have a conversation about your technology needs. Ask me anything about DITSTEK's services, and I'll do my best to help."),
+        ("What should I ask?", "You can ask about any technology challenge you're facing — whether that's building a new product, modernizing existing systems, or scaling your team."),
+        
+        # Capabilities overview
+        ("What technologies do you work with?", "DITSTEK works with modern technology stacks including cloud platforms, DevOps tools, AI/ML frameworks, and various programming languages depending on project needs."),
+        ("Do you do mobile apps?", "Yes, DITSTEK's product development services include mobile application development as part of broader product engineering."),
+        ("Do you work with startups?", "DITSTEK works with companies at various stages, from startups building their first product to enterprises modernizing existing systems."),
+        ("Do you offer consulting?", "Yes, DITSTEK provides technology consulting along with implementation services. We can help assess your needs before committing to a specific engagement."),
+        
+        # Pricing / process (deflect appropriately)
+        ("How much does it cost?", "Pricing depends on the scope and nature of the engagement. I can help you understand what might be involved, and then you could discuss specifics with the team."),
+        ("What are your rates?", "Rates vary based on engagement type and scope. I can help clarify what you need, which would help in discussing pricing with the team."),
+        ("How long does a project take?", "Timelines depend on scope and complexity. A small project might take weeks, while larger initiatives can span months. What kind of work are you considering?"),
+        
+        # Casual / off-topic (neutral responses)
+        ("Hello", "Hello. How can I help you today?"),
+        ("Hi there", "Hi. What would you like to know about DITSTEK's services?"),
+        ("Thanks", "You're welcome. Is there anything else I can help with?"),
+        ("Thank you", "Happy to help. Let me know if you have any other questions."),
+        ("Goodbye", "Goodbye. Feel free to come back if you have more questions."),
+        ("Bye", "Take care. I'm here if you need anything else."),
+        ("Okay", "Is there something specific you'd like to explore or ask about?"),
+        ("Interesting", "I'm glad that's useful. What else would you like to know?"),
+        ("Cool", "Anything else you'd like to discuss?"),
+        ("Got it", "Great. What else can I help you with?"),
+        ("I see", "Would you like to explore anything further?"),
+        ("Makes sense", "Happy to elaborate on anything if needed."),
+        
+        # Random / unrelated
+        ("What's the weather like?", "I don't have access to weather information. I'm focused on helping with questions about DITSTEK's technology services."),
+        ("Tell me a joke", "I'm not the best at jokes, but I'm happy to help with questions about technology services."),
+        ("What time is it?", "I don't have access to real-time information like the current time. Is there something about DITSTEK's services I can help with?"),
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # EXPLICIT UC1 DE-ANCHOR EXAMPLE
+        # Teaches the model to reset context when topic changes mid-conversation
+        # ─────────────────────────────────────────────────────────────────────
+        ("Earlier we were talking about product development, but now I just want to know who founded DITSTEK.",
+         "Understood — switching topics. I don't have information about DITSTEK's founders, but I can help with questions about our services or capabilities."),
+    ]
+    
+    for user_msg, assistant_msg in meta_pairs:
+        examples.append(TrainingExample(
+            state="META",  # Not a UC1 state
+            system_message=CANONICAL_SYSTEM_PROMPT,  # Same canonical prompt
+            user_message=user_msg,
+            assistant_message=assistant_msg,
+            intent="meta"
+        ))
+    
+    return examples
+
+
 def generate_base_examples() -> List[TrainingExample]:
     """Generate base examples from canonical conversations with all fixes applied."""
     examples = []
@@ -508,53 +632,28 @@ def generate_base_examples() -> List[TrainingExample]:
         cap_data = CAPABILITIES[cap]
         context_label = ctx.replace("_", " ").title()
         
-        # UC1_S1_CAPABILITY_PICK
-        examples.append(TrainingExample(
-            state="UC1_S1_CAPABILITY_PICK",
-            capability=cap,
-            system_message=build_system_message(
-                "UC1_S1_CAPABILITY_PICK",
-                capability=cap,
-                rules="Acknowledge capability selection. Ask context clarifying question. No CTA."
-            ),
-            user_message=cap_data["trigger"],
-            assistant_message=f"Got it. {cap_data['context_question_base']}",
-            intent="question"
-        ))
         
-        # UC1_S2_CONTEXT_CLARIFIER
-        examples.append(TrainingExample(
-            state="UC1_S2_CONTEXT_CLARIFIER",
-            capability=cap,
-            context=ctx,
-            system_message=build_system_message(
-                "UC1_S2_CONTEXT_CLARIFIER",
-                capability=cap,
-                context=ctx,
-                rules="Acknowledge context. Ask for name. No CTA."
-            ),
-            user_message=context_label,
-            assistant_message="Thanks — before we go further, what should I call you?",
-            intent="question"
-        ))
+        # =================================================================
+        # DELETED per Deterministic Refactoring Phase 6:
+        # - UC1_S1_CAPABILITY_PICK (asks context question - fixed prompt)
+        # - UC1_S2_CONTEXT_CLARIFIER (asks for name - fixed prompt)
+        # - UC1_S3_NAME_CAPTURE (synthesizes with name - fixed prompt)
+        # These are now emitted by the orchestrator, NOT the LLM.
+        # Training data must NOT contain flow-advancing questions.
+        # =================================================================
         
-        # UC1_S3_NAME_CAPTURE (NO PERSONALIZATION - removed name from output)
-        examples.append(TrainingExample(
-            state="UC1_S3_NAME_CAPTURE",
-            capability=cap,
-            context=ctx,
-            system_message=build_system_message(
-                "UC1_S3_NAME_CAPTURE",
-                capability=cap,
-                context=ctx,
-                rules="Thank user by name. Synthesize understanding so far. No CTA."
-            ),
-            user_message="Alex",  # Generic name for training
-            assistant_message=f"Thanks for sharing. From what you've said, you're working on {context_label.lower()} and thinking about how to move forward thoughtfully.",
-            intent="question"
-        ))
         
-        # UC1_S5_EXPLORATION_LAYER - Q1 only (realistic user input)
+        
+        # =================================================================
+        # UC1_S5_EXPLORATION_LAYER - REFACTORED per Final Audit
+        # 
+        # LLM NEVER originates questions. It only RESPONDS to questions.
+        # Orchestrator decides WHEN to ask exploration questions.
+        # LLM training teaches HOW to reflect and respond.
+        # =================================================================
+        
+        # User asks exploration Q1 → Assistant responds with reflection
+        # Pattern: User asks → Assistant reflects (never the reverse)
         examples.append(TrainingExample(
             state="UC1_S5_EXPLORATION_LAYER",
             capability=cap,
@@ -563,30 +662,14 @@ def generate_base_examples() -> List[TrainingExample]:
                 "UC1_S5_EXPLORATION_LAYER",
                 capability=cap,
                 context=ctx,
-                rules="Ask ONE guided exploration question. Open-ended but bounded. No CTA."
+                rules=""  # No rules - canonical prompt only
             ),
-            user_message=random.choice(ACKNOWLEDGMENT_PHRASES),  # Realistic input
-            assistant_message=f"To understand this better — {conv['exploration']['q1'].lower()}",
-            intent="question"
-        ))
-        
-        # UC1_S5_EXPLORATION_LAYER - R1 only (SINGLE INTENT - reflection only)
-        examples.append(TrainingExample(
-            state="UC1_S5_EXPLORATION_LAYER",
-            capability=cap,
-            context=ctx,
-            system_message=build_system_message(
-                "UC1_S5_EXPLORATION_LAYER",
-                capability=cap,
-                context=ctx,
-                rules="Reflect on user response. Show understanding. No CTA."
-            ),
-            user_message=conv["exploration"]["a1"],
-            assistant_message=conv['exploration']['r1'],  # REFLECTION ONLY - no question
+            user_message=conv['exploration']['q1'],  # USER asks the question
+            assistant_message=conv['exploration']['r1'],  # Assistant reflects
             intent="reflection"
         ))
         
-        # UC1_S5_EXPLORATION_LAYER - Q2 (separate example)
+        # User provides answer to Q1 → Assistant reflects
         examples.append(TrainingExample(
             state="UC1_S5_EXPLORATION_LAYER",
             capability=cap,
@@ -595,14 +678,14 @@ def generate_base_examples() -> List[TrainingExample]:
                 "UC1_S5_EXPLORATION_LAYER",
                 capability=cap,
                 context=ctx,
-                rules="Ask second exploration question. Open-ended but bounded. No CTA."
+                rules=""
             ),
-            user_message=random.choice(ACKNOWLEDGMENT_PHRASES),  # Realistic input
-            assistant_message=conv['exploration']['q2'],  # QUESTION ONLY
-            intent="question"
+            user_message=conv["exploration"]["a1"],  # User's answer
+            assistant_message=conv['exploration']['r1'],  # Reflection
+            intent="reflection"
         ))
         
-        # UC1_S5_EXPLORATION_LAYER - R2 only (reflection)
+        # User asks exploration Q2 → Assistant responds
         examples.append(TrainingExample(
             state="UC1_S5_EXPLORATION_LAYER",
             capability=cap,
@@ -611,10 +694,26 @@ def generate_base_examples() -> List[TrainingExample]:
                 "UC1_S5_EXPLORATION_LAYER",
                 capability=cap,
                 context=ctx,
-                rules="Reflect on user response. Transition to alternatives. No CTA."
+                rules=""
+            ),
+            user_message=conv['exploration']['q2'],  # USER asks Q2
+            assistant_message=conv["exploration"]["r2"],  # Assistant reflects
+            intent="reflection"
+        ))
+        
+        # User provides answer to Q2 → Assistant reflects
+        examples.append(TrainingExample(
+            state="UC1_S5_EXPLORATION_LAYER",
+            capability=cap,
+            context=ctx,
+            system_message=build_system_message(
+                "UC1_S5_EXPLORATION_LAYER",
+                capability=cap,
+                context=ctx,
+                rules=""
             ),
             user_message=conv["exploration"]["a2"],
-            assistant_message=conv["exploration"]["r2"],  # REFLECTION ONLY
+            assistant_message=conv["exploration"]["r2"],
             intent="reflection"
         ))
         
@@ -639,24 +738,14 @@ def generate_base_examples() -> List[TrainingExample]:
             ),
             user_message=random.choice(TRANSITION_PHRASES),  # Realistic input
             assistant_message=f"At this stage, teams in your situation usually consider a few paths:\n\n{alts_text}\n\n{conv['recommendation']}",
-            intent="alternatives"
         ))
         
-        # UC1_S7_EARNED_CTA
-        examples.append(TrainingExample(
-            state="UC1_S7_EARNED_CTA",
-            capability=cap,
-            context=ctx,
-            system_message=build_system_message(
-                "UC1_S7_EARNED_CTA",
-                capability=cap,
-                context=ctx,
-                rules="Present 4 CTA options. CTA is now earned."
-            ),
-            user_message=random.choice(ACKNOWLEDGMENT_PHRASES),  # Realistic input
-            assistant_message="Would you like to discuss your situation in more detail now, or would you prefer a quick call to walk through it?\n\n• Discuss my requirement now\n• Schedule a quick call\n• Continue exploring services\n• I'll explore on my own",
-            intent="CTA"
-        ))
+        # UC1_S7_EARNED_CTA - DELETED per Phase 6.1
+        # Training data must NOT contain:
+        # - Questions that advance flow
+        # - "Next step" framing
+        # - CTA option presentations
+        # The orchestrator handles CTAs deterministically.
     
     # UC1_S8_CLOSE examples (4 outcomes)
     close_responses = {
@@ -777,27 +866,8 @@ def generate_paraphrases(example: TrainingExample, count: int = 5) -> List[Train
             )
             paraphrases.append(new_example)
     
-    # UC1_S7_EARNED_CTA paraphrases
-    elif example.state == "UC1_S7_EARNED_CTA":
-        cta_variants = [
-            "How would you like to move forward?\n\n• Discuss my requirement now\n• Schedule a quick call\n• Continue exploring services\n• I'll explore on my own",
-            "What feels like the right next step?\n\n• Discuss my requirement now\n• Schedule a quick call\n• Continue exploring services\n• I'll explore on my own",
-            "Ready to take the next step? Here are your options:\n\n• Discuss my requirement now\n• Schedule a quick call\n• Continue exploring services\n• I'll explore on my own",
-            "Where would you like to go from here?\n\n• Discuss my requirement now\n• Schedule a quick call\n• Continue exploring services\n• I'll explore on my own"
-        ]
-        
-        for i in range(min(count, len(cta_variants))):
-            if cta_variants[i] != example.assistant_message:
-                new_example = TrainingExample(
-                    state=example.state,
-                    system_message=example.system_message,
-                    user_message=random.choice(ACKNOWLEDGMENT_PHRASES),
-                    assistant_message=cta_variants[i],
-                    capability=example.capability,
-                    context=example.context,
-                    intent=example.intent
-                )
-                paraphrases.append(new_example)
+    # UC1_S7_EARNED_CTA paraphrases - DELETED per Phase 6.1
+    # Contains forbidden "next step" framing
     
     # Exploration layer paraphrases
     elif example.state == "UC1_S5_EXPLORATION_LAYER":
@@ -861,6 +931,14 @@ def generate_fine_tuning_data(output_dir: str = "fine_tuning_data"):
     print("Generating base examples...")
     base_examples = generate_base_examples()
     print(f"  Generated {len(base_examples)} base examples")
+    
+    # Generate meta / company-info examples
+    print("Generating meta examples...")
+    meta_examples = generate_meta_examples()
+    print(f"  Generated {len(meta_examples)} meta examples")
+    
+    # Combine base + meta (meta don't get paraphrased)
+    base_examples.extend(meta_examples)
     
     # Expand with paraphrases
     print("Generating paraphrases...")

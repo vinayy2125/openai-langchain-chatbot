@@ -14,12 +14,11 @@
 intent_id: "explore_services_capabilities"
 lock_version: "1.0.0"
 
-# Fixed entry message - shown when user enters UC1 flow
+# Fixed entry message - shown when user clicks "Explore services & capabilities"
+# Per spec: DITSTEK-REVAMP-extracted.txt lines 58-60
 entry_message: |
-  Welcome to DITSTEK.
-  Here, we focus on building products, engineering teams, and careers that last.
-  
-  How would you like to start?
+  Great — happy to guide you.
+  Pick the closest area and I'll narrow it down from there.
 
 # The 6 capability buckets (sub-use cases)
 capability_buckets:

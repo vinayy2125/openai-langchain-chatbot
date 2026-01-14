@@ -79,6 +79,15 @@ class ScraperScheduler:
                 chroma = get_chroma_manager()
                 count = chroma.ingest_from_scrape(scrape_data, clear_existing=True)
                 
+                # Rebuild BM25 index after ingestion for hybrid search
+                try:
+                    from core_services.hybrid_search import get_hybrid_search_manager
+                    hybrid = get_hybrid_search_manager()
+                    hybrid.build_bm25_index(force_rebuild=True)
+                    logger.info("✅ BM25 index rebuilt after scrape ingestion")
+                except Exception as bm25_e:
+                    logger.warning(f"BM25 index rebuild failed after scrape: {bm25_e}")
+                
                 # Cleanup old scrapes
                 storage.cleanup_old_scrapes(keep_last=5)
                 
@@ -221,5 +230,14 @@ async def run_scrape_once(
         scrape_data = storage.load(filepath)
         chroma = get_chroma_manager()
         summary["chunks_indexed"] = chroma.ingest_from_scrape(scrape_data, clear_existing=True)
+        
+        # Rebuild BM25 index after ingestion for hybrid search
+        try:
+            from core_services.hybrid_search import get_hybrid_search_manager
+            hybrid = get_hybrid_search_manager()
+            hybrid.build_bm25_index(force_rebuild=True)
+            logger.info("✅ BM25 index rebuilt after scrape ingestion")
+        except Exception as bm25_e:
+            logger.warning(f"BM25 index rebuild failed after scrape: {bm25_e}")
     
     return summary

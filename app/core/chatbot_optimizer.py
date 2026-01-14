@@ -281,25 +281,107 @@ class OptimizedChatbot:
             logger.info(f"[Chatbot] UC1 mode active for session: {session_id}")
             try:
                 from app.orchestrator import ConversationOrchestrator
+                from app.orchestrator.llm_adapter import LLMIntent, OutputViolation
+                from app.utils.conversation_memory import get_session_memory_manager
+                from app.orchestrator.uc1_config import get_bucket_by_id
                 
                 orchestrator = ConversationOrchestrator.get_or_create(session_id)
+                memory_mgr = get_session_memory_manager()
                 
-                # Process input through orchestrator (returns text-blind response)
+                # Add user message to memory for continuity
+                memory_mgr.add_user_message(session_id, query)
+                
+                # Process input through orchestrator (text-blind response)
                 response = orchestrator.process_input(query)
                 
-                # Generate message from call_spec using LLM adapter (sole language authority)
-                if hasattr(response, 'call_spec') and response.call_spec:
+                # Generate message using LLM adapter with HYBRID context
+                # ONLY if message isn't already set (some states use fixed messages)
+                llm_intent = LLMIntent.UNCLEAR  # Default
+                
+                if hasattr(response, 'call_spec') and response.call_spec and not response.message:
                     spec = response.call_spec
-                    response.message = orchestrator.llm_adapter.generate_state_response(
+                    # generate_state_response now returns (text, intent) tuple
+                    text, llm_intent = orchestrator.llm_adapter.generate_state_response(
                         state=spec.state,
                         response_intent=spec.response_intent,
                         user_input=spec.user_input,
                         slots=spec.slots,
                         bucket=spec.bucket,
                         exploration_turn=spec.exploration_turn,
+                        session_id=session_id,
                     )
+                    
+                    # ============================================================
+                    # ACC PHASE 5: OUTPUT VALIDATION (Final Safety Net)
+                    # ============================================================
+                    # Block redundant questions even if LLM generates them
+                    violation = orchestrator.llm_adapter.validate_output(text, spec.slots)
+                    if violation == OutputViolation.REDUNDANT_QUESTION:
+                        logger.warning("[ACC] OutputViolation detected: REDUNDANT_QUESTION. Forcing recovery.")
+                        # Deterministic recovery - do not re-ask LLM
+                        signal = spec.slots.context_signal
+                        short_signal = (signal[:50] + "...") if signal and len(signal) > 50 else (signal or "that")
+                        text = f"Got it — {short_signal}. What aspect feels most urgent right now?"
+                    
+                    response.message = text
+                    response.llm_intent = llm_intent
+                    
+                    # ============================================================
+                    # BUTTON CLICK INTENT OVERRIDE - Hard commitment
+                    # When user clicks a button (selects an alternative), treat as
+                    # explicit commitment and override LLM intent to READY_FOR_CTA
+                    # ============================================================
+                    bucket = get_bucket_by_id(orchestrator.config, orchestrator.slots.capability_bucket)
+                    
+                    # Detect button click: input matches alternative or CTA option
+                    is_button_click = False
+                    if query and bucket and bucket.alternatives:
+                        query_lower = query.strip().lower()
+                        alternatives_lower = [a.lower() for a in bucket.alternatives]
+                        if query_lower in alternatives_lower:
+                            is_button_click = True
+                            # Record selection in slot (critical for option consumption)
+                            orchestrator.slot_manager.set_selected_alternative(query)
+                            logger.info(f"[UC1] BUTTON CLICK detected: '{query}' - overriding intent to READY_FOR_CTA")
+                    
+                    # Also check for CTA button clicks
+                    if query and not is_button_click:
+                        cta_choices_lower = [cta.choice.lower() for cta in orchestrator.config.exit_ctas]
+                        if query.strip().lower() in cta_choices_lower:
+                            is_button_click = True
+                            logger.info(f"[UC1] CTA BUTTON CLICK detected: '{query}'")
+                    
+                    # Override intent for button clicks
+                    if is_button_click:
+                        llm_intent = LLMIntent.READY_FOR_CTA
+                        response.llm_intent = llm_intent
+                    
+                    # ============================================================
+                    # INTENT-BASED UI GATING - State allows, Intent decides
+                    # ============================================================
+                    # Override options based on intent + state permission (via input_type)
+                    intent_gated_options = orchestrator.build_intent_gated_options(
+                        state=response.state,
+                        intent=llm_intent,
+                        bucket=bucket,
+                        input_type=response.input_type  # Permission from state config
+                    )
+                    
+                    # Apply intent-gated options - HYBRID UI (text + buttons)
+                    # Always keep text input available, show buttons alongside when appropriate
+                    if intent_gated_options:
+                        response.options = intent_gated_options
+                    else:
+                        response.options = None
+                    # ALWAYS allow text input (hybrid UI - user can type OR click)
+                    response.input_type = "text"
+                    logger.info(f"[UC1] Hybrid UI: intent={llm_intent.value}, options={intent_gated_options}")
                 
-                # Yield SSE chunks (message now populated)
+                # Add assistant message to memory for future context
+                if response.message:
+                    memory_mgr.add_ai_message(session_id, response.message)
+                
+                # Yield SSE chunks
                 for chunk in response.to_sse_chunks():
                     yield chunk
                 
@@ -357,10 +439,9 @@ class OptimizedChatbot:
                             conversation_history_for_redis.append(
                                 {"role": msg[0], "content": msg[1]}
                             )
-                            
-                    top_n_value = _calculate_dynamic_top_n(
-                        query, conversation_history_for_redis
-                    )
+                    
+                    # Fixed top_n=4 for consistent retrieval (removed dynamic calculation)
+                    top_n_value = 4
                     
                     tasks.append(loop.run_in_executor(
                         None,
@@ -372,16 +453,11 @@ class OptimizedChatbot:
                         ),
                     ))
                 
-                # Task 2: User Details (run in executor as it might be blocking DB call if not cached)
-                # Note: get_user_details_from_db now checks cache first, so it's fast
-                # We wrap it in a lambda to make it awaitable if it's not async
+                # Task 2: User Details - single DB query for both details and known flag
+                # This saves ~200-400ms by eliminating redundant DB round-trip
                 def fetch_user_details():
-                    details = get_user_details_from_db(session_id)
-                    known = details.get("user_details_known", False)
-                    if not details:
-                         # Fallback
-                         known = get_user_details_known_from_db(session_id)
-                    return details, known
+                    from app.api.helpers import get_user_session_info
+                    return get_user_session_info(session_id)
                 
                 tasks.append(loop.run_in_executor(None, fetch_user_details))
                 
@@ -666,54 +742,8 @@ class OptimizedChatbot:
             )
             trigger_form = False
             trigger_reason = ""
-            if not user_details_known:
-                # DYNAMIC LOGIC: Let LLM determine funnel stage based on conversation analysis
-                # Only enforce minimum safety (count >= 2) and fallback (count >= 10)
-                
-                if funnel_stage == "action":
-                    # LLM detected Action stage - user wants to connect or shows strong buying intent
-                    # MODIFIED: Instead of triggering form, we let the LLM Ask for details (as per prompt instructions)
-                    if count >= 2:
-                        logger.info(
-                            f"[LeadCapture] Action stage detected. Delegating data collection to LLM conversation. (count={count})"
-                        )
-                    else:
-                        logger.info(
-                            f"[LeadCapture] Action stage detected but count={count} < 2 - waiting for minimum messages"
-                        )
-                elif funnel_stage == "intent":
-                    # LLM detected Intent stage - user shows buying signals
-                    # MODIFIED: Instead of triggering form, we let the LLM Ask for details
-                    if count >= 2:
-                        logger.info(
-                            f"[LeadCapture] Intent stage detected. Delegating data collection to LLM conversation. (count={count})"
-                        )
-                    else:
-                        logger.info(
-                            f"[LeadCapture] Intent stage detected but count={count} < 2 - waiting for minimum messages"
-                        )
-                elif funnel_stage == "interest":
-                    # LLM detected Interest stage - user is engaged
-                    # MODIFIED: Instead of triggering form, we let the LLM Ask for details
-                    if count >= 3:
-                        logger.info(
-                            f"[LeadCapture] Interest stage detected. Delegating data collection to LLM conversation. (count={count})"
-                        )
-                    else:
-                        logger.info(
-                            f"[LeadCapture] Interest stage detected but count={count} < 3 - continue building rapport"
-                        )
-                elif count >= 10:
-                    # Fallback: If conversation is extended without form trigger, trigger anyway
-                    trigger_form = True
-                    trigger_reason = "conversation_length_fallback"
-                    logger.info(
-                        f"[FORM_DEBUG] Fallback trigger: Extended conversation without form (count={count})"
-                    )
-                else:
-                    logger.info(
-                        f"[FORM_DEBUG] No trigger conditions met. funnel_stage='{funnel_stage}', count={count} - LLM will determine next stage"
-                    )
+            # REMOVED: Form triggering logic and fallback deleted to prevent input blocking.
+            # The form will NEVER trigger automatically. Lead capture is fully conversational.
 
             # Only yield the assistant response if we are NOT about to trigger a form
             if not trigger_form:
@@ -811,7 +841,7 @@ class OptimizedChatbot:
             # Use cached user_details_known
             # Include sources for traceability and prospect_profile for session context
             meta_chunk = {
-                "user_details_known": user_details_known,
+                # "user_details_known": user_details_known, # REMOVED to prevent frontend blocking
                 **({"user_network_id": user_network_id} if user_network_id else {}),
                 **({"sources": sources} if sources else {}),
                 **({"prospect_profile": prospect_profile} if prospect_profile else {}),

@@ -1,354 +1,459 @@
-# UC1 LLM Adapter - SOLE LANGUAGE AUTHORITY
+# UC1 LLM Adapter - ACC IMPLEMENTATION (2026-01-12)
 #
-# ARCHITECTURE INVARIANT:
-#   This adapter generates 100% of user-visible language.
-#   The orchestrator generates 0%.
+# =============================================================================
+# ARCHITECTURAL LAW (NON-NEGOTIABLE):
+#   If a fact exists in slots and is relevant to the turn,
+#   the LLM MUST see it via the anchor.
+#   Violation of this rule is a system bug, not a model issue.
+# =============================================================================
 #
-# The fine-tuned model generates natural language based on:
-# - Current state (UC1State)
-# - Response intent (ResponseIntent) 
-# - Conversation context (slots, bucket)
-#
-# Fallback templates are CIRCUIT BREAKERS only - minimal, neutral text
-# used when LLM fails, never for normal operation.
+# ARCHITECTURE:
+#   Single canonical prompt. Single LLM call path.
+#   State controls flow. State never controls language.
+#   LLM reasons first. Orchestrator enforces after.
+#   Anchor is MANDATORY - empty anchor past ENTRY is a crash.
 
 import os
-from typing import Optional, Dict, List
+from enum import Enum
+from typing import Optional, Dict, Tuple
 from openai import OpenAI
 from app.orchestrator.uc1_config import UC1Config, CapabilityBucket
 from app.orchestrator.slot_manager import UC1Slots
 from app.orchestrator.state_machine import UC1State, ResponseIntent
 from app.logger import get_logger
+from app.utils.conversation_memory import get_session_memory_manager
 
 logger = get_logger("llm_adapter")
 
-# Fine-tuned UC1 model ID
+
+# =========================================================================
+# INTENT ENUM - LLM infers intent from natural language
+# =========================================================================
+class LLMIntent(str, Enum):
+    """
+    Intent inferred by LLM from user's natural language.
+    
+    State allows. Intent decides.
+    No state/bucket/flow hints injected into LLM.
+    """
+    ACKNOWLEDGED = "acknowledged"      # User acknowledged info ("ok", "got it")
+    DECLINED = "declined"              # User rejected/negated ("no", "nope")
+    EXPLORING = "exploring"            # User is exploring/asking questions
+    READY_FOR_CTA = "ready_for_cta"    # User shows readiness for next steps
+    CLOSING = "closing"                # User wants to end conversation
+    UNCLEAR = "unclear"                # Cannot determine intent
+
+
+# =========================================================================
+# OUTPUT VIOLATION ENUM - Signals for rejected LLM output (ACC Phase 2)
+# =========================================================================
+class OutputViolation(Enum):
+    """
+    Signals returned when LLM output violates Authoritative Context Contract.
+    
+    Orchestrator decides recovery action, not this adapter.
+    This preserves text-blind orchestrator invariant.
+    """
+    REDUNDANT_QUESTION = "redundant_question"  # Asked for already-known info
+
+
+# =========================================================================
+# SLOT SATURATION PATTERNS - Questions prohibited when slot is filled
+# =========================================================================
+# These patterns are BLOCKED when context_signal slot is filled
+CONTEXT_SIGNAL_PROHIBITIONS = [
+    "what's the biggest challenge",
+    "what's your biggest challenge",
+    "what problem are you trying to solve",
+    "what are you looking to build",
+    "what challenge",
+    "what's your main goal",
+    "what are you trying to accomplish",
+    "tell me about your challenge",
+    "what brings you here",
+    "what's the problem",
+]
+
+
+# Fine-tuned UC1 model ID (uc1-render-clean-2026-01-13 - DETERMINISTIC ALIGNED)
+# Trained on: reflection, alternatives, exit, meta — NO flow control
 UC1_FINE_TUNED_MODEL = os.getenv(
     "UC1_FINE_TUNED_MODEL",
-    "ft:gpt-4.1-mini-2025-04-14:info-ditstek-com:uc1-chatbot:CvNCcniL"
+    "ft:gpt-4.1-mini-2025-04-14:info-ditstek-com:uc1-chatbot:CxTZSPpZ"
 )
 
-# Fallback model
-FALLBACK_MODEL = "gpt-4.1-mini-2025-04-14"
 
+# =========================================================================
+# CANONICAL SYSTEM PROMPT — DELIMITER-BASED INTENT (2026-01-12)
+# =========================================================================
+# This is the ONLY system prompt. No variants. No extensions. No runtime edits.
+# LLM emits intent via delimiter (robust for streaming). No JSON required.
+# =========================================================================
+CANONICAL_SYSTEM_PROMPT = """You are an AI assistant representing DITSTEK.
 
-# Intent-to-rules mapping for fine-tuned model
-INTENT_RULES: Dict[ResponseIntent, str] = {
-    ResponseIntent.PROMPT: "Ask the appropriate question for this state. Be concise and consultative.",
-    ResponseIntent.RETRY: "User input was unclear or empty. Ask again politely without repeating yourself.",
-    ResponseIntent.TRANSITION: "Acknowledge what user shared and smoothly transition to the next topic.",
-    ResponseIntent.ACKNOWLEDGE: "Acknowledge user by name warmly. Show you're listening.",
-    ResponseIntent.REFLECT: "Reflect on what user shared, showing understanding. Then ask a follow-up.",
-    ResponseIntent.PRESENT: "Present the options clearly. Be consultative, not pushy.",
-    ResponseIntent.EXIT: "Provide appropriate closure. Thank the user.",
-}
+Your responsibility is to understand the user's intent from natural language and respond clearly, concisely, and naturally.
 
+You are not aware of any internal conversation states, flows, funnels, policies, or system logic.
+You respond only to what the user actually says.
 
-# Minimal fallback templates (circuit breakers only, not dialogue)
-FALLBACK_TEMPLATES: Dict[UC1State, Dict[ResponseIntent, str]] = {
-    UC1State.ENTRY: {
-        ResponseIntent.PROMPT: "How would you like to start?",
-    },
-    UC1State.CAPABILITY_SELECTION: {
-        ResponseIntent.RETRY: "Please select an option above.",
-    },
-    UC1State.CONTEXT_QUESTION: {
-        ResponseIntent.PROMPT: "Could you tell me more?",
-        ResponseIntent.RETRY: "I'd love to hear more about that.",
-    },
-    UC1State.NAME_CAPTURE: {
-        ResponseIntent.PROMPT: "What should I call you?",
-        ResponseIntent.RETRY: "Could you share your name?",
-    },
-    UC1State.EXPLORATION_LAYER: {
-        ResponseIntent.PROMPT: "What's the biggest challenge you're facing?",
-        ResponseIntent.REFLECT: "That makes sense. Many teams face similar challenges.",
-    },
-    UC1State.AI_SYNTHESIS: {
-        ResponseIntent.PRESENT: "Here are a few ways we typically approach this:",
-    },
-    UC1State.CONSULTATIVE_ALTERNATIVES: {
-        ResponseIntent.PRESENT: "Which of these resonates most with your situation?",
-    },
-    UC1State.RECOMMENDATION: {
-        ResponseIntent.PRESENT: "How would you like to move forward?",
-        ResponseIntent.RETRY: "What would you like to do next?",
-    },
-    UC1State.EXIT: {
-        ResponseIntent.EXIT: "Thanks for chatting! Feel free to come back anytime.",
-    },
-}
+CRITICAL RULES:
+- NEVER echo, quote, or repeat context metadata back to the user (e.g., "Focus: X | Goal: Y | Name: Z" is FORBIDDEN)
+- Use provided context to inform your response, but speak naturally as if you already know this information
+- Reference what the user has shared in previous messages to show you're listening
+- When the user shares a problem, ask specific follow-up questions about THEIR situation
 
+Behavior rules:
+- If the user asks a clear question, answer it directly with specific, actionable guidance
+- If the input is vague or ambiguous, ask one clarifying question about their specific situation
+- If the user gives a casual acknowledgment (e.g., "ok", "yeah", "good to know"), acknowledge briefly and offer a relevant next step or question
+- Be grounded in DITSTEK's services and capabilities without using marketing or sales language
+- Do not assume the user wants to proceed, commit, schedule, or take next steps unless they explicitly indicate interest
+- Do not introduce calls, demos, meetings, or contact requests by default
 
-# Mapping from UC1State enum to training data state names
-# Training format: UC1_S[N]_[NAME]
-STATE_TRAINING_NAMES: Dict[UC1State, str] = {
-    UC1State.ENTRY: "UC1_S0_ENTRY",
-    UC1State.CAPABILITY_SELECTION: "UC1_S1_CAPABILITY_PICK",
-    UC1State.CONTEXT_QUESTION: "UC1_S2_CONTEXT_CLARIFIER",
-    UC1State.NAME_CAPTURE: "UC1_S3_NAME_CAPTURE",
-    UC1State.EXPLORATION_LAYER: "UC1_S5_EXPLORATION_LAYER",
-    UC1State.AI_SYNTHESIS: "UC1_S6_ALTERNATIVES",
-    UC1State.CONSULTATIVE_ALTERNATIVES: "UC1_S6_ALTERNATIVES",
-    UC1State.RECOMMENDATION: "UC1_S7_EARNED_CTA",
-    UC1State.EXIT: "UC1_S8_CLOSE",
-}
+Response style:
+- Natural, professional, conversational
+- 2–5 sentences unless more detail is requested
+- Consultative, not directive
+- Reference specific details from the conversation to show you're paying attention
+- No scripted transitions
+- No multiple questions in one response
+
+Your goal is to maintain a meaningful, context-aware conversation that feels human, helpful, and intelligent.
+
+After your response, add a final line exactly in this format:
+<INTENT>: acknowledged | exploring | ready_for_cta | closing | unclear
+
+INTENT values:
+- acknowledged — user acknowledged info ("ok", "got it", "thanks")
+- exploring — user is asking questions or exploring options
+- ready_for_cta — user explicitly indicates readiness (wants to schedule, discuss, proceed)
+- closing — user wants to end the conversation
+- unclear — cannot determine intent from input
+
+Example output:
+That makes sense — improving smart responses and engagement usually requires tightening how intent is handled across conversations.
+
+<INTENT>: exploring
+"""
 
 
 class ConstrainedLLMAdapter:
     """
-    SOLE AUTHORITY for user-visible language in UC1 flow.
+    Single language authority for UC1.
     
-    The fine-tuned model generates ALL responses based on:
-    - State (where we are)
-    - Intent (why we're speaking)
-    - Context (slots, bucket, user input)
-    
-    Orchestrator is text-blind; this adapter is the only voice.
+    One prompt. One LLM call path. State is invisible to the LLM.
     """
     
     def __init__(self, config: UC1Config):
-        """
-        Initialize the adapter with UC1 config and OpenAI client.
-        
-        Args:
-            config: The validated UC1Config
-        """
         self.config = config
-        self.forbidden_topics = set(t.lower() for t in config.forbidden_topics)
-        
-        # Initialize OpenAI client
         self._client = None
-        self._model = UC1_FINE_TUNED_MODEL
-        
+    
     @property
     def client(self) -> OpenAI:
         """Lazy-load OpenAI client."""
         if self._client is None:
             api_key = os.getenv("OPENAI_API_KEY")
             if not api_key:
-                logger.warning("[LLMAdapter] OPENAI_API_KEY not set, using fallback templates")
+                logger.warning("[LLMAdapter] OPENAI_API_KEY not set")
                 return None
             self._client = OpenAI(api_key=api_key)
         return self._client
+    
+    # =========================================================================
+    # SINGLE LLM CALL CONTRACT (THE ONLY WAY TO CALL THE MODEL)
+    # =========================================================================
+    def _canonical_llm(self, user_text: str, anchor: str = "", session_id: str = None) -> Tuple[str, LLMIntent]:
+        """
+        The only LLM call in UC1. No branching. No variants.
+        
+        ANCHOR INJECTION:
+            Anchor is injected via user-message prefix (NOT system prompt).
+            This preserves the single-prompt invariant.
+        
+        CONVERSATION MEMORY:
+            Recent conversation history is injected as multi-turn messages.
+            This provides context continuity across turns.
+        
+        Returns:
+            Tuple[str, LLMIntent]: (response_text, inferred_intent)
+        
+        Intent is extracted via delimiter (<INTENT>:) for robustness.
+        This survives streaming, partial output, and never corrupts text.
+        """
+        if self.client is None:
+            return "[Service unavailable]", LLMIntent.UNCLEAR
+        
+        # Build user message with anchor prefix
+        user_message = f"[Context]\n{anchor}\n\nUser: {user_text}" if anchor else user_text
+        
+        # Build messages array with conversation history
+        messages = [{"role": "system", "content": CANONICAL_SYSTEM_PROMPT}]
+        
+        # Inject recent conversation history for context continuity
+        if session_id:
+            try:
+                memory_mgr = get_session_memory_manager()
+                memory = memory_mgr.get_or_create_memory(session_id)
+                # Get recent messages (last 6 = 3 exchanges) for context
+                history_messages = memory.chat_memory.messages[-6:] if memory.chat_memory.messages else []
+                for msg in history_messages:
+                    role = "user" if msg.type == "human" else "assistant"
+                    messages.append({"role": role, "content": msg.content})
+                if history_messages:
+                    logger.debug(f"[LLMAdapter] Injected {len(history_messages)} history messages for session {session_id}")
+            except Exception as e:
+                logger.warning(f"[LLMAdapter] Failed to load conversation history: {e}")
+        
+        # Add current user message
+        messages.append({"role": "user", "content": user_message})
+        
+        # Store user message in memory BEFORE LLM call
+        if session_id and user_text:
+            try:
+                memory_mgr = get_session_memory_manager()
+                memory_mgr.add_user_message(session_id, user_text)
+            except Exception as e:
+                logger.warning(f"[LLMAdapter] Failed to store user message: {e}")
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=UC1_FINE_TUNED_MODEL,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=500,
+            )
+            raw = response.choices[0].message.content.strip()
+            
+            # Delimiter-based intent parsing (robust, never blocks UI)
+            if "<INTENT>:" in raw:
+                text, intent_part = raw.rsplit("<INTENT>:", 1)
+                text = text.strip()
+                intent_str = intent_part.strip().lower()
+                
+                # Map to enum (includes declined)
+                intent_map = {
+                    "acknowledged": LLMIntent.ACKNOWLEDGED,
+                    "declined": LLMIntent.DECLINED,
+                    "exploring": LLMIntent.EXPLORING,
+                    "ready_for_cta": LLMIntent.READY_FOR_CTA,
+                    "closing": LLMIntent.CLOSING,
+                    "unclear": LLMIntent.UNCLEAR,
+                }
+                intent = intent_map.get(intent_str, LLMIntent.UNCLEAR)
+                logger.info(f"[LLMAdapter] Intent inferred: {intent.value}")
+                
+                # Store assistant response in memory AFTER successful LLM call
+                if session_id and text:
+                    try:
+                        memory_mgr = get_session_memory_manager()
+                        memory_mgr.add_ai_message(session_id, text)
+                    except Exception as e:
+                        logger.warning(f"[LLMAdapter] Failed to store AI message: {e}")
+                
+                return text, intent
+            
+            # ================================================================
+            # FALLBACK: Heuristic intent inference for non-retrained models
+            # ================================================================
+            # The fine-tuned model wasn't trained with <INTENT>: format
+            # Use pattern matching on user input as temporary fallback
+            intent = self._infer_intent_heuristic(user_text, raw)
+            logger.info(f"[LLMAdapter] Intent via heuristic: {intent.value}")
+            
+            # Store assistant response in memory (fallback path)
+            if session_id and raw:
+                try:
+                    memory_mgr = get_session_memory_manager()
+                    memory_mgr.add_ai_message(session_id, raw)
+                except Exception as e:
+                    logger.warning(f"[LLMAdapter] Failed to store AI message: {e}")
+            
+            return raw, intent
+            
+        except Exception as e:
+            logger.warning(f"[LLMAdapter] LLM call failed: {e}")
+            return "[Service unavailable]", LLMIntent.UNCLEAR
+    
+    def _infer_intent_heuristic(self, user_input: str, bot_response: str) -> LLMIntent:
+        """
+        Heuristic intent inference fallback.
+        
+        Used when fine-tuned model doesn't emit <INTENT>: delimiter.
+        This is a TEMPORARY measure until model is retrained.
+        """
+        input_lower = user_input.lower().strip()
+        response_lower = bot_response.lower()
+        
+        # CLOSING patterns
+        closing_patterns = [
+            "bye", "goodbye", "no thanks", "not interested", 
+            "i'll pass", "maybe later", "not now"
+        ]
+        if any(p in input_lower for p in closing_patterns):
+            return LLMIntent.CLOSING
+        
+        # READY_FOR_CTA patterns (explicit readiness) - CHECK BEFORE ACKNOWLEDGED
+        # These indicate user wants to proceed/get help
+        cta_patterns = [
+            # Explicit scheduling/contact
+            "schedule", "book a call", "let's talk", "contact me",
+            "ready to", "want to proceed", "sign me up", "get started",
+            "discuss my", "talk to someone", "connect me",
+            # Natural readiness signals (2026-01-14)
+            "yes please", "sure please", "please help", "can you help",
+            "help me", "that would be great", "sounds good", "let's do",
+            "i'd like to", "i would like", "i want to", "let's proceed",
+            "what's next", "next steps", "how do we start", "how to start",
+            "i'm ready", "i am ready", "ready for", "move forward"
+        ]
+        if any(p in input_lower for p in cta_patterns):
+            return LLMIntent.READY_FOR_CTA
+        
+        # ACKNOWLEDGED patterns (short affirmations)
+        ack_patterns = ["ok", "okay", "got it", "thanks", "sure", "alright", "i see"]
+        if len(input_lower.split()) <= 4 and any(p in input_lower for p in ack_patterns):
+            return LLMIntent.ACKNOWLEDGED
+        
+        # If bot response asks a question, user is likely exploring
+        if "?" in response_lower:
+            return LLMIntent.EXPLORING
+        
+        # Default to exploring (safe default for conversation continuation)
+        return LLMIntent.EXPLORING
+    
+    # =========================================================================
+    # PUBLIC API - ALL USE _canonical_llm
+    # =========================================================================
+    
+    def _build_anchor(self, slots: UC1Slots, bucket: Optional[CapabilityBucket]) -> str:
+        """
+        Build grounding context from slots. Never returns empty after CONTEXT_QUESTION.
+        
+        ACC INVARIANT: If information exists in slots, it MUST appear in anchor.
+        
+        FORMAT: Uses instruction-style language to prevent LLM from echoing context.
+        """
+        parts = []
+        
+        # Build context summary (internal reference, not for echoing)
+        if bucket:
+            parts.append(f"The user is interested in: {bucket.trigger}")
+        if slots.context_signal:
+            signal = slots.context_signal[:150]
+            if len(slots.context_signal) > 150:
+                signal += "..."
+            parts.append(f"Their specific situation: {signal}")
+        if slots.user_name:
+            parts.append(f"Their name is {slots.user_name}")
+        if slots.selected_alternative:
+            parts.append(f"They chose to focus on: {slots.selected_alternative}")
+        
+        if not parts:
+            return ""
+        
+        # Wrap with instruction to prevent echoing
+        context_summary = ". ".join(parts) + "."
+        return f"[CONTEXT - Do NOT echo or quote this back. Use it to inform your response.]\n{context_summary}"
+    
+    def validate_output(self, response: str, slots: UC1Slots) -> Optional[OutputViolation]:
+        """
+        Validate LLM output against slot saturation rules.
+        
+        Returns signal if violation detected; orchestrator decides recovery.
+        This preserves text-blind orchestrator invariant.
+        
+        ACC INVARIANT: Never ask for information already in slots.
+        """
+        if not response or not slots:
+            return None
+            
+        response_lower = response.lower()
+        
+        # If context_signal exists, block redundant qualification questions
+        if slots.context_signal:
+            for pattern in CONTEXT_SIGNAL_PROHIBITIONS:
+                if pattern in response_lower:
+                    logger.warning(f"[ACC] Output violation: redundant question '{pattern}' when context_signal exists")
+                    return OutputViolation.REDUNDANT_QUESTION
+        
+        return None
     
     def generate_state_response(
         self,
         *,
         state: UC1State,
-        response_intent: ResponseIntent,
+        response_intent: ResponseIntent = None,
         user_input: Optional[str] = None,
         slots: Optional[UC1Slots] = None,
         bucket: Optional[CapabilityBucket] = None,
         exploration_turn: int = 0,
-    ) -> str:
+        session_id: Optional[str] = None,
+    ) -> Tuple[str, LLMIntent]:
         """
-        SOLE AUTHORITY for user-visible language.
+        Single entry point for all language generation.
         
-        Generates response using fine-tuned model based on state + intent.
-        Falls back to minimal template ONLY if LLM fails.
+        ACC HARD GATES:
+        1. Slots required for all LLM calls
+        2. Anchor mandatory after initial states
+        3. Returns (text, intent) tuple
         
-        Args:
-            state: Current conversation state
-            response_intent: WHY we're speaking (not what)
-            user_input: User's last message (if any)
-            slots: Current conversation slots
-            bucket: Selected capability bucket (if any)
-            exploration_turn: Current exploration turn (for S5)
-        
-        Returns:
-            Natural language response from fine-tuned model
+        State is invisible to the LLM. Intent is inferred from user input.
         """
-        # Use training-compatible state name (critical for fine-tuned model)
-        state_name = STATE_TRAINING_NAMES.get(state, f"UC1_{state.value.upper()}")
+        # =============================================================
+        # ACC HARD GATE 1: Slots required
+        # =============================================================
+        assert slots is not None, "ACC Violation: Slots required for LLM call"
         
-        # Get intent-specific rules
-        rules = INTENT_RULES.get(response_intent, "Respond appropriately.")
+        # =============================================================
+        # ACC: Build anchor from slots
+        # =============================================================
+        anchor = self._build_anchor(slots, bucket)
         
-        # Build context from slots
-        capability = bucket.trigger if bucket else None
-        context = None
-        user_name = None
+        # =============================================================
+        # ACC HARD GATE 2: Anchor mandatory after initial states
+        # =============================================================
+        # =============================================================
+        # ACC HARD GATE 2: Anchor mandatory after initial states
+        # =============================================================
+        initial_states = {UC1State.ENTRY, UC1State.CAPABILITY_SELECTION}
+        if state not in initial_states and not anchor:
+            logger.error(f"[ACC] Anchor empty in non-initial state {state.value}")
+            # Soft-fail in production to avoid crashes, but log loudly
+            # In development, this should be an assert
         
-        if slots:
-            context = slots.context_signal
-            user_name = slots.user_name
-        
-        # Add user name to rules if acknowledging
-        if response_intent == ResponseIntent.ACKNOWLEDGE and user_name:
-            rules = f"User's name is {user_name}. {rules}"
-        
-        # Add exploration context
-        if state == UC1State.EXPLORATION_LAYER and exploration_turn > 0:
-            rules = f"Exploration turn {exploration_turn}. {rules}"
-        
-        # Try fine-tuned model
-        response = self._generate_with_state(
-            state=state_name,
-            user_message=user_input or "",
-            capability=capability,
-            context=context,
-            rules=rules,
+        # =============================================================
+        # ARCHITECTURAL GUARD: Fixed-prompt states MUST NOT call LLM
+        # =============================================================
+        # These states emit language directly from config via orchestrator.
+        # LLM is ONLY for rephrasing, explaining, reflecting on user input.
+        # This assertion prevents future regressions.
+        FIXED_PROMPT_STATES = {UC1State.ENTRY, UC1State.CONTEXT_QUESTION, UC1State.NAME_CAPTURE, UC1State.EXIT}
+        assert state not in FIXED_PROMPT_STATES, (
+            f"ACC VIOLATION: LLM called for fixed-prompt state {state.value}. "
+            "This must be emitted by the orchestrator."
         )
         
-        if response:
-            logger.info(f"[LLMAdapter] Generated response for {state.value}/{response_intent.value}")
-            return response
+        logger.info(f"[ACC] Anchor injected: {anchor[:80]}..." if anchor else "[ACC] No anchor (initial state)")
         
-        # Fallback to minimal template (circuit breaker)
-        fallback = FALLBACK_TEMPLATES.get(state, {}).get(
-            response_intent, 
-            "Please continue."
-        )
-        logger.warning(f"[LLMAdapter] Using fallback for {state.value}/{response_intent.value}")
-        return fallback
+        return self._canonical_llm(user_input or "", anchor=anchor, session_id=session_id)
     
-    def _generate_with_state(
-        self,
-        state: str,
-        user_message: str,
-        capability: Optional[str] = None,
-        context: Optional[str] = None,
-        rules: str = "",
-    ) -> Optional[str]:
-        """
-        Generate response using fine-tuned model with state context.
-        
-        Args:
-            state: Current UC1 state (e.g., "UC1_S5_EXPLORATION_LAYER")
-            user_message: The user's input
-            capability: Optional capability name
-            context: Optional context label
-            rules: State-specific rules for the model
-            
-        Returns:
-            Generated response or None if fallback needed
-        """
-        if self.client is None:
-            return None
-            
-        # Build system message matching training format
-        system_lines = [f"State: {state}"]
-        if capability:
-            system_lines.append(f"Capability: {capability}")
-        if context:
-            system_lines.append(f"Context: {context}")
-        if rules:
-            system_lines.append(f"Rules: {rules}")
-        
-        system_message = "\n".join(system_lines)
-        
-        try:
-            response = self.client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": user_message}
-                ],
-                temperature=0.7,
-                max_tokens=500
-            )
-            content = response.choices[0].message.content
-            
-            # Validate LLM output
-            if not content or not content.strip():
-                logger.warning("[LLMAdapter] Empty response from fine-tuned model")
-                return None
-            
-            if len(content.strip()) < 10:
-                logger.warning(f"[LLMAdapter] Response too short ({len(content)} chars): {content[:50]}")
-                return None
-            
-            return content.strip()
-        except Exception as e:
-            logger.warning(f"[LLMAdapter] Fine-tuned model failed: {e}, using fallback")
-            return None
-    
-    def paraphrase_synthesis(
-        self,
-        bucket: CapabilityBucket,
-        slots: UC1Slots,
-    ) -> str:
-        """
-        Generate AI synthesis using fine-tuned model or template fallback.
-        
-        Args:
-            bucket: The selected capability bucket
-            slots: Current conversation slots
-        
-        Returns:
-            str: The AI synthesis paragraph
-        """
-        user_name = slots.user_name or "there"
-        context = slots.context_signal or "your goals"
-        context_label = context.replace("_", " ").title() if context else "This Area"
-        
-        # Try fine-tuned model first
-        generated = self._generate_with_state(
-            state="UC1_S3_NAME_CAPTURE",
-            user_message=user_name,
-            capability=bucket.trigger,
-            context=context_label,
-            rules="Thank user by name. Synthesize understanding so far. No CTA."
-        )
-        
-        if generated:
-            logger.info(f"[LLMAdapter] Generated synthesis using fine-tuned model for {bucket.id}")
-            return generated
-        
-        # Template fallback
-        goal = bucket.goal
-        synthesis = (
-            f"Thanks for sharing. You're focused on {goal.lower()}, "
-            f"and based on what you've shared about {context[:50]}{'...' if len(context) > 50 else ''}, "
-            f"here's how we typically approach this.\n\n"
-            f"We see a few possible directions:"
-        )
-        
-        logger.info(f"[LLMAdapter] Generated synthesis using template for {bucket.id}")
-        return synthesis
-    
-    def format_alternatives(
-        self,
-        bucket: CapabilityBucket,
-    ) -> str:
-        """
-        Format the 3 alternatives for display.
-        
-        The alternatives are FIXED by the config - LLM only formats text.
-        System has already selected which alternatives to show (all 3 from bucket).
-        
-        Args:
-            bucket: The capability bucket containing alternatives
-        
-        Returns:
-            str: Formatted alternatives text
-        """
-        # Deterministic formatting - no LLM creativity here
-        alternatives = bucket.alternatives
-        
-        formatted_lines = []
-        for i, alt in enumerate(alternatives, 1):
-            formatted_lines.append(f"{i}. **{alt}**")
-        
-        result = "\n".join(formatted_lines)
-        logger.info(f"[LLMAdapter] Formatted {len(alternatives)} alternatives for {bucket.id}")
-        return result
-    
-    def format_exit_ctas(self) -> str:
-        """
-        Format the 4 exit CTAs for display.
-        
-        CTAs are FIXED by config - this just formats them for display.
-        
-        Returns:
-            str: Formatted CTAs text
-        """
-        lines = ["\n**What would you like to do next?**\n"]
-        for cta in self.config.exit_ctas:
-            lines.append(f"- {cta.choice}")
-        
+    # =========================================================================
+    # CONFIG-BASED METHODS (NO LLM - KEEP FOR ORCHESTRATOR)
+    # =========================================================================
+    def generate_capability_selection_prompt(self) -> str:
+        """Format capability options from config."""
+        lines = ["\n**Select a capability area:**\n"]
+        for bucket in self.config.capability_buckets:
+            lines.append(f"- {bucket.name}")
         return "\n".join(lines)
+    
+    def generate_context_question_prompt(self, bucket: CapabilityBucket) -> str:
+        """Get context question from config."""
+        return bucket.context_question
+    
+    def generate_name_capture_prompt(self) -> str:
+        """Get name capture prompt from config."""
+        return self.config.name_capture_prompt
     
     def generate_exit_summary(
         self,
@@ -356,235 +461,15 @@ class ConstrainedLLMAdapter:
         bucket: Optional[CapabilityBucket],
     ) -> str:
         """
-        Generate a personalized exit summary.
-        
-        This summarizes the conversation and provides closure.
-        
-        Args:
-            slots: Current conversation slots
-            bucket: The capability bucket (if selected)
-        
-        Returns:
-            str: Exit summary text
+        Deterministic exit summary. Zero LLM.
         """
-        user_name = slots.user_name or "there"
+        name = slots.user_name or "there"
         
-        if slots.selected_cta_outcome == "UC2":
-            summary = (
-                f"Great, {user_name}! I'll connect you with our team to discuss "
-                f"your requirements in detail. They'll follow up shortly."
-            )
-        elif slots.selected_cta_outcome == "calendar":
-            summary = (
-                f"Perfect, {user_name}! I'll help you schedule a quick call. "
-                f"Check your email for the calendar invite."
-            )
-        elif slots.selected_cta_outcome == "loop":
-            # This shouldn't generate exit summary - it loops back
-            summary = (
-                f"No problem, {user_name}! Let's explore more options. "
-                f"What else would you like to learn about?"
-            )
-        else:  # exit
-            summary = (
-                f"Thanks for chatting, {user_name}! Feel free to come back "
-                f"anytime. You can also explore our website for more details."
-            )
-        
-        logger.info(f"[LLMAdapter] Generated exit summary for outcome: {slots.selected_cta_outcome}")
-        return summary
-    
-    def generate_capability_selection_prompt(self) -> str:
-        """
-        Generate the capability selection prompt showing all 6 options.
-        
-        Returns:
-            str: Formatted capability options
-        """
-        lines = []
-        for bucket in self.config.capability_buckets:
-            lines.append(f"- {bucket.trigger}")
-        
-        return "\n".join(lines)
-    
-    def generate_context_question_prompt(self, bucket: CapabilityBucket) -> str:
-        """
-        Get the context question for a capability bucket.
-        
-        Note: This is NOT LLM-generated - it comes directly from config.
-        The question is FIXED per bucket.
-        
-        Args:
-            bucket: The selected capability bucket
-        
-        Returns:
-            str: The context question for this bucket
-        """
-        # Direct from config - no LLM involvement
-        return bucket.context_question
-    
-    def generate_name_capture_prompt(self) -> str:
-        """
-        Get the name capture prompt.
-        
-        Returns:
-            str: The name capture question
-        """
-        return self.config.name_capture_prompt
-    
-    # =========================================================================
-    # FINE-TUNED MODEL METHODS (S5, S6, S7)
-    # =========================================================================
-    
-    def generate_exploration_question(
-        self,
-        bucket: CapabilityBucket,
-        slots: UC1Slots,
-        question_number: int = 1,
-    ) -> str:
-        """
-        Generate an exploration question using the fine-tuned model.
-        
-        Args:
-            bucket: The selected capability bucket
-            slots: Current conversation slots
-            question_number: 1 or 2 (first or second exploration question)
-        
-        Returns:
-            str: The exploration question
-        """
-        context_label = (slots.context_signal or "this area").replace("_", " ").title()
-        user_input = slots.last_user_message or "That makes sense"
-        
-        rules = f"Ask exploration question {question_number}. Open-ended but bounded. No CTA."
-        
-        generated = self._generate_with_state(
-            state="UC1_S5_EXPLORATION_LAYER",
-            user_message=user_input,
-            capability=bucket.trigger,
-            context=context_label,
-            rules=rules,
-        )
-        
-        if generated:
-            logger.info(f"[LLMAdapter] Generated exploration Q{question_number} using fine-tuned model")
-            return generated
-        
-        # Template fallback
-        fallback_questions = [
-            "What's the biggest challenge you're facing right now in this area?",
-            "What prompted you to look for help at this point?"
-        ]
-        question = fallback_questions[min(question_number - 1, len(fallback_questions) - 1)]
-        logger.info(f"[LLMAdapter] Using template fallback for exploration Q{question_number}")
-        return f"To understand this better — {question.lower()}"
-    
-    def generate_exploration_reflection(
-        self,
-        bucket: CapabilityBucket,
-        slots: UC1Slots,
-        user_response: str,
-    ) -> str:
-        """
-        Generate a reflection on user's exploration answer.
-        
-        Args:
-            bucket: The selected capability bucket
-            slots: Current conversation slots
-            user_response: What the user said
-        
-        Returns:
-            str: The reflection response
-        """
-        context_label = (slots.context_signal or "this area").replace("_", " ").title()
-        
-        generated = self._generate_with_state(
-            state="UC1_S5_EXPLORATION_LAYER",
-            user_message=user_response,
-            capability=bucket.trigger,
-            context=context_label,
-            rules="Reflect on user response. Show understanding. No CTA.",
-        )
-        
-        if generated:
-            logger.info(f"[LLMAdapter] Generated reflection using fine-tuned model")
-            return generated
-        
-        # Template fallback
-        logger.info(f"[LLMAdapter] Using template fallback for reflection")
-        return "That makes sense. Many teams face similar challenges in this area."
-    
-    def generate_alternatives_framing(
-        self,
-        bucket: CapabilityBucket,
-        slots: UC1Slots,
-    ) -> str:
-        """
-        Generate the framing text for presenting alternatives.
-        
-        Note: The 3 alternatives themselves come from config.
-        This generates the intro/framing text.
-        
-        Args:
-            bucket: The selected capability bucket
-            slots: Current conversation slots
-        
-        Returns:
-            str: The alternatives framing text
-        """
-        context_label = (slots.context_signal or "this area").replace("_", " ").title()
-        user_input = slots.last_user_message or "Continue"
-        
-        generated = self._generate_with_state(
-            state="UC1_S6_CONSULTATIVE_ALTERNATIVES",
-            user_message=user_input,
-            capability=bucket.trigger,
-            context=context_label,
-            rules="Present exactly 3 consultative alternatives. Give recommendation. No CTA yet.",
-        )
-        
-        if generated:
-            logger.info(f"[LLMAdapter] Generated alternatives framing using fine-tuned model")
-            return generated
-        
-        # Template fallback
-        logger.info(f"[LLMAdapter] Using template fallback for alternatives framing")
-        return "At this stage, teams in your situation usually consider a few paths:"
-    
-    def generate_cta_presentation(
-        self,
-        bucket: Optional[CapabilityBucket],
-        slots: UC1Slots,
-    ) -> str:
-        """
-        Generate the CTA presentation text.
-        
-        Note: The 4 CTAs themselves come from config.
-        This generates the intro text.
-        
-        Args:
-            bucket: The selected capability bucket (if available)
-            slots: Current conversation slots
-        
-        Returns:
-            str: The CTA presentation text
-        """
-        context_label = (slots.context_signal or "this area").replace("_", " ").title()
-        capability = bucket.trigger if bucket else "your requirements"
-        user_input = slots.last_user_message or "That makes sense"
-        
-        generated = self._generate_with_state(
-            state="UC1_S7_EARNED_CTA",
-            user_message=user_input,
-            capability=capability,
-            context=context_label,
-            rules="Present 4 CTA options. CTA is now earned.",
-        )
-        
-        if generated:
-            logger.info(f"[LLMAdapter] Generated CTA presentation using fine-tuned model")
-            return generated
-        
-        # Template fallback
-        logger.info(f"[LLMAdapter] Using template fallback for CTA presentation")
-        return "How would you like to move forward?"
+        if slots.selected_cta == "schedule_call":
+            return f"Great, {name}! We'll be in touch to schedule a call."
+        elif slots.selected_cta == "discuss_requirement":
+            return f"Perfect, {name}! We'll reach out to discuss your requirements."
+        elif slots.selected_cta == "explore_more":
+            return f"Sounds good, {name}! Feel free to explore more."
+        else:
+            return f"Thanks for chatting, {name}! Feel free to come back anytime."

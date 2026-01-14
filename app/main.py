@@ -65,6 +65,16 @@ def create_app() -> FastAPI:
         logger.error(f"Failed to initialize database connection pool: {e}")
         # Don't fail startup, pool will be initialized on first use
 
+    # Warm up RAG components in background (ChromaDB, BM25 index, embeddings)
+    # This eliminates cold-start latency on first request
+    try:
+        from core_services.warmup import warmup_rag_components
+        warmup_rag_components(background=True)
+        logger.info("RAG warm-up initiated in background")
+    except Exception as e:
+        logger.warning(f"Failed to start RAG warm-up: {e}")
+        # Non-fatal: components will lazy-load on first request
+
     # Attach FollowUpManager to app state - REMOVED for optimized flow only
     # app.state.follow_up_manager = FollowUpManager(llm)
     # logger.info("FollowUpManager initialized successfully")
