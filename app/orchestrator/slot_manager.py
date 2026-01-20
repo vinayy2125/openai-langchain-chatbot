@@ -25,6 +25,36 @@ from app.utils.conversation_memory import (
 logger = get_logger("slot_manager")
 
 
+# =============================================================================
+# SLOT WRITE PERMISSION ENFORCEMENT
+# =============================================================================
+# ARCHITECTURE LAW: Only authorized components may write UC1 slots.
+# prompts.py MUST NEVER mutate UC1 slots.
+# Any call without explicit caller should FAIL.
+# =============================================================================
+
+ALLOWED_SLOT_WRITERS = frozenset({
+    "orchestrator",      # Primary authority
+    "explorer_agent",    # Validated writes only
+})
+
+DEFAULT_CALLER = "unknown"
+
+
+def _verify_caller(caller: str, operation: str) -> None:
+    """
+    Verify caller is authorized to write slots.
+    
+    Raises:
+        PermissionError: If caller is not authorized
+    """
+    if caller not in ALLOWED_SLOT_WRITERS:
+        raise PermissionError(
+            f"[SlotManager] BLOCKED: Caller '{caller}' not authorized for '{operation}'. "
+            f"Allowed: {ALLOWED_SLOT_WRITERS}"
+        )
+
+
 # Type for capability bucket IDs
 CapabilityBucketId = Literal["UC1-A", "UC1-B", "UC1-C", "UC1-D", "UC1-E", "UC1-F"]
 
@@ -63,6 +93,7 @@ class UC1Slots:
     # Core slots
     capability_bucket: Optional[CapabilityBucketId] = None
     user_name: Optional[str] = None
+    user_email: Optional[str] = None  # NEW (2026-01-15): Email for lead capture
     context_signal: Optional[str] = None  # User's answer to context question
     
     # Exploration layer tracking (for S5 state)
@@ -80,6 +111,7 @@ class UC1Slots:
     lead_capture_asked_count: int = 0
     lead_capture_suppressed_until: int = 0  # Exchange count when suppression expires
     lead_capture_permanently_suppressed: bool = False
+    email_capture_asked_at: int = 0  # NEW: Turn when email was last asked
     
     # UC1 pause/resume tracking (for FREE_EXPLORATION)
     uc1_paused: bool = False
@@ -97,6 +129,7 @@ class UC1Slots:
     alternatives_consumed: bool = False     # Prevents re-showing alternative buttons
     frozen: bool = False                    # Hard freeze after bailout - no mutations
     free_exploration_unclear_count: int = 0 # Stabilizer trigger in FREE_EXPLORATION
+    name_declined: bool = False             # User declined to give name (offer again at CTA)
     
     # ACC Phase 3: Question budget per state
     question_counts: Optional[Dict[str, int]] = None  # state -> question count
@@ -108,6 +141,8 @@ class UC1Slots:
             filled.add("capability_bucket")
         if self.user_name and self.user_name.strip():
             filled.add("user_name")
+        if self.user_email and self.user_email.strip():
+            filled.add("user_email")
         if self.context_signal and self.context_signal.strip():
             filled.add("context_signal")
         return filled
@@ -117,6 +152,7 @@ class UC1Slots:
         return {
             "capability_bucket": self.capability_bucket,
             "user_name": self.user_name,
+            "user_email": self.user_email,
             "context_signal": self.context_signal,
             "exploration_turn": self.exploration_turn,
             "exploration_responses": self.exploration_responses,
@@ -127,6 +163,7 @@ class UC1Slots:
             "lead_capture_asked_count": self.lead_capture_asked_count,
             "lead_capture_suppressed_until": self.lead_capture_suppressed_until,
             "lead_capture_permanently_suppressed": self.lead_capture_permanently_suppressed,
+            "email_capture_asked_at": self.email_capture_asked_at,
             # UC1 pause/resume
             "uc1_paused": self.uc1_paused,
             "paused_state": self.paused_state,
@@ -139,6 +176,7 @@ class UC1Slots:
             "alternatives_consumed": self.alternatives_consumed,
             "frozen": self.frozen,
             "free_exploration_unclear_count": self.free_exploration_unclear_count,
+            "name_declined": self.name_declined,
             # ACC Phase 3
             "question_counts": self.question_counts or {},
         }
@@ -149,6 +187,7 @@ class UC1Slots:
         return cls(
             capability_bucket=data.get("capability_bucket"),
             user_name=data.get("user_name"),
+            user_email=data.get("user_email"),
             context_signal=data.get("context_signal"),
             exploration_turn=data.get("exploration_turn", 0),
             exploration_responses=data.get("exploration_responses"),
@@ -159,6 +198,7 @@ class UC1Slots:
             lead_capture_asked_count=data.get("lead_capture_asked_count", 0),
             lead_capture_suppressed_until=data.get("lead_capture_suppressed_until", 0),
             lead_capture_permanently_suppressed=data.get("lead_capture_permanently_suppressed", False),
+            email_capture_asked_at=data.get("email_capture_asked_at", 0),
             # UC1 pause/resume
             uc1_paused=data.get("uc1_paused", False),
             paused_state=data.get("paused_state"),
@@ -171,6 +211,7 @@ class UC1Slots:
             alternatives_consumed=data.get("alternatives_consumed", False),
             frozen=data.get("frozen", False),
             free_exploration_unclear_count=data.get("free_exploration_unclear_count", 0),
+            name_declined=data.get("name_declined", False),
             # ACC Phase 3
             question_counts=data.get("question_counts"),
         )
@@ -214,42 +255,112 @@ class SlotManager:
         """Get the slots for this session."""
         return self._session_slots[self.session_id]
     
-    def set_capability_bucket(self, bucket_id: CapabilityBucketId) -> None:
-        """Set the selected capability bucket."""
+    def set_capability_bucket(self, bucket_id: CapabilityBucketId, caller: str = DEFAULT_CALLER) -> None:
+        """Set the selected capability bucket. Caller must be authorized."""
+        _verify_caller(caller, "set_capability_bucket")
         self.slots.capability_bucket = bucket_id
-        logger.info(f"[SlotManager] Set capability_bucket: {bucket_id}")
+        logger.info(f"[SlotManager] Set capability_bucket: {bucket_id} (caller: {caller})")
         self._safe_persist()
     
-    def set_user_name(self, name: str) -> None:
-        """Set the user's name."""
+    def set_user_name(self, name: str, caller: str = DEFAULT_CALLER) -> None:
+        """Set the user's name. Caller must be authorized."""
+        _verify_caller(caller, "set_user_name")
         self.slots.user_name = name.strip() if name else None
-        logger.info(f"[SlotManager] Set user_name: {self.slots.user_name}")
+        logger.info(f"[SlotManager] Set user_name: {self.slots.user_name} (caller: {caller})")
         self._safe_persist()
     
-    def set_context_signal(self, signal: str) -> None:
-        """Set the user's context answer."""
+    def set_user_email(self, email: str, caller: str = DEFAULT_CALLER) -> bool:
+        """
+        Set the user's email with basic validation. Caller must be authorized.
+        
+        Args:
+            email: Email address to set
+            caller: Authorized caller identifier
+            
+        Returns:
+            bool: True if email was valid and set, False otherwise
+        """
+        _verify_caller(caller, "set_user_email")
+        import re
+        if not email:
+            return False
+        
+        email = email.strip().lower()
+        
+        # Basic email validation
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_pattern, email):
+            logger.warning(f"[SlotManager] Invalid email format: {email}")
+            return False
+        
+        self.slots.user_email = email
+        logger.info(f"[SlotManager] Set user_email: {email} (caller: {caller})")
+        self._safe_persist()
+        return True
+    
+    def mark_email_asked(self) -> None:
+        """Mark that email was asked at this turn."""
+        self.slots.email_capture_asked_at = self.slots.exchange_count
+        self._safe_persist()
+    
+    def should_ask_for_email(self, min_turns: int = 4, max_turns: int = 6) -> bool:
+        """
+        Determine if email should be requested based on progressive capture rules.
+        
+        Email is asked:
+        1. After min_turns exchanges AND we have name
+        2. OR when user shows high intent (ready_for_cta)
+        3. NOT if we already have email
+        4. NOT if we already asked within last 3 turns
+        
+        Returns:
+            bool: True if should request email
+        """
+        # Already have email
+        if self.slots.user_email:
+            return False
+        
+        # Need name first
+        if not self.slots.user_name:
+            return False
+        
+        # Don't ask too frequently
+        if self.slots.email_capture_asked_at > 0:
+            turns_since_ask = self.slots.exchange_count - self.slots.email_capture_asked_at
+            if turns_since_ask < 3:
+                return False
+        
+        # Check turn threshold
+        return self.slots.exchange_count >= min_turns
+    
+    def set_context_signal(self, signal: str, caller: str = DEFAULT_CALLER) -> None:
+        """Set the user's context answer. Caller must be authorized."""
+        _verify_caller(caller, "set_context_signal")
         self.slots.context_signal = signal.strip() if signal else None
-        logger.info(f"[SlotManager] Set context_signal: {self.slots.context_signal[:50] if self.slots.context_signal else None}...")
+        logger.info(f"[SlotManager] Set context_signal: {self.slots.context_signal[:50] if self.slots.context_signal else None}... (caller: {caller})")
         self._safe_persist()
     
-    def set_selected_alternative(self, alternative: str) -> None:
-        """Set the user's selected alternative (informational)."""
+    def set_selected_alternative(self, alternative: str, caller: str = DEFAULT_CALLER) -> None:
+        """Set the user's selected alternative. Caller must be authorized."""
+        _verify_caller(caller, "set_selected_alternative")
         self.slots.selected_alternative = alternative
-        logger.info(f"[SlotManager] Set selected_alternative: {alternative}")
+        logger.info(f"[SlotManager] Set selected_alternative: {alternative} (caller: {caller})")
         self._safe_persist()
     
-    def set_selected_cta_outcome(self, outcome: str) -> None:
-        """Set the user's selected CTA outcome."""
+    def set_selected_cta_outcome(self, outcome: str, caller: str = DEFAULT_CALLER) -> None:
+        """Set the user's selected CTA outcome. Caller must be authorized."""
+        _verify_caller(caller, "set_selected_cta_outcome")
         self.slots.selected_cta_outcome = outcome
-        logger.info(f"[SlotManager] Set selected_cta_outcome: {outcome}")
+        logger.info(f"[SlotManager] Set selected_cta_outcome: {outcome} (caller: {caller})")
         self._safe_persist()
     
-    def set_exploration_turn(self, turn: int) -> None:
-        """Set the current exploration turn (1, 2, or 3)."""
+    def set_exploration_turn(self, turn: int, caller: str = DEFAULT_CALLER) -> None:
+        """Set the current exploration turn (1, 2, or 3). Caller must be authorized."""
+        _verify_caller(caller, "set_exploration_turn")
         self.slots.exploration_turn = turn
         if self.slots.exploration_responses is None:
             self.slots.exploration_responses = []
-        logger.info(f"[SlotManager] Set exploration_turn: {turn}")
+        logger.info(f"[SlotManager] Set exploration_turn: {turn} (caller: {caller})")
         self._safe_persist()
     
     def add_exploration_response(self, response: str) -> None:
@@ -261,8 +372,9 @@ class SlotManager:
         logger.info(f"[SlotManager] Added exploration response #{len(self.slots.exploration_responses)}")
         self._safe_persist()
     
-    def set_last_user_message(self, message: str) -> None:
-        """Set the last user message for LLM context."""
+    def set_last_user_message(self, message: str, caller: str = DEFAULT_CALLER) -> None:
+        """Set the last user message for LLM context. Caller must be authorized."""
+        _verify_caller(caller, "set_last_user_message")
         self.slots.last_user_message = message
         self._safe_persist()
     
@@ -537,6 +649,31 @@ class SlotManager:
         logger.info("[SlotManager] Alternatives marked CONSUMED")
         self._safe_persist()
     
+    def is_exit_ready(self) -> bool:
+        """
+        Check if conversation is ready for exit/CTA phase.
+        
+        When True, ButtonManager should surface CTAs directly instead of
+        exploration buttons. This collapses the state machine:
+          Exploration → CTA (not Exploration → READY_FOR_CTA → CTA)
+        
+        Returns:
+            bool: True if should show CTAs directly
+        """
+        # Already selected an alternative - show CTAs
+        if self.slots.selected_alternative:
+            return True
+        # Alternatives already consumed - show CTAs
+        if self.slots.alternatives_consumed:
+            return True
+        # After 2+ exploration turns - conversation is mature enough for CTAs
+        if self.slots.exploration_turn >= 2:
+            return True
+        # Exploration explicitly completed
+        if self.slots.exploration_complete:
+            return True
+        return False
+    
     def freeze_slots(self) -> None:
         """
         Hard freeze slots after bailout.
@@ -553,6 +690,31 @@ class SlotManager:
             return
         self.slots.retry_count = 0
         self._safe_persist()
+    
+    def mark_name_declined(self) -> None:
+        """Mark that user declined to give name (will re-offer at CTA)."""
+        if self.slots.frozen:
+            return
+        self.slots.name_declined = True
+        logger.info("[SlotManager] Name declined by user (will re-offer at CTA)")
+        self._safe_persist()
+    
+    def increment_retry(self) -> int:
+        """
+        Increment retry count for validation failures.
+        
+        Used when user provides invalid input (gibberish, numbers-only, etc.)
+        and we need to ask again with a fixed prompt.
+        
+        Returns:
+            int: New retry count
+        """
+        if self.slots.frozen:
+            return self.slots.retry_count
+        self.slots.retry_count += 1
+        logger.info(f"[SlotManager] Retry count: {self.slots.retry_count}")
+        self._safe_persist()
+        return self.slots.retry_count
     
     def increment_free_exploration_unclear(self) -> int:
         """

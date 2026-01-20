@@ -221,7 +221,7 @@ class ChromaManager:
         # Generate embeddings in batch (5-10x faster than sequential)
         logger.info(f"🧠 Generating embeddings for {len(texts)} documents (batch mode)...")
         try:
-            embeddings = get_embeddings_batch(texts, batch_size=32)
+            embeddings = get_embeddings_batch(texts, batch_size=32)  # Optimized for 8GB GPU
         except Exception as e:
             logger.error(f"❌ Batch embedding failed: {e}")
             # Fallback to sequential on batch failure

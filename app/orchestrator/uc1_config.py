@@ -7,7 +7,7 @@
 # Config is loaded from YAML at startup and validated by PolicyValidator.
 
 from dataclasses import dataclass
-from typing import Tuple, Literal, Optional
+from typing import Tuple, Literal, Optional, Dict, List
 import yaml
 import os
 from app.logger import get_logger
@@ -49,6 +49,16 @@ class ExitCTA:
 
 
 @dataclass(frozen=True)
+class EmailCaptureConfig:
+    """Configuration for email capture flow."""
+    min_turns_before_ask: int
+    max_turns_before_ask: int
+    prompt: str
+    soft_prompt: str
+    skip_phrases: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class UC1Config:
     """
     Complete UC1 configuration - frozen/immutable after loading.
@@ -66,6 +76,10 @@ class UC1Config:
     forbidden_topics: Tuple[str, ...]  # Words/phrases LLM must never mention
     name_capture_prompt: str  # System prompt for name capture state
     synthesis_template: str  # Template for AI synthesis (slots filled by orchestrator)
+    # NEW (2026-01-15): Dynamic exploration buttons
+    exploration_buttons: Dict[str, List[str]]  # bucket_id -> button list ("default" for fallback)
+    # NEW (2026-01-15): Email capture configuration
+    email_capture: Optional[EmailCaptureConfig] = None
 
 
 def load_uc1_config(path: Optional[str] = None) -> UC1Config:
@@ -117,6 +131,23 @@ def load_uc1_config(path: Optional[str] = None) -> UC1Config:
         )
         ctas.append(cta)
     
+    # Parse exploration buttons (NEW)
+    exploration_buttons = raw.get("exploration_buttons", {})
+    if not exploration_buttons:
+        exploration_buttons = {"default": ["Get a demo", "See case studies", "Talk to an expert"]}
+    
+    # Parse email capture config (NEW)
+    email_raw = raw.get("email_capture", {})
+    email_capture = None
+    if email_raw:
+        email_capture = EmailCaptureConfig(
+            min_turns_before_ask=email_raw.get("min_turns_before_ask", 4),
+            max_turns_before_ask=email_raw.get("max_turns_before_ask", 6),
+            prompt=email_raw.get("prompt", "What's the best email to reach you at?"),
+            soft_prompt=email_raw.get("soft_prompt", "If you'd like, what's your email?"),
+            skip_phrases=tuple(email_raw.get("skip_phrases", ["skip", "no", "later"])),
+        )
+    
     # Build config object
     config = UC1Config(
         intent_id=raw.get("intent_id", "explore_services_capabilities"),
@@ -127,6 +158,8 @@ def load_uc1_config(path: Optional[str] = None) -> UC1Config:
         forbidden_topics=tuple(raw.get("forbidden_topics", [])),
         name_capture_prompt=raw.get("name_capture_prompt", "What should I call you?"),
         synthesis_template=raw.get("synthesis_template", ""),
+        exploration_buttons=exploration_buttons,
+        email_capture=email_capture,
     )
     
     logger.info(f"[UC1Config] Loaded config v{config.lock_version}: {len(config.capability_buckets)} buckets, {len(config.exit_ctas)} CTAs")

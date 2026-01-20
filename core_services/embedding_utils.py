@@ -5,6 +5,7 @@ import logging
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from huggingface_hub import login
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -22,22 +23,26 @@ if HF_TOKEN:
         logger.exception("Failed Hugging Face login: %s", e)
         raise
 
+# =============================================================================
+# DEVICE CONFIGURATION
+# =============================================================================
+# Determine device ONCE at startup to avoid timing/import issues
+if torch.cuda.is_available():
+    DEVICE = "cuda"
+    logger.info(f"🚀 CUDA detected: {torch.cuda.get_device_name(0)}")
+else:
+    DEVICE = "cpu"
+    logger.info("⚠️ CUDA not available - using CPU")
 
 try:
     model = SentenceTransformer(MODEL_NAME)
     
-    # Move to GPU if available
-    import torch
-    if torch.cuda.is_available():
-        model = model.to('cuda')
-        device = "cuda"
-    else:
-        device = "cpu"
-        
-    logger.info(f"Loaded SentenceTransformer model: {MODEL_NAME} on {device}")
+    # Move model to device configuration immediately
+    model = model.to(DEVICE)
+    
+    logger.info(f"Loaded SentenceTransformer model: {MODEL_NAME} on {DEVICE}")
 except Exception as e:
     logger.exception("Failed to load embedding model %s: %s", MODEL_NAME, e)
-    # re-raise so calling code notices configuration issues early
     raise
 
 
@@ -78,7 +83,8 @@ def _get_embedding_cached(text: str) -> tuple:
     
     Internal function - use get_embedding() for public API.
     """
-    emb = model.encode(text, device=device)
+    # Use global DEVICE constant
+    emb = model.encode(text, device=DEVICE)
     # Return as tuple for LRU cache compatibility
     return tuple(_to_float_list(emb))
 
@@ -131,9 +137,10 @@ def get_embeddings_batch(texts: List[str], batch_size: int = 32, show_progress: 
         try:
             # Log progress for visibility during long operations
             if show_progress and total_batches > 1:
-                logger.info(f"🧠 Embedding batch {batch_idx}/{total_batches} ({len(batch)} texts) on {device}...")
+                logger.info(f"🧠 Embedding batch {batch_idx}/{total_batches} ({len(batch)} texts) on {DEVICE}...")
             
-            embs = model.encode(batch, batch_size=batch_size, show_progress_bar=False, device=device)
+            # Use global DEVICE constant
+            embs = model.encode(batch, batch_size=batch_size, show_progress_bar=False, device=DEVICE)
             all_embeddings.extend([_to_float_list(e) for e in embs])
         except Exception as e:
             logger.error(f"Batch {batch_idx}/{total_batches} embedding failed: {e}")

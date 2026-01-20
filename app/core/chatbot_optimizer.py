@@ -267,17 +267,70 @@ class OptimizedChatbot:
         Yields dict events used by the API layer: 
         {status: 'chunk'|'form_trigger'|'meta', 'chunk': ...}
         
-        UC1 ROUTING (EXPLICIT):
-        If is_uc1=True, delegates to ConversationOrchestrator.
-        UC1 activation is NEVER inferred - it must be explicitly set by:
-        1. Session explicitly marked as UC1 at creation
-        2. Explicit UC1 trigger CTA from welcome screen
+        PROMPT AUTHORITY ARCHITECTURE:
+        1. Validation runs FIRST (before ANY routing decision)
+        2. Router selects exactly ONE authority
+        3. No fall-through, no blending
         """
         
         # ============================================================
-        # UC1 EXPLICIT ROUTING - Check FIRST, before any other logic
+        # STEP 1: HARD PROMPT ROUTER - Determine authority ONCE
         # ============================================================
+        from app.orchestrator.prompt_router import route_to_authority, PromptAuthority, get_authority_name
+        from app.orchestrator.state_input_validators import validate_input_for_state
+        
+        # Determine authority based on session state (NOT query content)
+        # is_uc1 flag from caller takes precedence (for trigger CTA activation)
         if is_uc1:
+            authority = PromptAuthority.UC1_CANONICAL
+        else:
+            authority = route_to_authority(session_id, query)
+        
+        logger.info(f"[PROMPT_ROUTER] Authority selected: {get_authority_name(authority)}")
+        
+        # ============================================================
+        # STEP 2: PRE-ROUTING VALIDATION (runs before any slot mutation)
+        # ============================================================
+        # Get current state for state-scoped validation (only for UC1)
+        current_state_value = ""
+        if authority == PromptAuthority.UC1_CANONICAL:
+            try:
+                from app.orchestrator.slot_manager import SlotManager
+                if session_id in SlotManager._session_slots:
+                    # Get the current state from orchestrator if available
+                    from app.orchestrator import ConversationOrchestrator
+                    orch = ConversationOrchestrator.get_or_create(session_id)
+                    current_state_value = orch._current_state.value if orch._current_state else ""
+            except Exception:
+                current_state_value = ""
+        
+        # Validate input for current state
+        is_valid, failure_reason = validate_input_for_state(query, current_state_value)
+        
+        if not is_valid and authority == PromptAuthority.UC1_CANONICAL:
+            # Input rejected - return validation error response
+            logger.warning(f"[VALIDATION] Input rejected: reason={failure_reason}, state={current_state_value}")
+            
+            # Map failure reasons to user-friendly messages
+            error_messages = {
+                "empty_input": "I didn't catch that. Could you share a bit more?",
+                "low_signal": "I need a bit more detail to help you. Could you elaborate?",
+                "ack_not_allowed": "I'd love to know more about your specific needs. Could you tell me what you're looking for?",
+                "no_alpha_signal": "Could you describe what you're looking for in words?",
+                "too_short": "Just a bit more detail would help me assist you better.",
+                "placeholder_name": "I'd like to address you properly. What's your real name?",
+                "invalid_format": "Could you rephrase that? I want to make sure I understand correctly.",
+            }
+            error_message = error_messages.get(failure_reason, "Could you tell me more?")
+            
+            yield {"status": "chunk", "chunk": error_message}
+            yield {"status": "done"}
+            return
+        
+        # ============================================================
+        # STEP 3: ROUTE TO AUTHORITY (mutual exclusivity enforced)
+        # ============================================================
+        if authority == PromptAuthority.UC1_CANONICAL:
             logger.info(f"[Chatbot] UC1 mode active for session: {session_id}")
             try:
                 from app.orchestrator import ConversationOrchestrator
@@ -300,8 +353,8 @@ class OptimizedChatbot:
                 
                 if hasattr(response, 'call_spec') and response.call_spec and not response.message:
                     spec = response.call_spec
-                    # generate_state_response now returns (text, intent) tuple
-                    text, llm_intent = orchestrator.llm_adapter.generate_state_response(
+                    # generate_state_response now returns (text, intent, options) tuple
+                    text, llm_intent, dynamic_options = orchestrator.llm_adapter.generate_state_response(
                         state=spec.state,
                         response_intent=spec.response_intent,
                         user_input=spec.user_input,
@@ -341,7 +394,7 @@ class OptimizedChatbot:
                         if query_lower in alternatives_lower:
                             is_button_click = True
                             # Record selection in slot (critical for option consumption)
-                            orchestrator.slot_manager.set_selected_alternative(query)
+                            orchestrator.slot_manager.set_selected_alternative(query, caller="orchestrator")
                             logger.info(f"[UC1] BUTTON CLICK detected: '{query}' - overriding intent to READY_FOR_CTA")
                     
                     # Also check for CTA button clicks
@@ -364,7 +417,8 @@ class OptimizedChatbot:
                         state=response.state,
                         intent=llm_intent,
                         bucket=bucket,
-                        input_type=response.input_type  # Permission from state config
+                        input_type=response.input_type,  # Permission from state config
+                        dynamic_options=dynamic_options  # Pass LLM-generated options
                     )
                     
                     # Apply intent-gated options - HYBRID UI (text + buttons)
@@ -388,12 +442,23 @@ class OptimizedChatbot:
                 # UC1 handled - return early
                 return
             except Exception as uc1_error:
-                logger.exception(f"[Chatbot] UC1 orchestrator error, falling back to standard flow: {uc1_error}")
-                # Fall through to standard flow if UC1 fails
+                logger.exception(f"[Chatbot] UC1 orchestrator error: {uc1_error}")
+                # HARD FAILURE - Do not fall through to standard flow
+                # UC1 errors should not silently switch prompt authorities
+                yield {"status": "chunk", "chunk": "I encountered an issue. Let me try again."}
+                yield {"status": "done"}
+                return
         
         # ============================================================
-        # STANDARD FLOW (for non-UC1 sessions)
+        # STANDARD DYNAMIC FLOW (for non-UC1 sessions ONLY)
         # ============================================================
+        # This block ONLY executes if authority == STANDARD_DYNAMIC
+        # There is NO fall-through from UC1 - mutual exclusivity enforced
+        
+        if authority != PromptAuthority.STANDARD_DYNAMIC:
+            # Safety check - should never reach here
+            logger.error(f"[PROMPT_ROUTER] VIOLATION: Reached standard flow with authority={authority}")
+            return
         
         # Track last assistant response for anti-repetition
         last_assistant_response = None
@@ -539,6 +604,7 @@ class OptimizedChatbot:
 
             # ============================================================
             # PROMPT SOURCE: Using build_dynamic_prompt (Redis-backed, fallback to prompts.py)
+            logger.info("<< PROMPT TRIGGER >> Using STANDARD_DYNAMIC_PROMPT (from builds_dynamic_prompt)")
             logger.info(
                 "[PROMPT_SOURCE] Using build_dynamic_prompt: will use Redis prompt sections if available, else fallback to prompts.py"
             )

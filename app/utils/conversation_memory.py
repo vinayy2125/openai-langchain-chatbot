@@ -23,17 +23,60 @@ _llm_instance = None
 
 
 def _get_memory_class():
-    """Lazy load ConversationSummaryBufferMemory to avoid import issues."""
+    """Lazy load ConversationSummaryBufferMemory to avoid import issues.
+    
+    NOTE: In langchain 1.2.x, memory classes moved to langchain_community.memory.
+    We try multiple import paths for compatibility.
+    """
     global _memory_class
     if _memory_class is None:
+        # Try new langchain_community path first (langchain 1.2.x)
+        try:
+            from langchain_community.memory import ConversationSummaryBufferMemory
+            _memory_class = ConversationSummaryBufferMemory
+            return _memory_class
+        except ImportError:
+            pass
+        
+        # Try langchain.memory (older versions)
         try:
             from langchain.memory import ConversationSummaryBufferMemory
             _memory_class = ConversationSummaryBufferMemory
+            return _memory_class
         except ImportError:
-            # Fallback to basic buffer if summary buffer not available
-            from langchain.memory import ConversationBufferMemory
+            pass
+        
+        # Fallback: Try basic buffer memory  
+        try:
+            from langchain_community.memory import ConversationBufferMemory
             _memory_class = ConversationBufferMemory
             logger.warning("ConversationSummaryBufferMemory not available, using basic buffer")
+            return _memory_class
+        except ImportError:
+            pass
+        
+        try:
+            from langchain.memory import ConversationBufferMemory
+            _memory_class = ConversationBufferMemory
+            logger.warning("ConversationSummaryBufferMemory not available, using basic buffer (legacy)")
+            return _memory_class
+        except ImportError:
+            pass
+        
+        # Ultimate fallback: define a minimal mock class
+        logger.error("No LangChain memory class available - using minimal fallback")
+        class MinimalMemory:
+            def __init__(self, **kwargs):
+                self.chat_memory = type('ChatMemory', (), {
+                    'messages': [],
+                    'add_user_message': lambda s, m: s.messages.append({'role': 'user', 'content': m}),
+                    'add_ai_message': lambda s, m: s.messages.append({'role': 'ai', 'content': m})
+                })()
+            def load_memory_variables(self, inputs):
+                return {"history": ""}
+            def clear(self):
+                self.chat_memory.messages = []
+        _memory_class = MinimalMemory
     return _memory_class
 
 
