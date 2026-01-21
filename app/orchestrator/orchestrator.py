@@ -29,7 +29,7 @@ from app.orchestrator.policy_engine import (
     UserIntent, create_policy_context
 )
 from app.orchestrator.input_classifier import classify_input, InputClass
-from app.orchestrator.state_input_validators import validate_context_answer, validate_name
+from app.orchestrator.state_input_validators import validate_context_answer, validate_name, validate_email
 from app.orchestrator.button_manager import ButtonManager
 from app.logger import get_logger
 
@@ -272,6 +272,25 @@ class ConversationOrchestrator:
                 return self._handle_restart()
             return self._handle_frozen_state()
         
+        # ============================================================
+        # DB SYNC - Load user details already extracted by LLM
+        # ============================================================
+        # LLM extracts user_info → saves to DB via update_user_by_session
+        # Sync from DB into UC1 slots to prevent repetitive name/email asks
+        if not self.slots.user_name or not self.slots.user_email:
+            try:
+                from app.api.helpers import get_user_details_from_db
+                db_details = get_user_details_from_db(self.session_id)
+                if db_details:
+                    if db_details.get("username") and not self.slots.user_name:
+                        self.slot_manager.set_user_name(db_details["username"], caller="db_sync")
+                        logger.info(f"[Orchestrator] Synced user_name from DB: {db_details['username']}")
+                    if db_details.get("email") and not self.slots.user_email:
+                        self.slot_manager.set_user_email(db_details["email"], caller="db_sync")
+                        logger.info(f"[Orchestrator] Synced user_email from DB: {db_details['email']}")
+            except Exception as e:
+                logger.warning(f"[Orchestrator] DB sync failed (non-critical): {e}")
+        
         # Track exchange count for policy decisions
         if user_input:
             self.slot_manager.increment_exchange()
@@ -396,6 +415,8 @@ class ConversationOrchestrator:
             return self._handle_consultative_alternatives(user_input)
         elif self._current_state == UC1State.RECOMMENDATION:
             return self._handle_recommendation(user_input)
+        elif self._current_state == UC1State.EMAIL_CAPTURE:
+            return self._handle_email_capture(user_input)
         elif self._current_state == UC1State.EXIT:
             return self._handle_exit()
         else:
@@ -440,10 +461,13 @@ class ConversationOrchestrator:
         NEW (2026-01-15): Uses ExplorerAgent for smart, lead-generative responses
         when USE_AGENT_EXPLORATION=true.
         
+        NEW (2026-01-20): CTA INTERCEPTION - Route high-intent CTAs to EMAIL_CAPTURE.
+        
         RULES:
-        1. Agent answers questions with KB search
-        2. Agent gathers slots naturally (name, email)
-        3. Resume UC1 only on EXPLICIT user intent (detected by policy engine)
+        1. INTERCEPT CTAs before agent processing
+        2. Agent answers questions with KB search
+        3. Agent gathers slots naturally (name, email)
+        4. Resume UC1 only on EXPLICIT user intent (detected by policy engine)
         
         STABILIZER:
         After 2+ unclear/gibberish inputs, stabilize with anchor-derived response.
@@ -452,6 +476,79 @@ class ConversationOrchestrator:
         use_agent = os.getenv("USE_AGENT_EXPLORATION", "false").lower() == "true"
         
         bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
+        # =========================================================================
+        # CTA INTERCEPTION (Fix for "Talk to expert" going to agent as text)
+        # =========================================================================
+        # Check if user clicked a CTA button - route to EMAIL_CAPTURE if high-intent
+        if user_input:
+            # First check for exact button click match
+            button_result = self.button_manager.is_button_click(user_input, bucket)
+            selected_cta = None
+            
+            if button_result and button_result[0] == "cta":
+                cta_action = button_result[1]
+                logger.info(f"[Orchestrator] FREE_EXPLORATION: CTA button clicked: {user_input} -> {cta_action}")
+                
+                # Find matching CTA by choice text
+                for cta in self.config.exit_ctas:
+                    if cta.choice.lower() == user_input.strip().lower():
+                        selected_cta = cta
+                        break
+            
+            # Also check for phrase-based CTA intent (typed requests)
+            if not selected_cta:
+                input_lower = user_input.strip().lower()
+                # High-intent phrases that should trigger CTA flow
+                HIGH_INTENT_PHRASES = [
+                    ("talk to expert", "calendar"),
+                    ("talk to an expert", "calendar"),
+                    ("speak to someone", "calendar"),
+                    ("schedule a call", "calendar"),
+                    ("schedule call", "calendar"),
+                    ("book a call", "calendar"),
+                    ("meet the team", "calendar"),
+                    ("discuss my requirement", "UC2"),
+                    ("discuss requirement", "UC2"),
+                    ("get a consultation", "UC2"),
+                    ("talk to consultant", "calendar"),
+                    ("talk to architect", "calendar"),
+                    ("talk to devops team", "calendar"),
+                ]
+                
+                for phrase, outcome in HIGH_INTENT_PHRASES:
+                    if phrase in input_lower:
+                        logger.info(f"[Orchestrator] FREE_EXPLORATION: CTA phrase detected: '{phrase}' -> {outcome}")
+                        # Find matching CTA by outcome
+                        for cta in self.config.exit_ctas:
+                            if cta.outcome == outcome:
+                                selected_cta = cta
+                                break
+                        break
+            
+            if selected_cta:
+                # Store the CTA outcome
+                self.slot_manager.set_selected_cta_outcome(selected_cta.outcome, caller="orchestrator")
+                
+                # High-intent CTAs (UC2, calendar) -> EMAIL_CAPTURE first
+                if selected_cta.outcome in ("UC2", "calendar"):
+                    if not self.slots.user_email:
+                        logger.info(f"[Orchestrator] High-intent CTA without email -> EMAIL_CAPTURE")
+                        self._current_state = UC1State.EMAIL_CAPTURE
+                        return self._handle_email_capture("")
+                    else:
+                        # Email already captured -> EXIT
+                        logger.info(f"[Orchestrator] High-intent CTA with email -> EXIT")
+                        self._current_state = UC1State.EXIT
+                        return self._handle_exit()
+                elif selected_cta.outcome == "loop":
+                    # Continue exploring -> back to CAPABILITY_SELECTION
+                    self._current_state = UC1State.CAPABILITY_SELECTION
+                    return self._handle_capability_selection("")
+                else:
+                    # Exit outcome -> EXIT
+                    self._current_state = UC1State.EXIT
+                    return self._handle_exit()
         
         # Classify input for stabilizer logic
         input_class = classify_input(user_input) if user_input else None
@@ -513,7 +610,7 @@ class ConversationOrchestrator:
             
             agent = get_explorer_agent()
             
-            # Invoke agent with current context
+            # Invoke agent with current context (including shared URLs to filter)
             result = agent.invoke(
                 user_input=user_input,
                 session_id=self.session_id,
@@ -522,6 +619,7 @@ class ConversationOrchestrator:
                     "user_email": self.slots.user_email,
                     "context_signal": self.slots.context_signal,
                     "capability_bucket": self.slots.capability_bucket,
+                    "shared_urls": self.slot_manager.get_shared_urls(),  # Pass for filtering
                 }
             )
             
@@ -529,6 +627,14 @@ class ConversationOrchestrator:
             response_text = agent.get_response_text(result)
             is_ready = result.get("is_ready", False)
             lead_score = result.get("lead_score", 0)
+            
+            # ============================================================
+            # TRACK URLS IN RESPONSE (Prevents repetitive sharing)
+            # ============================================================
+            from app.agents.tools.rag_search import URL_PATTERN
+            found_urls = URL_PATTERN.findall(response_text.lower())
+            for url in found_urls:
+                self.slot_manager.add_shared_url(url)
             
             # Sync any slots captured by agent
             if result.get("slots"):
@@ -740,6 +846,28 @@ class ConversationOrchestrator:
         # ============================================================
         is_valid, reason = validate_name(user_input)
         
+        # Check if user provided EMAIL instead of NAME (Validation Fix)
+        if not is_valid:
+            is_email, _ = validate_email(user_input)
+            if is_email:
+                # User provided email. Accept it.
+                self.slot_manager.set_user_email(user_input, caller="orchestrator")
+                # Infer name from email local part
+                inferred_name = user_input.split("@")[0]
+                # Filter special chars from name
+                inferred_name = ''.join(c for c in inferred_name if c.isalpha())
+                if inferred_name:
+                    inferred_name = inferred_name.capitalize()
+                else:
+                    inferred_name = "There" # Fallback if email is like 123@...
+                
+                # We do NOT set name here to let the standard flow below handle it with the inferred name
+                # But wait, logic below sets user_input. So let's override user_input
+                user_input = inferred_name
+                is_valid = True 
+                reason = ""
+                logger.info(f"[Orchestrator] Captured email in name state: {self.slots.user_email} -> Name: {user_input}")
+
         if not is_valid:
             # Invalid input - retry with FIXED prompt
             self.slot_manager.increment_retry()
@@ -796,7 +924,7 @@ class ConversationOrchestrator:
             agent = get_explorer_agent()
             bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
             
-            # Invoke agent with current context
+            # Invoke agent with current context (including shared URLs to filter)
             result = agent.invoke(
                 user_input=user_input,
                 session_id=self.session_id,
@@ -804,6 +932,7 @@ class ConversationOrchestrator:
                     "user_name": self.slots.user_name,
                     "context_signal": self.slots.context_signal,
                     "capability_bucket": self.slots.capability_bucket,
+                    "shared_urls": self.slot_manager.get_shared_urls(),  # Pass for filtering
                 }
             )
             
@@ -812,10 +941,23 @@ class ConversationOrchestrator:
             is_ready = result.get("is_ready", False)
             lead_score = result.get("lead_score", 0)
             
+            # ============================================================
+            # TRACK URLS IN RESPONSE (Prevents repetitive sharing)
+            # ============================================================
+            from app.agents.tools.rag_search import URL_PATTERN
+            found_urls = URL_PATTERN.findall(response_text.lower())
+            for url in found_urls:
+                self.slot_manager.add_shared_url(url)
+            
             # Sync any slots captured by agent
             if result.get("slots"):
                 if result["slots"].get("user_name"):
                     self.slot_manager.set_user_name(result["slots"]["user_name"], caller="orchestrator")
+                if result["slots"].get("user_email"):
+                    # Validate email from agent before syncing
+                    is_email_valid, _ = validate_email(result["slots"]["user_email"])
+                    if is_email_valid:
+                        self.slot_manager.set_user_email(result["slots"]["user_email"], caller="orchestrator")
                 if result["slots"].get("context_signal"):
                     self.slot_manager.set_context_signal(result["slots"]["context_signal"], caller="orchestrator")
             
@@ -1056,11 +1198,76 @@ class ConversationOrchestrator:
                 input_type="buttons",
                 options=button_options,
             )
+        elif next_state == UC1State.EMAIL_CAPTURE:
+            # Move to EMAIL_CAPTURE
+            self._current_state = UC1State.EMAIL_CAPTURE
+            return self._handle_email_capture("")  # Trigger prompt with empty input
         else:
             # Exit flow
             self._current_state = UC1State.EXIT
             return self._handle_exit()
-    
+
+    def _handle_email_capture(self, user_input: str) -> OrchestratorResponse:
+        """
+        Handle EMAIL_CAPTURE state.
+        
+        Triggered when high-intent CTA is selected but email is missing.
+        """
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
+        # 1. Skip if already captured (write-once)
+        if self.slots.user_email:
+            logger.info(f"[Orchestrator] Email already captured ({self.slots.user_email}), skipping capture")
+            self._current_state = UC1State.EXIT
+            return self._handle_exit()
+
+        # 2. If prompt (empty input or first entry), return prompt
+        if not user_input:
+            prompt = self.config.email_capture.prompt if self.config.email_capture else "What's the best email to reach you?"
+            return OrchestratorResponse(
+                state=self._current_state,
+                call_spec=AdapterCallSpec(
+                    state=UC1State.EMAIL_CAPTURE,
+                    response_intent=ResponseIntent.PROMPT,
+                    slots=self.slots,
+                    bucket=bucket,
+                ),
+                input_type="text",
+                message=prompt
+            )
+            
+        # 3. Validate input
+        is_valid, reason = validate_email(user_input)
+        
+        if not is_valid:
+            # Retry logic
+            self.slot_manager.increment_retry()
+            # Construct retry logic
+            prompt = self.config.email_capture.prompt if self.config.email_capture else "What's the best email to reach you?"
+            return OrchestratorResponse(
+                state=self._current_state,
+                call_spec=AdapterCallSpec(
+                    state=UC1State.EMAIL_CAPTURE,
+                    response_intent=ResponseIntent.RETRY,
+                    slots=self.slots,
+                    bucket=bucket,
+                ),
+                input_type="text",
+                message=f"Please provide a valid email format (e.g., name@company.com). {prompt}"
+            )
+        
+        # 4. Valid -> Save -> Exit
+        self.slot_manager.set_user_email(user_input, caller="orchestrator")
+        # Infer name if missing 
+        if not self.slots.user_name:
+            inferred = user_input.split("@")[0].capitalize()
+            self.slot_manager.set_user_name(inferred, caller="orchestrator")
+        
+        logger.info(f"[Orchestrator] Email captured: {user_input}")
+        
+        self._current_state = UC1State.EXIT
+        return self._handle_exit()
+
     def _handle_exit(self) -> OrchestratorResponse:
         """Handle EXIT state (TEXT-BLIND).
         

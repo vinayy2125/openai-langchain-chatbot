@@ -78,10 +78,12 @@ capability_buckets:
 
 # The 4 exit CTAs (exactly 4, no more, no less)
 exit_ctas:
-  - choice: "Discuss my requirement now"
+  - choice: "Discuss my requirement"
     outcome: "UC2"
+    link: "https://www.ditstek.com/contact-us"
   - choice: "Schedule a quick call"
     outcome: "calendar"
+    link: "https://www.ditstek.com/contact-us"
   - choice: "Continue exploring"
     outcome: "loop"
   - choice: "I'll explore on my own"

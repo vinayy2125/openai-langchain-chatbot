@@ -38,8 +38,17 @@ CRITICAL ANTI-HALLUCINATION RULES:
 - NEVER pretend to schedule calls, send emails, or connect users to real people
 - NEVER say things like "I'll make sure to connect you", "Our team will reach out" unless this is ACTUALLY happening
 - You are a chatbot that provides INFORMATION only - you cannot take real-world actions
-- If user wants to talk to an expert, provide contact info or suggest they use the "Schedule a call" option
+- If user wants to talk to an expert or schedule a call, share the contact link: https://www.ditstek.com/contact-us
+- For portfolios, case studies, or "See our work" requests (only when explicitly asked): https://www.ditstek.com/work or https://www.ditstek.com/blog
 - Be HONEST about what you can and cannot do
+
+ANTI-REPETITION RULES (CRITICAL):
+- NEVER share the same link or resource twice in a conversation
+- If you've already mentioned a service page or case study, reference it differently ("as I mentioned earlier" or "building on what we discussed")
+- Vary your response structure - don't use the same opening or closing phrases
+- If asked about the same topic again, go DEEPER instead of repeating the same overview
+- Instead of re-sharing links, offer to discuss specific aspects: implementation details, timelines, pricing, case studies
+- When you've exhausted information on a topic, acknowledge it and suggest moving forward: "I've shared the key resources on this. Would you like to discuss how this applies to your situation, or explore something else?"
 
 Guidelines:
 - **CRITICAL:** After searching the knowledge base ONCE, you MUST provide an answer based on the results. Do NOT search again for the same topic.
@@ -48,7 +57,10 @@ Guidelines:
 - Use save_slot to remember important information the user shares
 - If the user shares their name, save it with save_slot
 - If the user describes their challenge/need, save it as context_signal
-- When the user seems satisfied or says "I'm ready", "show me options", etc., set is_ready=true in your response
+- **CRITICAL:** Proactively move the conversation forward. Do not wait for explicit "I am ready" commands.
+- **Rule of Thumb:** If you have answered the user's question and they acknowledge it (in ANY way) without asking a new verification question, set is_ready=true.
+- This applies to: expressions of thanks, agreement, understanding ("ok", "got it"), satisfaction, or statements of intent ("I want this").
+- Default to moving the user to the next stage (CTAs) rather than lingering in the chat.
 - Keep responses concise but helpful (2-3 sentences usually)
 - Never fabricate information - use the knowledge base
 - If search returns no results, honestly state that and ask for clarification instead of searching again.
@@ -243,16 +255,37 @@ class ExplorerAgent:
             if hasattr(last_msg, 'tool_call_id') or (hasattr(last_msg, 'type') and last_msg.type == 'tool'):
                 tool_just_used = True
         
-        # Check for readiness signals in last AI message
+        # Check for readiness/closing signals in USER's LAST input only
         is_ready = state.get("is_ready", False)
+        
+        # Find the last HumanMessage (most recent user input)
+        last_user_msg = None
         for msg in reversed(messages):
-            if isinstance(msg, AIMessage) and hasattr(msg, 'content') and msg.content:
-                content = msg.content
-                if isinstance(content, str):
-                    ready_signals = ["ready for options", "show me options", "i'm ready", "let's see", "i am ready"]
-                    if any(signal in content.lower() for signal in ready_signals):
-                        is_ready = True
-                break  # Only check last AI message
+            if isinstance(msg, HumanMessage) and hasattr(msg, 'content') and msg.content:
+                last_user_msg = msg.content.lower()
+                break
+        
+        if last_user_msg:
+            # CTA readiness signals - user wants to proceed
+            if any(signal in last_user_msg for signal in [
+                "ready", "i'm ready", "i am ready", "let's proceed",
+                "show me options", "what's next", "next steps",
+                "schedule", "book a call", "talk to", "speak to",
+                "get a demo", "contact", "let's do it", "sign me up",
+                "interested", "want to proceed", "move forward"
+            ]):
+                is_ready = True
+                logger.info(f"[ExplorerAgent] User CTA readiness detected: '{last_user_msg[:50]}...'")
+            
+            # Closing signals - user is done exploring
+            elif any(signal in last_user_msg for signal in [
+                "thanks i'm good", "thanks i am good", "good for now",
+                "that's all", "that is all", "i'm done", "im done",
+                "bye", "goodbye", "no thanks", "not interested",
+                "maybe later", "i'll pass", "thank you for", "thanks for your"
+            ]):
+                is_ready = True
+                logger.info(f"[ExplorerAgent] User closing signal detected: '{last_user_msg[:50]}...'")
         
         # Calculate lead score
         lead_score = calculate_lead_score(
@@ -319,6 +352,11 @@ class ExplorerAgent:
         Returns:
             Final agent state with response
         """
+        # Set up RAG search context to filter already-shared content
+        from app.agents.tools.rag_search import set_search_context
+        shared_urls = initial_slots.get("shared_urls", []) if initial_slots else []
+        set_search_context(session_id, shared_urls)
+        
         # Build initial state
         state: AgentState = {
             "messages": [HumanMessage(content=user_input)],

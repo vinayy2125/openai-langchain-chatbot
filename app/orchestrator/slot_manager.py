@@ -131,6 +131,9 @@ class UC1Slots:
     free_exploration_unclear_count: int = 0 # Stabilizer trigger in FREE_EXPLORATION
     name_declined: bool = False             # User declined to give name (offer again at CTA)
     
+    # Shared content tracking (prevents repetitive responses)
+    shared_urls: Optional[List[str]] = None    # URLs already shared in this session
+    
     # ACC Phase 3: Question budget per state
     question_counts: Optional[Dict[str, int]] = None  # state -> question count
     
@@ -179,6 +182,8 @@ class UC1Slots:
             "name_declined": self.name_declined,
             # ACC Phase 3
             "question_counts": self.question_counts or {},
+            # Shared content tracking
+            "shared_urls": self.shared_urls or [],
         }
     
     @classmethod
@@ -214,6 +219,8 @@ class UC1Slots:
             name_declined=data.get("name_declined", False),
             # ACC Phase 3
             question_counts=data.get("question_counts"),
+            # Shared content tracking
+            shared_urls=data.get("shared_urls"),
         )
 
 
@@ -780,3 +787,29 @@ class SlotManager:
             bool: True if budget exceeded
         """
         return self.get_question_count(state) >= limit
+    
+    # ============================================================
+    # SHARED CONTENT TRACKING (Prevents repetitive responses)
+    # ============================================================
+    
+    def add_shared_url(self, url: str) -> None:
+        """
+        Record a URL that was shared with the user.
+        
+        Args:
+            url: The URL that was shared
+        """
+        if self.slots.frozen:
+            return
+        if self.slots.shared_urls is None:
+            self.slots.shared_urls = []
+        
+        url_normalized = url.lower().strip()
+        if url_normalized and url_normalized not in self.slots.shared_urls:
+            self.slots.shared_urls.append(url_normalized)
+            logger.debug(f"[SlotManager] Added shared URL: {url_normalized}")
+            self._safe_persist()
+    
+    def get_shared_urls(self) -> List[str]:
+        """Get list of already-shared URLs."""
+        return self.slots.shared_urls or []

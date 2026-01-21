@@ -40,6 +40,7 @@ class UC1State(Enum):
     EXPLORATION_LAYER = "exploration_layer"
     CONSULTATIVE_ALTERNATIVES = "consultative_alternatives"
     RECOMMENDATION = "recommendation"
+    EMAIL_CAPTURE = "email_capture"  # NEW: Force email capture before exit
     EXIT = "exit"
     FREE_EXPLORATION = "free_exploration"  # Unstructured user-driven conversation
 
@@ -127,9 +128,16 @@ STATE_CONFIGS: Dict[UC1State, StateConfig] = {
     ),
     UC1State.RECOMMENDATION: StateConfig(
         input_type="buttons",  # User selects from 4 CTAs
-        next_states=(UC1State.EXIT, UC1State.CAPABILITY_SELECTION),  # Exit or loop
+        next_states=(UC1State.EXIT, UC1State.CAPABILITY_SELECTION, UC1State.EMAIL_CAPTURE),  # Added EMAIL_CAPTURE
         required_slots=(),
         system_message_key=None,  # CTAs come from config
+    ),
+    UC1State.EMAIL_CAPTURE: StateConfig(
+        input_type="text",
+        next_states=(UC1State.EXIT, UC1State.CAPABILITY_SELECTION),
+        required_slots=("user_email",),
+        system_message_key="email_capture_prompt", # We will need to add this property or handle it
+        retry_limit=3,
     ),
     UC1State.EXIT: StateConfig(
         input_type="text",  # Allow re-engagement even after goodbye (better UX)
@@ -254,8 +262,8 @@ class UC1StateMachine:
         
         # Map CTA outcomes to states
         outcome_map = {
-            "UC2": UC1State.EXIT,  # Hand off to UC2 (future)
-            "calendar": UC1State.EXIT,  # Schedule call = exit with calendar action
+            "UC2": UC1State.EMAIL_CAPTURE,  # Discuss requirement -> Get Email first
+            "calendar": UC1State.EMAIL_CAPTURE,  # Schedule call -> Get Email first
             "loop": UC1State.CAPABILITY_SELECTION,  # Continue exploring = loop back
             "exit": UC1State.EXIT,  # Graceful exit
         }

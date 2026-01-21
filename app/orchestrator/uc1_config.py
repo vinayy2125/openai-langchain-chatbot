@@ -46,6 +46,7 @@ class ExitCTA:
     """
     choice: str  # User-visible text
     outcome: str  # Internal action identifier
+    link: Optional[str] = None  # Direct URL for this CTA (e.g., contact-us page)
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,7 @@ def load_uc1_config(path: Optional[str] = None) -> UC1Config:
         cta = ExitCTA(
             choice=c["choice"],
             outcome=c["outcome"],
+            link=c.get("link"),  # Optional CTA link
         )
         ctas.append(cta)
     

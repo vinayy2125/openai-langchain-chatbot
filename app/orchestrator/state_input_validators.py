@@ -235,7 +235,32 @@ def validate_name(text: str) -> Tuple[bool, str]:
     return True, ""
 
 
+def validate_email(text: str) -> Tuple[bool, str]:
+    """
+    Validate email format.
+    
+    Purpose: Capture valid email addresses.
+    
+    Rules:
+        - Must match standard email regex
+        - Must not be empty
+    """
+    if not text:
+        return False, "empty_input"
+    
+    normalized = _normalize(text)
+    
+    # Standard email regex (simple version)
+    email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+    
+    if not email_pattern.match(normalized):
+        return False, "invalid_email"
+        
+    return True, ""
+
+
 def validate_exploration_input(text: str) -> Tuple[bool, str]:
+
     """
     Validate exploration input requires expressed intent.
     

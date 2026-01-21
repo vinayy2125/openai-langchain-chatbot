@@ -167,10 +167,12 @@ CRITICAL RULES:
 
 CTA HANDLING (When user shows strong intent to connect):
 When user says things like "Talk to expert", "Schedule a call", "Get a demo", "Contact", "Speak to someone":
-1. If you don't have their email, ask: "Happy to connect you with our team! What's your email so we can follow up?"
-2. If you already have their name but not email, ask for email
-3. If you have both name and email, confirm: "Thanks [Name]! We have your details — our team will reach out to you shortly."
-4. NEVER redirect to external website or say "contact DITS" — YOU are DITS, handle it directly
+1. Acknowledge their intent warmly and confirm you can help
+2. If you don't have their email, ask: "Happy to connect you with our team! What's your email so we can follow up?"
+3. If you already have their name but not email, ask for email
+4. If you have both name and email, confirm: "Thanks [Name]! We have your details — our team will reach out to you shortly."
+5. ALWAYS include the contact link: "You can also schedule directly here: https://www.ditstek.com/contact-us"
+6. NEVER redirect to external website or say "contact DITS" — YOU are DITS, handle it directly
 
 ENGAGEMENT RULES:
 - After answering a question, suggest 1-2 specific follow-up actions the user might find valuable
@@ -331,7 +333,7 @@ class ConstrainedLLMAdapter:
         
         try:
             response = self.client.chat.completions.create(
-                model=UC1_FINE_TUNED_MODEL,
+                model="gpt-4.1-mini-2025-04-14",
                 messages=messages,
                 temperature=0.7,
                 max_tokens=500,
@@ -725,12 +727,22 @@ class ConstrainedLLMAdapter:
         Deterministic exit summary. Zero LLM.
         """
         name = slots.user_name or "there"
+        email_part = f" at {slots.user_email}" if slots.user_email else ""
         
-        if slots.selected_cta == "schedule_call":
-            return f"Great, {name}! We'll be in touch to schedule a call."
-        elif slots.selected_cta == "discuss_requirement":
-            return f"Perfect, {name}! We'll reach out to discuss your requirements."
-        elif slots.selected_cta == "explore_more":
+        # Base link for calendar/contact
+        link = "https://www.ditstek.com/contact-us"
+        
+        if slots.selected_cta_outcome == "calendar":
+            return (
+                f"Great, {name}! We'll be in touch{email_part} to schedule a call.\n\n"
+                f"Prefer to book a time manually right now? Use this link:\n{link}"
+            )
+        elif slots.selected_cta_outcome == "UC2": # Discuss requirement
+            return (
+                f"Perfect, {name}! We'll reach out{email_part} to discuss your requirements.\n\n"
+                f"You can also schedule a time directly here:\n{link}"
+            )
+        elif slots.selected_cta_outcome == "loop":
             return f"Sounds good, {name}! Feel free to explore more."
         else:
             return f"Thanks for chatting, {name}! Feel free to come back anytime."
