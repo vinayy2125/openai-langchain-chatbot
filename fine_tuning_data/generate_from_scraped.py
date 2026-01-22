@@ -25,8 +25,9 @@ TRAIN_SPLIT = 0.85
 
 # Paths
 SCRAPED_DATA_PATH = Path(__file__).parent.parent / "scraped_data" / "scrape_20251229_131253.json"
-OUTPUT_TRAIN = Path(__file__).parent / "train_large.jsonl"
-OUTPUT_VALIDATION = Path(__file__).parent / "validation_large.jsonl"
+OUTPUT_TRAIN = Path(__file__).parent / "train.jsonl"
+OUTPUT_VALIDATION = Path(__file__).parent / "validation.jsonl"
+
 
 # =============================================================================
 # CANONICAL SYSTEM PROMPT
@@ -71,6 +72,7 @@ class ScrapedDataProcessor:
         self.case_studies = []
         self.technologies = []
         self.faqs = []
+        self.about_team = []  # NEW: Company meta info (founders, team, about us)
         
     def load_data(self) -> bool:
         """Load and parse scraped data."""
@@ -128,6 +130,13 @@ class ScrapedDataProcessor:
                 # FAQs
                 if "?" in chunk and len(chunk) < 500:
                     self.faqs.append(chunk)
+                
+                # NEW: About/Team/Leadership
+                if any(t in chunk_lower for t in ["founder", "co-founder", "ceo", "cto", "leadership", 
+                                                   "team", "about us", "our story", "our mission",
+                                                   "our vision", "headquarter", "office", "years of experience",
+                                                   "established", "founded in", "saarthak", "mohali"]):
+                    self.about_team.append(chunk)
         
         print(f"Extracted:")
         print(f"  - {len(self.chunks)} total chunks")
@@ -137,6 +146,7 @@ class ScrapedDataProcessor:
         print(f"  - {len(self.testimonials)} testimonial chunks")
         print(f"  - {len(self.case_studies)} case study chunks")
         print(f"  - {len(self.faqs)} FAQ chunks")
+        print(f"  - {len(self.about_team)} about/team chunks")
 
 
 class TrainingDataGenerator:
@@ -738,6 +748,50 @@ class TrainingDataGenerator:
         
         print(f"  Generated {len(variations)} variations")
         return variations
+    def generate_from_about_team(self) -> List[Dict]:
+        """Generate examples from about/team/leadership content."""
+        examples = []
+        
+        # Question templates for company meta info
+        about_questions = [
+            "Who founded DITSTEK?",
+            "Who are the co-founders?",
+            "Tell me about DITSTEK's leadership",
+            "Who runs DITSTEK?",
+            "Where is DITSTEK located?",
+            "Where is your office?",
+            "Tell me about your team",
+            "What's DITSTEK's story?",
+            "How long has DITSTEK been in business?",
+            "What's DITSTEK's mission?",
+            "Tell me about your company",
+            "Who is on your leadership team?",
+            "Where is DITSTEK headquartered?",
+            "What is DITSTEK's vision?",
+        ]
+        
+        for chunk in self.processor.about_team:
+            title, content = self.extract_section_content(chunk)
+            if not content or len(content) < 50:
+                continue
+            
+            clean = self.clean_content(content)[:400]
+            
+            # Generate Q&A pairs
+            for q in random.sample(about_questions, min(3, len(about_questions))):
+                # Add random prefix for variation
+                if random.random() < 0.3:
+                    q = random.choice(self.question_starters) + q
+                
+                response = clean
+                # Less frequent follow-ups for factual company questions
+                if random.random() < 0.2:
+                    response += f" {random.choice(self.followup_questions)}"
+                
+                examples.append(self.create_example(q, response))
+        
+        print(f"  Generated {len(examples)} about/team examples")
+        return examples
     
     def generate_all(self) -> List[Dict]:
         """Generate all training examples."""
@@ -750,6 +804,7 @@ class TrainingDataGenerator:
         all_examples.extend(self.generate_from_industries())
         all_examples.extend(self.generate_from_technologies())
         all_examples.extend(self.generate_from_chunks())
+        all_examples.extend(self.generate_from_about_team())  # NEW
         all_examples.extend(self.generate_exploratory())
         all_examples.extend(self.generate_pricing_timeline())
         all_examples.extend(self.generate_engagement_models())
@@ -761,21 +816,32 @@ class TrainingDataGenerator:
         all_examples.extend(self.generate_off_topic())
         all_examples.extend(self.generate_multi_turn())
         
-        # Deduplicate
+        # Deduplicate using FULL signature (system + user + assistant)
+        def get_signature(ex):
+            msgs = ex["messages"]
+            return f"{msgs[0]['content']}|{msgs[1]['content']}|{msgs[2]['content']}"
+        
         seen = set()
         unique = []
         for ex in all_examples:
-            key = ex["messages"][1]["content"].lower().strip()
-            if key not in seen:
-                seen.add(key)
+            sig = get_signature(ex)
+            if sig not in seen:
+                seen.add(sig)
                 unique.append(ex)
         
-        print(f"\nUnique examples: {len(unique)}")
+        print(f"\nUnique examples (pre-variation): {len(unique)}")
         
         # Add variations if needed
         if len(unique) < TARGET_EXAMPLES:
             variations = self.generate_variations(unique, TARGET_EXAMPLES)
-            unique.extend(variations)
+            # Deduplicate variations too
+            for ex in variations:
+                sig = get_signature(ex)
+                if sig not in seen:
+                    seen.add(sig)
+                    unique.append(ex)
+        
+        print(f"Unique examples (post-variation): {len(unique)}")
         
         return unique[:TARGET_EXAMPLES]
     
