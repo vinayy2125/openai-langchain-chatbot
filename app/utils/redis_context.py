@@ -23,6 +23,7 @@ import os
 
 logger = get_logger("chatbot")
 
+from app.utils.reranker import get_reranker
 # ChromaDB for knowledge base search (lazy-loaded)
 _chroma_manager = None
 
@@ -35,8 +36,8 @@ _parent_retriever = None
 # Environment flag to enable/disable hybrid search (default: enabled)
 ENABLE_HYBRID_SEARCH = os.getenv("ENABLE_HYBRID_SEARCH", "true").lower() == "true"
 
-# Environment flag to enable/disable ParentDocumentRetriever (default: disabled for gradual rollout)
-ENABLE_PARENT_RETRIEVER = os.getenv("ENABLE_PARENT_RETRIEVER", "false").lower() == "true"
+# Environment flag to enable/disable ParentDocumentRetriever (default: enabled for production RAG)
+ENABLE_PARENT_RETRIEVER = os.getenv("ENABLE_PARENT_RETRIEVER", "true").lower() == "true"
 
 
 def _get_chroma_manager():
@@ -80,47 +81,18 @@ def _get_parent_retriever():
 
 def _semantic_rerank(query: str, results: List[Dict], top_n: int) -> List[Dict]:
     """
-    Re-rank results based on semantic relevance to query.
-    Boosts results that contain query keywords for better accuracy.
-    
-    Args:
-        query: The user's search query
-        results: List of ChromaDB results with text and similarity
-        top_n: Number of results to return after re-ranking
-        
-    Returns:
-        Re-ranked list of results
+    Rerank results using Deep Semantic Model (Cross-Encoder).
+    Replaces legacy keyword boosting.
     """
     if not results:
         return results
     
-    query_lower = query.lower()
-    query_words = [w for w in query_lower.split() if len(w) > 3]  # Skip short words
+    # Use DeepReranker
+    reranker = get_reranker()
+    result = reranker.rerank(query, results, top_n=top_n, threshold=RELEVANCE_THRESHOLD)
     
-    scored_results = []
-    for result in results:
-        text = (result.get("text", "") or "").lower()
-        base_score = result.get("similarity", 0)
-        
-        # Boost for exact query term presence
-        keyword_matches = sum(1 for word in query_words if word in text)
-        keyword_boost = keyword_matches * 0.05
-        
-        # Boost for "services" related content when query is about services
-        service_keywords = ["services", "development", "consulting", "software", "ai", "cloud"]
-        if any(sk in query_lower for sk in ["service", "offer", "list", "explore", "capabilities"]):
-            service_boost = sum(0.02 for sk in service_keywords if sk in text)
-        else:
-            service_boost = 0
-        
-        final_score = base_score + keyword_boost + service_boost
-        scored_results.append((final_score, result))
-    
-    # Sort by adjusted score (highest first)
-    scored_results.sort(key=lambda x: x[0], reverse=True)
-    
-    logger.debug(f"[ReRank] Re-ranked {len(results)} results, returning top {top_n}")
-    return [r for _, r in scored_results[:top_n]]
+    logger.debug(f"[DeepRerank] {result.decision_reason}")
+    return result.sorted_docs
 
 
 # =============================================================================
@@ -138,14 +110,11 @@ def _semantic_rerank(query: str, results: List[Dict], top_n: int) -> List[Dict]:
 # 7. Check evidence sufficiency
 # 8. Return best top_n with confidence flag
 #
-# HARDENING (v2):
-# - Straggler tolerance: collect completed, don't block on slow retriever
-# - Adaptive threshold: shorter queries get lower threshold
-# - Evidence sufficiency gate: flag when < 2 chunks pass threshold
-# =============================================================================
-
-# Base relevance threshold - adjusted by query characteristics
-BASE_RELEVANCE_THRESHOLD = 0.25
+# Hard relevance threshold for Deep Reranker (Cross-Encoder)
+# 0.0 is neutral. Positive is likely relevant. 1.0 is match.
+# MiniLM-L-6-v2 is trained on MS MARCO. 0.0 is a reasonable baseline filter.
+# Production Tuning: 0.25 for balanced precision/recall.
+RELEVANCE_THRESHOLD = 0.25
 
 # Minimum chunks needed for "sufficient evidence"
 MIN_EVIDENCE_CHUNKS = 2
@@ -479,59 +448,61 @@ def _parallel_kb_search(
         return []
     
     # ==========================================================================
-    # RERANK + ADAPTIVE THRESHOLD + EVIDENCE SUFFICIENCY
+    # DEEP RERANK + DUAL GATE (Score + Sufficiency)
     # ==========================================================================
-    rerank_start = time.perf_counter()
-    reranked = _cross_retriever_rerank(search_query, pooled_results, top_n * 2)
-    
-    # Compute adaptive threshold based on query
-    threshold = _get_adaptive_threshold(search_query)
-    
-    # FILTER by adaptive relevance threshold
-    filtered = [
-        r for r in reranked 
-        if r.get("rerank_score", r.get("normalized_score", 0)) >= threshold
-    ]
-    
-    # ==========================================================================
-    # EVIDENCE SUFFICIENCY GATE
-    # ==========================================================================
-    # Flag as low_confidence if we don't have enough high-quality chunks
-    low_confidence = False
-    
-    if len(filtered) < MIN_EVIDENCE_CHUNKS:
-        low_confidence = True
-        if not filtered and reranked:
-            # Fallback: use top results but mark as low confidence
-            logger.warning(
-                f"[PoolSearch] Insufficient evidence: {len(filtered)} chunks above threshold {threshold:.2f}, "
-                f"falling back to top results (LOW CONFIDENCE)"
-            )
-            filtered = reranked[:top_n]
-        elif filtered:
-            logger.info(
-                f"[PoolSearch] Low evidence: only {len(filtered)} chunks above threshold {threshold:.2f} "
-                f"(need {MIN_EVIDENCE_CHUNKS})"
-            )
-    
-    final_results = filtered[:top_n]
-    
-    # Tag results with confidence metadata
-    for r in final_results:
-        r["_low_confidence"] = low_confidence
-        r["_threshold_used"] = threshold
-    
-    total_time = time.perf_counter() - start_time
-    rerank_time = time.perf_counter() - rerank_start
-    
-    confidence_tag = " [LOW CONFIDENCE]" if low_confidence else ""
-    logger.info(
-        f"[PoolSearch] Pooled {len(pooled_results)} from {source_counts}, "
-        f"threshold={threshold:.2f}, filtered={len(filtered)}, "
-        f"returned={len(final_results)}{confidence_tag} "
-        f"({total_time:.3f}s)"
+    reranker = get_reranker()
+    # Pool size: top_n * 3 to give reranker enough candidates
+    rerank_result = reranker.rerank(
+        search_query, 
+        pooled_results, 
+        top_n=top_n, 
+        threshold=RELEVANCE_THRESHOLD
     )
     
+    # LOG TRACE (Observability)
+    logger.info(
+        f"[SearchTracer] {rerank_result.decision_reason}. "
+        f"Latency: {rerank_result.latency_ms:.1f}ms. "
+        f"DropStats: {rerank_result.drop_stats}"
+    )
+    
+    final_results = rerank_result.sorted_docs
+
+    # ==========================================================================
+    # DUAL GATE: HARD ABORT
+    # ==========================================================================
+    # Gate 1: Score (Handled by Reranker threshold)
+    # Gate 2: Sufficiency (Count >= MIN_EVIDENCE_CHUNKS)
+    
+    unique_docs = len(final_results)  # Count of ALL docs passing threshold
+    top_score = rerank_result.scores[0] if unique_docs > 0 else 0.0
+    # User Request: Accuracy must be 90%+. 60% is too lax for single-source truth.
+    HIGH_CONFIDENCE_THRESHOLD = 0.90
+    
+    passes_gate = False
+    gate_reason = ""
+    
+    if unique_docs >= MIN_EVIDENCE_CHUNKS:
+        passes_gate = True
+        gate_reason = f"Standard Pass ({unique_docs} >= {MIN_EVIDENCE_CHUNKS})"
+    elif unique_docs == 1 and top_score >= HIGH_CONFIDENCE_THRESHOLD:
+        passes_gate = True
+        gate_reason = f"High Confidence Exception (1 doc, score {top_score:.2f} >= {HIGH_CONFIDENCE_THRESHOLD})"
+    else:
+        passes_gate = False
+        gate_reason = f"Insufficient Evidence (Count {unique_docs} < {MIN_EVIDENCE_CHUNKS}, TopScore {top_score:.2f} < {HIGH_CONFIDENCE_THRESHOLD})"
+        
+    if not passes_gate:
+        logger.warning(
+            f"[DualGate] HARD ABORT. {gate_reason}. "
+            f"Returning EMPTY context to force refusal."
+        )
+        return []
+
+    # Tag results with confidence metadata
+    for r in final_results:
+        r["_threshold_used"] = RELEVANCE_THRESHOLD
+        
     return final_results
 
 
@@ -885,6 +856,37 @@ def get_redis_context_chunks(
         seen.add(key)
 
     return merged[:top_n]
+
+
+def get_production_context(
+    session_id: str,
+    query: str,
+    top_n: int = 4,
+) -> List[Dict]:
+    """
+    Production-Grade Context Retrieval.
+    
+    Pipeline:
+    1. Derive specific search query from history.
+    2. Parallel Retrieve (Hybrid + Chroma + Parent).
+    3. Deep Rerank (Cross-Encoder).
+    4. Dual Gate (Score + Support).
+    5. Return structured results (for Validator/Wrapper).
+    """
+    chat_history = get_chat_history(session_id)
+    
+    # Derive search query
+    search_query = derive_search_query(chat_history, query, "", "capabilities")
+    
+    # Run the Production Pipeline (Parallel -> Rerank -> DualGate)
+    results = _parallel_kb_search(
+        search_query=search_query,
+        top_n=top_n,
+        enable_parent=ENABLE_PARENT_RETRIEVER,
+        enable_hybrid=ENABLE_HYBRID_SEARCH,
+    )
+    
+    return results
 
 
 def derive_search_query(chat_history, query, domain_prefix: str, fallback_keywords: str):

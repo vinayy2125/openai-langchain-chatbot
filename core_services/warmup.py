@@ -67,11 +67,22 @@ def warmup_rag_components(background: bool = True) -> Optional[threading.Thread]
             # 1. Initialize ChromaDB singleton
             chroma_ready = False
             try:
-                from app.db.chroma_manager import get_chroma_manager
-                chroma = get_chroma_manager()
-                doc_count = chroma.collection.count()
-                logger.info(f"  ✓ ChromaDB initialized ({doc_count} documents)")
-                chroma_ready = True
+                # Try to import chroma_manager (it handles chromadb import internally)
+                from app.db.chroma_manager import get_chroma_manager, CHROMADB_AVAILABLE
+                
+                if not CHROMADB_AVAILABLE:
+                    logger.warning("  ✗ ChromaDB module not installed. Skipping ChromaDB warm-up.")
+                    logger.info("  Install with: pip install chromadb")
+                    chroma_ready = False
+                else:
+                    chroma = get_chroma_manager()
+                    doc_count = chroma.collection.count()
+                    logger.info(f"  ✓ ChromaDB initialized ({doc_count} documents)")
+                    chroma_ready = True
+            except ImportError as ie:
+                logger.warning(f"  ✗ ChromaDB module not available: {ie}")
+                logger.info("  Install with: pip install chromadb")
+                chroma_ready = False
             except Exception as e:
                 logger.warning(f"  ✗ ChromaDB warm-up failed: {e}")
             

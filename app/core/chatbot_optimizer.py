@@ -5,7 +5,9 @@ from functools import lru_cache
 from langchain_openai import ChatOpenAI
 from app.logger import get_logger
 from app.utils.llm_utils import generate_llm_response
-from app.utils.redis_context import get_redis_context_chunks
+from app.utils.redis_context import get_production_context
+from app.utils.context_wrapper import wrap_context_as_xml
+from app.utils.validator import get_validator
 
 # format_response is now imported only when needed (async version with URL validation)
 from app.utils.prompts import PROMPT_VERSION
@@ -490,7 +492,7 @@ class OptimizedChatbot:
                 # Define tasks
                 tasks = []
                 
-                # Task 1: Redis Context Retrieval
+                # Task 1: Redis Context Retrieval (Production Pipeline)
                 if is_phatic:
                     # Return empty context immediately
                     tasks.append(asyncio.sleep(0, result=[]))
@@ -505,13 +507,15 @@ class OptimizedChatbot:
                                 {"role": msg[0], "content": msg[1]}
                             )
                     
-                    # Fixed top_n=4 for consistent retrieval (removed dynamic calculation)
-                    top_n_value = 4
+                    # Dynamic Top-N Calculation
+                    # Adapts retrieval volume based on query type (Broad vs Specific)
+                    top_n_value = _calculate_dynamic_top_n(query, conversation_history_for_redis)
+                    logger.info(f"[Chatbot] Dynamic Top-N: {top_n_value}")
                     
                     tasks.append(loop.run_in_executor(
                         None,
                         functools.partial(
-                            get_redis_context_chunks,
+                            get_production_context,
                             session_id,
                             query,
                             top_n=top_n_value,
@@ -529,18 +533,31 @@ class OptimizedChatbot:
                 # Execute in parallel
                 results = await asyncio.gather(*tasks)
                 
-                context_chunks = results[0]
+                # List[Dict] from production context
+                kb_chunks = results[0] 
                 user_details, user_details_known = results[1]
                 
             except Exception as e:
                 logger.warning(
                     "Parallel retrieval failed, using fallback sequential: %s", e
                 )
-                context_chunks = []
+                kb_chunks = []
                 user_details = {}
                 user_details_known = False
 
-            context = "\n\n---\n\n".join(map(str, context_chunks or []))
+            # Wrap chunks in XML for Structural Security
+            # Preprocess to ensure 'source' key exists (DeepReranker returns formatted dicts usually)
+            processed_chunks = []
+            if kb_chunks:
+                for chunk in kb_chunks:
+                     # Ensure source_url mapped correctly if missing
+                     if "source" not in chunk:
+                         meta = chunk.get("metadata", {})
+                         chunk["source"] = meta.get("url") or meta.get("source") or "knowledge_base"
+                     processed_chunks.append(chunk)
+
+            context = wrap_context_as_xml(processed_chunks)
+            
             # Build conversation context using LangChain memory (efficient: summary + recent buffer)
             try:
                 from app.utils.conversation_memory import get_session_memory_manager
@@ -787,6 +804,26 @@ class OptimizedChatbot:
                 f"[Chatbot] Final output len={len(safe_final_text)}, funnel_stage='{funnel_stage}'"
             )
 
+            # ============================================================
+            # STEP 4.b: POST-GENERATION VALIDATION (Hallucination Prevention)
+            # ============================================================
+            # Only check validation if we actually had KB context to check against
+            if kb_chunks:
+                validator = get_validator()
+                # Clean markdown/JSON from response text for validation
+                clean_text = response_text # response_text is already extracted from JSON
+                
+                is_valid, validation_msg = validator.validate_response(clean_text, kb_chunks)
+                if not is_valid:
+                    logger.warning(f"[Validator] Blocked Standard Response: {validation_msg}")
+                    # Hard Abort Message
+                    refusal_msg = "I apologize, but I don't have enough verified information to answer that specific question accurately based on our current documentation."
+                    
+                    # Yield as immediate chunk then finish
+                    yield {"status": "chunk", "chunk": refusal_msg}
+                    yield {"status": "done"}
+                    return
+            
             # Step 5: Continue with regular response flow
 
             # Step 6: Stream formatted response
