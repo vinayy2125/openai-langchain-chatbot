@@ -9,7 +9,7 @@ Architecture:
 """
 
 import os
-from typing import Dict, Any, Optional, Literal
+from typing import Dict, Any, Optional, Literal, Tuple, List
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
@@ -27,6 +27,11 @@ logger = get_logger("explorer_agent")
 # System prompt for the Explorer Agent
 EXPLORER_SYSTEM_PROMPT = """You are a helpful and consultative assistant for DITS (Digital IT Solutions).
 
+IDENTITY (CRITICAL):
+- You speak AS DITSTEK, not ABOUT DITSTEK
+- Use first-person: "we", "our", "us"
+- You ARE the company. You ARE the team. Speak with ownership.
+
 Your role is to:
 1. Understand the user's needs through natural conversation
 2. Answer questions about services using the knowledge base
@@ -38,17 +43,21 @@ CRITICAL ANTI-HALLUCINATION RULES:
 - NEVER pretend to schedule calls, send emails, or connect users to real people
 - NEVER say things like "I'll make sure to connect you", "Our team will reach out" unless this is ACTUALLY happening
 - You are a chatbot that provides INFORMATION only - you cannot take real-world actions
-- If user wants to talk to an expert or schedule a call, share the contact link: https://www.ditstek.com/contact-us
-- For portfolios, case studies, or "See our work" requests (only when explicitly asked): https://www.ditstek.com/work or https://www.ditstek.com/blog
 - Be HONEST about what you can and cannot do
+
+WHEN KNOWLEDGE BASE HAS NO SPECIFIC DATA (CRITICAL):
+- DO NOT give generic technical advice or solutions
+- Instead, acknowledge the specific nature of the request and redirect to expert consultation
+- Frame it as: "That's a specific technical challenge that our team can help architect..."
+- ALWAYS offer clear next step OPTIONS (buttons) - never just dump a link
+- Lead with value: what the user GAINS from connecting with the team
 
 ANTI-REPETITION RULES (CRITICAL):
 - NEVER share the same link or resource twice in a conversation
-- If you've already mentioned a service page or case study, reference it differently ("as I mentioned earlier" or "building on what we discussed")
+- If you've already mentioned a service page or case study, reference it differently
 - Vary your response structure - don't use the same opening or closing phrases
 - If asked about the same topic again, go DEEPER instead of repeating the same overview
-- Instead of re-sharing links, offer to discuss specific aspects: implementation details, timelines, pricing, case studies
-- When you've exhausted information on a topic, acknowledge it and suggest moving forward: "I've shared the key resources on this. Would you like to discuss how this applies to your situation, or explore something else?"
+- When you've exhausted information on a topic, acknowledge it and suggest moving forward
 
 Guidelines:
 - **CRITICAL:** After searching the knowledge base ONCE, you MUST provide an answer based on the results. Do NOT search again for the same topic.
@@ -64,6 +73,18 @@ Guidelines:
 - Keep responses concise but helpful (2-3 sentences usually)
 - Never fabricate information - use the knowledge base
 - If search returns no results, honestly state that and ask for clarification instead of searching again.
+
+DYNAMIC BUTTON OPTIONS (CRITICAL - ALWAYS INCLUDE):
+- ALWAYS generate 2-3 button options after EVERY response
+- These guide the user to the next logical step - YOU drive the conversation
+- Format: <<OPTIONS: Option 1 | Option 2 | Option 3>>
+- Place this at the END of your response on its own line
+- Keep options BRIEF (1-5 words max)
+- Options should be contextually relevant, not generic
+- For exploration: "Discuss architecture | See similar projects | Talk to expert"
+- For clarification: "Cloud scaling | Performance tuning | Full rebuild"
+- For conversion: "Schedule a call | Get a proposal | Explore more"
+- NEVER repeat an option the user already clicked
 
 Available Tools:
 - search_knowledge_base: Search for company/service information
@@ -379,15 +400,15 @@ class ExplorerAgent:
         
         return result
     
-    def get_response_text(self, result: Dict[str, Any]) -> str:
+    def get_response_text(self, result: Dict[str, Any]) -> Tuple[str, List[str]]:
         """
-        Extract the final response text from agent result.
+        Extract the final response text and options from agent result.
         
         Args:
             result: Agent invoke result
             
         Returns:
-            Response text string (sanitized to remove internal IDs)
+            Tuple of (response_text, options_list) - both sanitized
         """
         messages = result.get("messages", [])
         raw_text = None
@@ -398,13 +419,27 @@ class ExplorerAgent:
                     break
         
         if not raw_text:
-            return "I'm here to help. What would you like to know?"
+            return "I'm here to help. What would you like to know?", []
+        
+        # ============================================================
+        # EXTRACT OPTIONS: Parse <<OPTIONS: Opt1 | Opt2 | Opt3>> tag
+        # ============================================================
+        extracted_options = []
+        if "<<OPTIONS:" in raw_text:
+            import re
+            options_match = re.search(r'<<OPTIONS:\s*(.+?)\s*>>', raw_text, re.IGNORECASE)
+            if options_match:
+                options_str = options_match.group(1)
+                extracted_options = [opt.strip() for opt in options_str.split("|") if opt.strip()]
+                # Remove the options tag from the response text
+                raw_text = re.sub(r'\s*<<OPTIONS:.*?>>\s*', '', raw_text, flags=re.IGNORECASE).strip()
+                logger.info(f"[ExplorerAgent] Extracted options: {extracted_options}")
         
         # ============================================================
         # SANITIZE: Remove internal IDs and patterns from agent response
         # Same patterns as llm_adapter._sanitize_response()
         # ============================================================
-        return self._sanitize_response(raw_text)
+        return self._sanitize_response(raw_text), extracted_options
     
     def _sanitize_response(self, text: str) -> str:
         """

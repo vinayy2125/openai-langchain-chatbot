@@ -36,7 +36,7 @@ def validate_datasets(data_dir: str = "fine_tuning_data"):
     """Validate all jsonl files in directory."""
     dir_path = Path(data_dir)
     # Validate specific generated files only
-    target_files = ["train.jsonl", "validation.jsonl"]
+    target_files = ["train.jsonl", "validation.jsonl", "website_finetune.jsonl"]
     files = [dir_path / f for f in target_files if (dir_path / f).exists()]
     
     if not files:

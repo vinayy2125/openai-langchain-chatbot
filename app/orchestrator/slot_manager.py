@@ -491,8 +491,8 @@ class SlotManager:
             logger.info(f"[SlotManager] Cleared slots for session: {self.session_id}")
         try:
             delete_session_metadata(self.session_id, "uc1_slots")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"[SlotManager] Failed to delete session metadata in clear(): {e}")
     
     @classmethod
     def clear_session(cls, session_id: str) -> None:
@@ -502,8 +502,8 @@ class SlotManager:
             logger.info(f"[SlotManager] Cleared slots for session: {session_id}")
         try:
             delete_session_metadata(session_id, "uc1_slots")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"[SlotManager] Failed to delete session metadata in clear_session(): {e}")
     
     # ============================================================
     # Lead Capture Tracking (Policy Engine Integration)

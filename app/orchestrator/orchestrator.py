@@ -623,8 +623,8 @@ class ConversationOrchestrator:
                 }
             )
             
-            # Extract response
-            response_text = agent.get_response_text(result)
+            # Extract response and agent-generated options
+            response_text, agent_options = agent.get_response_text(result)
             is_ready = result.get("is_ready", False)
             lead_score = result.get("lead_score", 0)
             
@@ -662,11 +662,15 @@ class ConversationOrchestrator:
                     logger.info("[Orchestrator] Appending email capture prompt")
             
             # ============================================================
-            # GENERATE DYNAMIC OPTIONS FROM RESPONSE (Not static config!)
+            # USE AGENT-GENERATED OPTIONS (from <<OPTIONS: ...>> tag)
             # ============================================================
-            # Use LLM adapter's fallback generator to extract next steps from response
-            dynamic_options = self.llm_adapter._generate_fallback_options(response_text, user_input)
-            logger.info(f"[Orchestrator] Generated dynamic options from agent response: {dynamic_options}")
+            # Prefer agent-generated options, fall back to LLM adapter generator
+            if agent_options:
+                dynamic_options = agent_options
+                logger.info(f"[Orchestrator] Using agent-generated options: {dynamic_options}")
+            else:
+                dynamic_options = self.llm_adapter._generate_fallback_options(response_text, user_input)
+                logger.info(f"[Orchestrator] Generated fallback options: {dynamic_options}")
             
             # Return agent response with DYNAMIC options
             return OrchestratorResponse(
@@ -936,8 +940,8 @@ class ConversationOrchestrator:
                 }
             )
             
-            # Extract response
-            response_text = agent.get_response_text(result)
+            # Extract response and agent-generated options
+            response_text, agent_options = agent.get_response_text(result)
             is_ready = result.get("is_ready", False)
             lead_score = result.get("lead_score", 0)
             
@@ -969,7 +973,10 @@ class ConversationOrchestrator:
                 self._current_state = UC1State.CONSULTATIVE_ALTERNATIVES
                 return self._handle_consultative_alternatives("")
             
-            # Return agent response
+            # Use agent options if available
+            exploration_options = agent_options if agent_options else []
+            
+            # Return agent response with dynamic options
             return OrchestratorResponse(
                 state=self._current_state,
                 call_spec=AdapterCallSpec(
@@ -981,6 +988,7 @@ class ConversationOrchestrator:
                 ),
                 input_type="text",
                 message=response_text,  # Agent already generated the text
+                options=exploration_options,  # Agent-generated options
                 metadata={"agent_mode": True, "lead_score": lead_score}
             )
             
@@ -1302,6 +1310,12 @@ class ConversationOrchestrator:
         self.slot_manager.clear()  # Clear UC1 context for clean restart
         
         logger.info(f"[Orchestrator] EXIT complete, state reset to ENTRY for re-engagement")
+        
+        # CRITICAL FIX: Clear the orchestrator session entirely
+        # This removes the instance from _instances and clears slots from _session_slots
+        # This ensures the next request (e.g. "who is nidhi?") is seeing as NOT in UC1 mode,
+        # so it routes to NON_UC1 (website exploration) instead of UC1 entry.
+        self.clear_session(self.session_id)
         
         return response
     
