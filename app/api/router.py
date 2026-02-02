@@ -12,7 +12,7 @@ from .helpers import (
     get_messages_for_session
 )
 from . import helpers
-from app.db.base import get_db_conn
+from app.db.base import get_db_conn, return_db_conn
 # Get centralized logger
 logger = get_logger(__name__)
 
@@ -79,7 +79,7 @@ async def register_user(user: UserCreate):
         if cursor:
             cursor.close()
         if conn:
-            conn.close()
+            return_db_conn(conn)
 
 
 # Health Check Route
