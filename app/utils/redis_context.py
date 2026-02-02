@@ -346,7 +346,7 @@ def get_redis_context_chunks(
         merged.append(t)
         seen.add(key)
 
-    return merged
+    return merged[:top_n]
 
 
 def derive_search_query(chat_history, query, domain_prefix: str, fallback_keywords: str):

@@ -46,7 +46,8 @@ def similarity_search(session_id: str, query: str, top_n: int = 4) -> list:
         q = (
             Query(knn_query)
             .sort_by("vector_score", asc=True)
-            .return_fields("text", "chunk_id", "timestamp", "embedding", "vector_score")
+            .sort_by("vector_score", asc=True)
+            .return_fields("text", "chunk_id", "timestamp", "vector_score")
             .paging(0, top_n)
             .dialect(2)
         )
@@ -65,15 +66,16 @@ def similarity_search(session_id: str, query: str, top_n: int = 4) -> list:
                 distance = 0.0
             similarity = 1.0 - (distance / 2.0)
 
-            embedding = getattr(doc, "embedding", None)
             embedding_list = []
-            if isinstance(embedding, str):
-                try:
-                    embedding_list = json.loads(embedding)
-                except Exception:
-                    embedding_list = []
-            elif isinstance(embedding, (list, tuple)):
-                embedding_list = list(embedding)
+            # Embedding removed from response optimization
+            # embedding = getattr(doc, "embedding", None)
+            # if isinstance(embedding, str):
+            #     try:
+            #         embedding_list = json.loads(embedding)
+            #     except Exception:
+            #         embedding_list = []
+            # elif isinstance(embedding, (list, tuple)):
+            #     embedding_list = list(embedding)
 
             response_text = getattr(doc, "text", None) or getattr(doc, "response", None) or ""
             chunk_id = getattr(doc, "chunk_id", None) or getattr(doc, "id", None) or "unknown"
@@ -108,7 +110,7 @@ def similarity_search_chat_history(query: str, top_n: int = 4) -> list:
         q = (
             Query(knn_query)
             .sort_by("vector_score", asc=True)
-            .return_fields("session_id", "messages_text", "embedding", "vector_score")
+            .return_fields("session_id", "messages_text", "vector_score")
             .paging(0, top_n)
             .dialect(2)
         )
@@ -127,15 +129,16 @@ def similarity_search_chat_history(query: str, top_n: int = 4) -> list:
                 distance = 0.0
             similarity = 1.0 - (distance / 2.0)
 
-            embedding = getattr(doc, "embedding", None)
             embedding_list = []
-            if isinstance(embedding, str):
-                try:
-                    embedding_list = json.loads(embedding)
-                except Exception:
-                    embedding_list = []
-            elif isinstance(embedding, (list, tuple)):
-                embedding_list = list(embedding)
+            # Embedding removed from response optimization
+            # embedding = getattr(doc, "embedding", None)
+            # if isinstance(embedding, str):
+            #     try:
+            #         embedding_list = json.loads(embedding)
+            #     except Exception:
+            #         embedding_list = []
+            # elif isinstance(embedding, (list, tuple)):
+            #     embedding_list = list(embedding)
 
             messages_text = getattr(doc, "messages_text", None) or ""
             session_id = getattr(doc, "session_id", None) or getattr(doc, "id", None) or "unknown"

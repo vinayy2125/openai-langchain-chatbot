@@ -1,6 +1,14 @@
 """
 Redis prompts helper
 
+IMPORTANT: This module is NOT used for generating chatbot response prompts.
+The chatbot uses app.utils.prompts.final_response_prompt() directly.
+
+This module provides Redis-based prompt storage/retrieval for:
+- Fallback scenarios when prompts.py is unavailable
+- Administrative/utility purposes
+- Prompt versioning and archival
+
 Provides a single public function `load_prompts(redis_conn, limit=10, retries=3, backoff=0.5)` which:
 - Validates the provided `redis_conn` by pinging it.
 - Ensures a RediSearch index named `chat_prompts` exists (creates if missing).
@@ -490,6 +498,15 @@ def load_prompts(redis_conn, limit: int = 10, retries: int = 3, backoff: float =
 
     Returns a list of prompt dicts (may be empty). Raises on fatal Redis errors.
     """
+    # ============================================================
+    # PROMPT SOURCE CLARITY: This function is NOT used for chatbot responses
+    # Chatbot uses app.utils.prompts.final_response_prompt() directly
+    # This is only for fallback/utility purposes
+    # ============================================================
+    logger.info(
+        "[PROMPT_SOURCE] load_prompts() called - This is for fallback/utility, NOT chatbot response generation"
+    )
+    
     # basic validation
     _validate_redis_conn(redis_conn)
 
@@ -520,11 +537,12 @@ def load_prompts(redis_conn, limit: int = 10, retries: int = 3, backoff: float =
         ("hashes", _fetch_from_hashes),
     ]
 
+
     for name, func in strategies:
         try:
             items = func(redis_conn, limit=limit)
             if items:
-                logger.info("Fetched %s prompts using strategy: %s", len(items), name)
+                logger.info("Fetched %s prompts using strategy: %s (from Redis)", len(items), name)
                 # validate items
                 valid = []
                 for it in items:
@@ -542,6 +560,7 @@ def load_prompts(redis_conn, limit: int = 10, retries: int = 3, backoff: float =
     # fallback to prompts module
     fallback = _fallback_to_prompts_module(limit)
     if fallback:
+        logger.info("Using prompts from prompts.py (local module fallback)")
         return fallback
 
     logger.info("No prompts found in Redis or local prompts module; returning empty list")

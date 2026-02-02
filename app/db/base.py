@@ -28,46 +28,27 @@ def get_db_conn():
     """
     Get a connection to the PostgreSQL database.
     
-    This is the centralized method for all database connections in the application.
-    It includes proper error handling and connection validation.
+    DEPRECATED: This function now uses connection pooling for better performance.
+    Consider using PooledDatabaseConnection context manager instead.
+    
+    WARNING: Connections from this function MUST be explicitly closed by the caller.
+    The connection will NOT be automatically returned to the pool.
     
     Returns:
-        psycopg2.connection: A PostgreSQL database connection
+        psycopg2.connection: A PostgreSQL database connection from the pool
         
     Raises:
         ConnectionError: If database connection fails
         ValueError: If required environment variables are missing
     """
-    # Validate required environment variables
-    missing_vars = []
-    if not DB_NAME:
-        missing_vars.append("DB_NAME")
-    if not DB_USER:
-        missing_vars.append("DB_USER")
-    if not DB_PASSWORD:
-        missing_vars.append("DB_PASSWORD")
-    
-    if missing_vars:
-        raise ValueError(f"Missing required database environment variables: {', '.join(missing_vars)}")
-    
     try:
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER, 
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT,
-            options="-c client_encoding=UTF8"
-        )
-        logger.debug("Database connection established successfully")
+        from app.db.pool import get_pooled_connection
+        conn = get_pooled_connection()
+        logger.debug("Database connection acquired from pool")
         return conn
-        
-    except psycopg2.Error as e:
-        logger.error(f"Database connection failed: {e}")
-        raise ConnectionError(f"Failed to connect to database: {e}") from e
     except Exception as e:
-        logger.error(f"Unexpected error during database connection: {e}")
-        raise ConnectionError(f"Unexpected database connection error: {e}") from e
+        logger.error(f"Failed to get pooled connection: {e}")
+        raise ConnectionError(f"Failed to get database connection: {e}") from e
 
 
 def get_db_connection_info() -> dict:
@@ -86,55 +67,49 @@ def get_db_connection_info() -> dict:
     }
 
 
+def return_db_conn(conn):
+    """
+    Return a connection to the pool.
+    
+    This should be called after using get_db_conn() to ensure the connection
+    is properly returned to the pool instead of being closed.
+    
+    Args:
+        conn: The connection to return to the pool
+    """
+    try:
+        from app.db.pool import return_pooled_connection
+        return_pooled_connection(conn)
+        logger.debug("Database connection returned to pool")
+    except Exception as e:
+        logger.error(f"Failed to return connection to pool: {e}")
+
+
+
 class DatabaseConnection:
     """
     Context manager for database connections with automatic cleanup.
     
+    Now uses connection pooling for better performance.
+    
     Usage:
         with DatabaseConnection() as (conn, cursor):
             cursor.execute("SELECT * FROM users")
-            # Connection and cursor automatically closed
+            # Connection automatically returned to pool
     """
     
     def __init__(self):
-        self.conn = None
-        self.cursor = None
+        """Initialize using the pooled connection manager."""
+        from app.db.pool import PooledDatabaseConnection
+        self._pooled_context = PooledDatabaseConnection()
     
     def __enter__(self):
-        self.conn = get_db_conn()
-        self.cursor = self.conn.cursor()
-        return self.conn, self.cursor
+        """Acquire connection from pool."""
+        return self._pooled_context.__enter__()
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type:
-            # If there was an exception, rollback the transaction
-            if self.conn:
-                try:
-                    self.conn.rollback()
-                    logger.warning("Transaction rolled back due to exception")
-                except Exception as e:
-                    logger.error(f"Error during rollback: {e}")
-        else:
-            # If no exception, commit the transaction
-            if self.conn:
-                try:
-                    self.conn.commit()
-                except Exception as e:
-                    logger.error(f"Error during commit: {e}")
-        
-        # Close cursor and connection
-        if self.cursor:
-            try:
-                self.cursor.close()
-            except Exception as e:
-                logger.error(f"Error closing cursor: {e}")
-        
-        if self.conn:
-            try:
-                self.conn.close()
-                logger.debug("Database connection closed")
-            except Exception as e:
-                logger.error(f"Error closing connection: {e}")
+        """Return connection to pool."""
+        return self._pooled_context.__exit__(exc_type, exc_val, exc_tb)
 
 
 def test_database_connection() -> bool:
