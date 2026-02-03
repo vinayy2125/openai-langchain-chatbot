@@ -30,6 +30,23 @@ logger = get_logger("llm_adapter")
 
 
 # =========================================================================
+# SLOT SATURATION PATTERNS - Questions prohibited when slot is filled
+# =========================================================================
+# These patterns are BLOCKED when context_signal slot is filled
+CONTEXT_SIGNAL_PROHIBITIONS = [
+    "what are you looking for",
+    "what do you need",
+    "what's your use case",
+    "what is your use case",
+    "tell me more about your project",
+    "could you share more details",
+    "what brings you here",
+    "how can i help you",
+    "what can i help you with",
+]
+
+
+# =========================================================================
 # KNOWLEDGE BASE RETRIEVAL - Per-call KB context injection
 # =========================================================================
 def _get_kb_context(query: str, session_id: str, top_k: int = 3) -> Tuple[str, List[Dict]]:
@@ -120,20 +137,8 @@ class OutputViolation(Enum):
 
 
 # =========================================================================
-# SLOT SATURATION PATTERNS - Questions prohibited when slot is filled
+# KNOWLEDGE BASE RETRIEVAL - Per-call KB context injection
 # =========================================================================
-# These patterns are BLOCKED when context_signal slot is filled
-CONTEXT_SIGNAL_PROHIBITIONS = [
-    "what are you looking for",
-    "what do you need",
-    "what's your use case",
-    "what is your use case",
-    "tell me more about your project",
-    "could you share more details",
-    "what brings you here",
-    "how can i help you",
-    "what can i help you with",
-]
 
 # =========================================================================
 # AUTHORITY & CONTENT MODE ENUMS (CONTRACT DEFINITION)

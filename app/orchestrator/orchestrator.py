@@ -313,7 +313,8 @@ class ConversationOrchestrator:
             db_details, db_user_details_known = get_user_session_info(self.session_id)
             
             # Sync user_details_known flag (authoritative from DB)
-            if db_user_details_known and not self.slots.user_details_known:
+            # Only sync True if we actually have an email, otherwise we risk skipping capture
+            if db_user_details_known and db_details.get("email") and not self.slots.user_details_known:
                 self.slot_manager.set_user_details_known(True, caller="db_sync")
                 logger.info(f"[Orchestrator] Synced user_details_known=True from DB")
             
@@ -567,9 +568,9 @@ class ConversationOrchestrator:
                 
                 # High-intent CTAs (UC2, calendar) -> Check user_details_known first
                 if selected_cta.outcome in ("UC2", "calendar"):
-                    # Use user_details_known as single source of truth
-                    if self.slots.user_details_known:
-                        logger.info(f"[Orchestrator] High-intent CTA: user_details_known=True, skip capture")
+                    # Use user_details_known as single source of truth, but verify email slot is actually filled
+                    if self.slots.user_details_known and self.slots.user_email:
+                        logger.info(f"[Orchestrator] High-intent CTA: details known and verified, skip capture")
                         self._current_state = UC1State.EXIT
                         return self._handle_exit()
                     elif self.slots.user_email:
@@ -615,7 +616,11 @@ class ConversationOrchestrator:
         # AGENT MODE: Use ExplorerAgent for smart, lead-generative responses
         # =========================================================================
         if use_agent:
-            return self._handle_free_exploration_with_agent(user_input, bucket, exploration_options)
+            return self._handle_agent_exploration(
+                user_input=user_input,
+                bucket=bucket,
+                mode="free_exploration"
+            )
         
         # Traditional mode: Use LLM adapter directly
         return OrchestratorResponse(
@@ -632,14 +637,14 @@ class ConversationOrchestrator:
             metadata={"mode": "free_exploration", "paused_state": self.slots.paused_state}
         )
     
-    def _handle_free_exploration_with_agent(
+    def _handle_agent_exploration(
         self, 
         user_input: str, 
         bucket: CapabilityBucket,
-        exploration_options: List[str]
+        mode: str = "exploration" # "exploration" or "free_exploration"
     ) -> OrchestratorResponse:
         """
-        Handle FREE_EXPLORATION using the ReAct ExplorerAgent.
+        Unified handler for Agent-based exploration.
         
         The agent:
         - Uses search_knowledge_base for domain-specific answers
@@ -648,19 +653,20 @@ class ConversationOrchestrator:
         """
         try:
             from app.agents.explorer_agent import get_explorer_agent
+            from app.agents.tools.rag_search import URL_PATTERN
             
             agent = get_explorer_agent()
             
-            # Invoke agent with current context (including shared URLs to filter)
+            # Invoke agent with current context
             result = agent.invoke(
-                user_input=user_input,
+                user_input=user_input or "",
                 session_id=self.session_id,
                 initial_slots={
                     "user_name": self.slots.user_name,
                     "user_email": self.slots.user_email,
                     "context_signal": self.slots.context_signal,
                     "capability_bucket": self.slots.capability_bucket,
-                    "shared_urls": self.slot_manager.get_shared_urls(),  # Pass for filtering
+                    "shared_urls": self.slot_manager.get_shared_urls(),
                 }
             )
             
@@ -669,85 +675,98 @@ class ConversationOrchestrator:
             is_ready = result.get("is_ready", False)
             lead_score = result.get("lead_score", 0)
             
-            # ============================================================
-            # TRACK URLS IN RESPONSE (Prevents repetitive sharing)
-            # ============================================================
-            from app.agents.tools.rag_search import URL_PATTERN
+            # 1. Track URLs in response
             found_urls = URL_PATTERN.findall(response_text.lower())
             for url in found_urls:
                 self.slot_manager.add_shared_url(url)
             
-            # Sync any slots captured by agent
+            # 2. Sync slots captured by agent
             if result.get("slots"):
-                if result["slots"].get("user_name") and not self.slots.user_name:
-                    self.slot_manager.set_user_name(result["slots"]["user_name"], caller="orchestrator")
-                if result["slots"].get("user_email") and not self.slots.user_email:
-                    self.slot_manager.set_user_email(result["slots"]["user_email"], caller="orchestrator")
-                if result["slots"].get("context_signal") and not self.slots.context_signal:
-                    self.slot_manager.set_context_signal(result["slots"]["context_signal"], caller="orchestrator")
+                s = result["slots"]
+                if s.get("user_name") and not self.slots.user_name:
+                    self.slot_manager.set_user_name(s["user_name"], caller="orchestrator")
+                
+                if s.get("user_email") and not self.slots.user_email:
+                    # Validate email from agent before syncing
+                    is_email_valid, _ = validate_email(s["user_email"])
+                    if is_email_valid:
+                        self.slot_manager.set_user_email(s["user_email"], caller="orchestrator")
+                
+                if s.get("context_signal") and not self.slots.context_signal:
+                    self.slot_manager.set_context_signal(s["context_signal"], caller="orchestrator")
             
-            logger.info(f"[Orchestrator] Agent exploration: ready={is_ready}, score={lead_score}")
+            logger.info(f"[Orchestrator] Agent {mode}: ready={is_ready}, score={lead_score}")
             
-            # If user is ready, show CTAs
+            # 3. Handle Readiness (Mode-Specific)
             if is_ready:
                 self.slot_manager.mark_exploration_complete()
-                exploration_options = [cta.choice for cta in self.config.exit_ctas]
+                if mode == "free_exploration":
+                    # Free mode: show exit CTAs
+                    dynamic_options = [cta.choice for cta in self.config.exit_ctas]
+                else:
+                    # Regular mode: advance to alternatives
+                    self._current_state = UC1State.CONSULTATIVE_ALTERNATIVES
+                    return self._handle_consultative_alternatives("")
+            else:
+                # Not ready: use agent options or fall back
+                if agent_options:
+                    dynamic_options = agent_options
+                else:
+                    dynamic_options = self.llm_adapter._generate_fallback_options(response_text, user_input)
             
-            # Check if we should ask for email (progressive lead capture)
+            # 4. Handle Progressive Lead Capture (Soft Ask)
             email_prompt = ""
             if self.config.email_capture and not self.slots.user_email:
                 min_turns = self.config.email_capture.min_turns_before_ask
                 if self.slot_manager.should_ask_for_email(min_turns=min_turns):
                     email_prompt = f"\n\n{self.config.email_capture.soft_prompt}"
                     self.slot_manager.mark_email_asked()
-                    logger.info("[Orchestrator] Appending email capture prompt")
+                    # REDESIGN: DO NOT transition state for soft asks.
+                    # This keeps the conversation in exploration mode, 
+                    # allowing buttons and questions to be processed normally.
+                    # self._current_state = UC1State.EMAIL_CAPTURE
+                    logger.info("[Orchestrator] Progressive Email Capture triggered (non-blocking).")
             
-            # ============================================================
-            # USE AGENT-GENERATED OPTIONS (from <<OPTIONS: ...>> tag)
-            # ============================================================
-            # Prefer agent-generated options, fall back to LLM adapter generator
-            if agent_options:
-                dynamic_options = agent_options
-                logger.info(f"[Orchestrator] Using agent-generated options: {dynamic_options}")
-            else:
-                dynamic_options = self.llm_adapter._generate_fallback_options(response_text, user_input)
-                logger.info(f"[Orchestrator] Generated fallback options: {dynamic_options}")
-            
-            # Return agent response with DYNAMIC options
+            # 5. Build Final Response
             return OrchestratorResponse(
                 state=self._current_state,
                 call_spec=AdapterCallSpec(
-                    state=UC1State.FREE_EXPLORATION,
-                    response_intent=ResponseIntent.PROMPT,
+                    state=UC1State.FREE_EXPLORATION if mode == "free_exploration" else UC1State.EXPLORATION_LAYER,
+                    response_intent=ResponseIntent.PROMPT if mode == "free_exploration" else ResponseIntent.REFLECT,
                     user_input=user_input,
                     slots=self.slots,
                     bucket=bucket,
                 ),
                 input_type="text",
-                message=response_text + email_prompt,  # Agent already generated the text
-                options=dynamic_options,  # DYNAMIC options from response, not static config!
+                message=response_text + email_prompt,
+                options=dynamic_options,
                 metadata={
-                    "mode": "agent_exploration", 
+                    "mode": f"agent_{mode}", 
                     "lead_score": lead_score,
-                    "paused_state": self.slots.paused_state
+                    "paused_state": self.slots.paused_state if mode == "free_exploration" else None
                 }
             )
             
         except Exception as e:
-            logger.error(f"[Orchestrator] Agent exploration failed: {e}, falling back to traditional")
-            return OrchestratorResponse(
-                state=self._current_state,
-                call_spec=AdapterCallSpec(
-                    state=UC1State.FREE_EXPLORATION,
-                    response_intent=ResponseIntent.PROMPT,
-                    user_input=user_input,
-                    slots=self.slots,
-                    bucket=bucket,
-                ),
-                input_type="text",
-                options=exploration_options,
-                metadata={"mode": "free_exploration", "paused_state": self.slots.paused_state}
-            )
+            logger.error(f"[Orchestrator] Agent exploration failed: {e}")
+            if mode == "free_exploration":
+                # Fallback to traditional free exploration
+                return OrchestratorResponse(
+                    state=self._current_state,
+                    call_spec=AdapterCallSpec(
+                        state=UC1State.FREE_EXPLORATION,
+                        response_intent=ResponseIntent.PROMPT,
+                        user_input=user_input,
+                        slots=self.slots,
+                        bucket=bucket,
+                    ),
+                    input_type="text",
+                    options=self._get_exploration_buttons(bucket),
+                    metadata={"mode": "free_exploration", "paused_state": self.slots.paused_state}
+                )
+            else:
+                # Fallback to traditional exploration layer
+                return self._handle_exploration_traditional(user_input)
 
     
     def _handle_entry(self) -> OrchestratorResponse:
@@ -935,6 +954,21 @@ class ConversationOrchestrator:
         self.slot_manager.increment_engagement(EngagementEvent.TEXT_PROVIDED)
         self.slot_manager.reset_retry_count()  # Successful capture
         
+        # Update DB with name (user_details_known remains False until email is provided)
+        try:
+            from app.api.helpers import _update_user_by_session_sync
+            from app.api.models import UserCreate
+            _update_user_by_session_sync(
+                self.session_id, 
+                UserCreate(
+                    username=user_input.strip(),
+                    user_details_known=False # False until we get email
+                )
+            )
+            logger.info(f"[Orchestrator] Name captured and saved to DB: {user_input.strip()}")
+        except Exception as e:
+            logger.warning(f"[Orchestrator] Failed to update DB with name: {e}")
+        
         # Check if we're in close chat flow
         if self.slots.close_chat_pending:
             # Name captured during close chat - now get email
@@ -972,79 +1006,12 @@ class ConversationOrchestrator:
         
         The agent handles dynamic Q&A, slot gathering, and readiness detection.
         """
-        try:
-            from app.agents.explorer_agent import get_explorer_agent
-            
-            agent = get_explorer_agent()
-            bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
-            
-            # Invoke agent with current context (including shared URLs to filter)
-            result = agent.invoke(
-                user_input=user_input,
-                session_id=self.session_id,
-                initial_slots={
-                    "user_name": self.slots.user_name,
-                    "context_signal": self.slots.context_signal,
-                    "capability_bucket": self.slots.capability_bucket,
-                    "shared_urls": self.slot_manager.get_shared_urls(),  # Pass for filtering
-                }
-            )
-            
-            # Extract response and agent-generated options
-            response_text, agent_options = agent.get_response_text(result)
-            is_ready = result.get("is_ready", False)
-            lead_score = result.get("lead_score", 0)
-            
-            # ============================================================
-            # TRACK URLS IN RESPONSE (Prevents repetitive sharing)
-            # ============================================================
-            from app.agents.tools.rag_search import URL_PATTERN
-            found_urls = URL_PATTERN.findall(response_text.lower())
-            for url in found_urls:
-                self.slot_manager.add_shared_url(url)
-            
-            # Sync any slots captured by agent
-            if result.get("slots"):
-                if result["slots"].get("user_name"):
-                    self.slot_manager.set_user_name(result["slots"]["user_name"], caller="orchestrator")
-                if result["slots"].get("user_email"):
-                    # Validate email from agent before syncing
-                    is_email_valid, _ = validate_email(result["slots"]["user_email"])
-                    if is_email_valid:
-                        self.slot_manager.set_user_email(result["slots"]["user_email"], caller="orchestrator")
-                if result["slots"].get("context_signal"):
-                    self.slot_manager.set_context_signal(result["slots"]["context_signal"], caller="orchestrator")
-            
-            logger.info(f"[Orchestrator] Agent exploration: ready={is_ready}, score={lead_score}")
-            
-            # Check if ready for options
-            if is_ready:
-                self.slot_manager.mark_exploration_complete()
-                self._current_state = UC1State.CONSULTATIVE_ALTERNATIVES
-                return self._handle_consultative_alternatives("")
-            
-            # Use agent options if available
-            exploration_options = agent_options if agent_options else []
-            
-            # Return agent response with dynamic options
-            return OrchestratorResponse(
-                state=self._current_state,
-                call_spec=AdapterCallSpec(
-                    state=UC1State.EXPLORATION_LAYER,
-                    response_intent=ResponseIntent.REFLECT,
-                    user_input=user_input,
-                    slots=self.slots,
-                    bucket=bucket,
-                ),
-                input_type="text",
-                message=response_text,  # Agent already generated the text
-                options=exploration_options,  # Agent-generated options
-                metadata={"agent_mode": True, "lead_score": lead_score}
-            )
-            
-        except Exception as e:
-            logger.error(f"[Orchestrator] Agent exploration failed: {e}, falling back to traditional")
-            return self._handle_exploration_traditional(user_input)
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        return self._handle_agent_exploration(
+            user_input=user_input,
+            bucket=bucket,
+            mode="exploration"
+        )
     
     def _handle_exploration_traditional(self, user_input: str) -> OrchestratorResponse:
         """
@@ -1304,7 +1271,25 @@ class ConversationOrchestrator:
         is_valid, reason = validate_email(user_input)
         
         if not is_valid:
-            # Retry logic
+            # SAFETY NET: Check if this "invalid email" is actually a valid button click or navigation intent
+            # This prevents being "locked" in email capture if the user changes their mind.
+            bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+            if bucket:
+                from app.orchestrator.uc1_config import get_bucket_by_trigger
+                # Check alternatives
+                if user_input in bucket.alternatives:
+                    logger.info(f"[Orchestrator] Button click '{user_input}' detected during email capture. Pivoting back to EXPLORATION.")
+                    self._current_state = UC1State.EXPLORATION_LAYER
+                    return self._handle_exploration_layer(user_input)
+                
+                # Check generic exploration buttons
+                all_buttons = self.config.exploration_buttons.get("default", []) + self.config.exploration_buttons.get(bucket.id, [])
+                if user_input in all_buttons:
+                    logger.info(f"[Orchestrator] Exploration button '{user_input}' detected. Pivoting back to FREE_EXPLORATION.")
+                    self._current_state = UC1State.FREE_EXPLORATION
+                    return self._handle_free_exploration(user_input)
+
+            # Retry email capture logic
             self.slot_manager.increment_retry()
             # Construct retry logic
             prompt = self.config.email_capture.prompt if self.config.email_capture else "What's the best email to reach you?"
@@ -1320,12 +1305,30 @@ class ConversationOrchestrator:
                 message=f"Please provide a valid email format (e.g., name@company.com). {prompt}"
             )
         
-        # 4. Valid -> Save -> Exit
+        # 4. Valid -> Save to slots AND DB
         self.slot_manager.set_user_email(user_input, caller="orchestrator")
         # Infer name if missing 
         if not self.slots.user_name:
             inferred = user_input.split("@")[0].capitalize()
             self.slot_manager.set_user_name(inferred, caller="orchestrator")
+        
+        # Update DB with user details (sets user_details_known=True)
+        try:
+            from app.api.helpers import _update_user_by_session_sync
+            from app.api.models import UserCreate
+            _update_user_by_session_sync(
+                self.session_id, 
+                UserCreate(
+                    username=self.slots.user_name,
+                    email=user_input,
+                    user_details_known=True
+                )
+            )
+            # Also update slot to reflect DB state
+            self.slot_manager.set_user_details_known(True, caller="orchestrator")
+            logger.info(f"[Orchestrator] Email captured and saved to DB: {user_input}")
+        except Exception as e:
+            logger.warning(f"[Orchestrator] Failed to update DB with email: {e}")
         
         logger.info(f"[Orchestrator] Email captured: {user_input}")
         
@@ -1586,13 +1589,14 @@ class ConversationOrchestrator:
         
         # Build personalized summary
         user_name = self.slots.user_name or "there"
+        email_part = f" at {self.slots.user_email}" if self.slots.user_email else ""
         
         if bucket:
-            summary = f"Thanks for chatting, {user_name}! We discussed {bucket.trigger}. Our team will reach out at {self.slots.user_email} within 1 business day."
+            summary = f"Thanks for chatting, {user_name}! We discussed {bucket.trigger}. Our team will reach out{email_part} within 1 business day."
         else:
-            summary = f"Thanks for chatting, {user_name}! Our team will reach out at {self.slots.user_email} within 1 business day."
+            summary = f"Thanks for chatting, {user_name}! Our team will reach out{email_part} within 1 business day."
         
-        logger.info(f"[Orchestrator] Close Chat with summary for: {self.slots.user_email}")
+        logger.info(f"[Orchestrator] Close Chat with summary for: {self.slots.user_email or 'anonymous'}")
         
         # Clear the close_chat_pending flag
         self.slot_manager.set_close_chat_pending(False, caller="orchestrator")

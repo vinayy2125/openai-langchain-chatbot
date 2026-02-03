@@ -97,13 +97,18 @@ class ButtonManager:
         
         if state == UC1State.EXPLORATION_LAYER:
             # DYNAMIC FIRST: Use LLM-generated next-step options if available
-            if dynamic_options:
-                valid_opts = [opt[:30] for opt in dynamic_options if opt.strip()][:3]
-                if valid_opts:
-                    logger.info(f"[ButtonManager] EXPLORATION_LAYER: Using dynamic options: {valid_opts}")
-                    return valid_opts
-            # Fallback: Show bucket alternatives (LOG WARNING - dynamic options should be preferred)
-            logger.warning(f"[ButtonManager] EXPLORATION_LAYER: No dynamic options, falling back to static alternatives")
+            # Note: dynamic_options=[] means "intentionally no options", None means "not generated"
+            if dynamic_options is not None:
+                if dynamic_options:  # Has actual options
+                    valid_opts = [opt[:30] for opt in dynamic_options if opt.strip()][:3]
+                    if valid_opts:
+                        logger.info(f"[ButtonManager] EXPLORATION_LAYER: Using dynamic options: {valid_opts}")
+                        return valid_opts
+                # Empty list = intentionally no options
+                logger.info(f"[ButtonManager] EXPLORATION_LAYER: Dynamic options empty (intentional), showing no buttons")
+                return []
+            # Fallback: Only when dynamic_options is None (not generated at all)
+            logger.warning(f"[ButtonManager] EXPLORATION_LAYER: No dynamic options generated, falling back to static")
             if bucket and bucket.alternatives:
                 return list(bucket.alternatives)
             if slots.capability_bucket:
@@ -114,13 +119,18 @@ class ButtonManager:
         
         if state == UC1State.CONSULTATIVE_ALTERNATIVES:
             # DYNAMIC FIRST: Use LLM-generated next-step options if available
-            if dynamic_options:
-                valid_opts = [opt[:30] for opt in dynamic_options if opt.strip()][:3]
-                if valid_opts:
-                    logger.info(f"[ButtonManager] CONSULTATIVE_ALTERNATIVES: Using dynamic options: {valid_opts}")
-                    return valid_opts
-            # Fallback: Show bucket alternatives (LOG WARNING - dynamic options should be preferred)
-            logger.warning(f"[ButtonManager] CONSULTATIVE_ALTERNATIVES: No dynamic options, falling back to static alternatives")
+            # Note: dynamic_options=[] means "intentionally no options", None means "not generated"
+            if dynamic_options is not None:
+                if dynamic_options:  # Has actual options
+                    valid_opts = [opt[:30] for opt in dynamic_options if opt.strip()][:3]
+                    if valid_opts:
+                        logger.info(f"[ButtonManager] CONSULTATIVE_ALTERNATIVES: Using dynamic options: {valid_opts}")
+                        return valid_opts
+                # Empty list = intentionally no options
+                logger.info(f"[ButtonManager] CONSULTATIVE_ALTERNATIVES: Dynamic options empty (intentional), showing no buttons")
+                return []
+            # Fallback: Only when dynamic_options is None (not generated at all)
+            logger.warning(f"[ButtonManager] CONSULTATIVE_ALTERNATIVES: No dynamic options generated, falling back to static")
             if bucket and bucket.alternatives:
                 return list(bucket.alternatives)
             return []
