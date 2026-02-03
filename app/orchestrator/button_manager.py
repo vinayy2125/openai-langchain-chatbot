@@ -152,8 +152,8 @@ class ButtonManager:
             return self._get_exploration_buttons(bucket, slots)
         
         if state == UC1State.EXIT:
-            # No buttons on exit
-            return []
+            # Show post-CTA options
+            return ["Restart Conversation", "Close Chat"]
         
         # Fallback: No buttons
         logger.warning(f"[ButtonManager] Unknown state: {state}")
@@ -198,6 +198,12 @@ class ButtonManager:
             if cta.choice.lower() == input_lower:
                 logger.info(f"[ButtonManager] CTA click: {cta.choice}")
                 return ("cta", cta.action)
+        
+        # Check Post-CTA flow buttons
+        if input_lower == "restart conversation":
+            return ("meta", "restart")
+        if input_lower == "close chat":
+            return ("meta", "close_chat")
         
         return None
     

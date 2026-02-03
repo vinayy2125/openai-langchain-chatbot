@@ -821,21 +821,11 @@ async def send_message_stream(req: SentMessage):
         if session_ended:
             async def end_session_async():
                 try:
-                    conn = get_db_conn()
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        """
-                        UPDATE sessions SET is_active = FALSE WHERE session_id = %s
-                        """,
-                        (str(session_id),)
-                    )
-                    conn.commit()
-                    cursor.close()
-
-                    return_db_conn(conn)
-                    logger.info(f"[OPTIMIZED_FLOW] Updated is_active to FALSE for ended session_id={session_id}")
+                    # Use existing helper to handle both DB update and email trigger
+                    await end_session_helper(session_id)
+                    logger.info(f"[OPTIMIZED_FLOW] session_ended triggered end_session_helper for session_id={session_id}")
                 except Exception as e:
-                    logger.error(f"[OPTIMIZED_FLOW] Failed to update is_active for ended session_id={session_id}: {e}")
+                    logger.error(f"[OPTIMIZED_FLOW] Failed to end session for session_id={session_id}: {e}")
             
             asyncio.create_task(end_session_async())
 

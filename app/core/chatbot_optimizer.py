@@ -264,16 +264,20 @@ class OptimizedChatbot:
             get_user_details_known_from_db,
         )  # Do Not Move Outside Function
 
-        """
-        Generate a detailed response for a query and stream structured events.
-        Yields dict events used by the API layer: 
-        {status: 'chunk'|'form_trigger'|'meta', 'chunk': ...}
+        from app.logger import session_id_context
         
-        PROMPT AUTHORITY ARCHITECTURE:
-        1. Validation runs FIRST (before ANY routing decision)
-        2. Router selects exactly ONE authority
-        3. No fall-through, no blending
-        """
+        # Set session context for logging
+        token = session_id_context.set(session_id)
+        
+        logger.info("="*80)
+        logger.info(f"START MESSAGE: session_id={session_id}, query='{query[:100]}'")
+        logger.info("="*80)
+        
+        # PROMPT AUTHORITY ARCHITECTURE:
+        # 1. Validation runs FIRST (before ANY routing decision)
+        # 2. Router selects exactly ONE authority
+        # 3. No fall-through, no blending
+        # """
         
         # ============================================================
         # STEP 1: HARD PROMPT ROUTER - Determine authority ONCE
@@ -403,8 +407,8 @@ class OptimizedChatbot:
                     is_exit = False
                     if hasattr(response, 'call_spec') and response.call_spec and response.call_spec.state == UC1State.EXIT:
                         is_exit = True
-                        logger.info(f"[Chatbot] Detected EXIT state. Enforcing cleanup.")
-                        orchestrator.clear_session(session_id)
+                        logger.info(f"[Chatbot] Detected EXIT state. Waiting for Post-CTA selection.")
+                        # orchestrator.clear_session(session_id)  <-- REMOVED: Closure happens via meta signal
                     
                     # ============================================================
                     # BUTTON CLICK INTENT OVERRIDE - Hard commitment
@@ -485,7 +489,7 @@ class OptimizedChatbot:
                 
                 # Yield SSE chunks - MANUALLY ORDERED for Streaming UX
                 # 1. Yield Text Chunk FIRST (so it renders before buttons)
-                if response.message:
+                if response.message and response.message != "Safe landing...":
                     yield {"status": "chunk", "chunk": response.message}
                 
                 # 2. Yield Meta Chunk SECOND (so buttons pop in after text starts)
@@ -505,6 +509,17 @@ class OptimizedChatbot:
                 
                 yield {"status": "meta", "chunk": meta}
                 
+                # Close Chat handler - Trigger session closure flow
+                if response.metadata and response.metadata.get("close_chat"):
+                    logger.info(f"[Chatbot] Close Chat signal received for session: {session_id}")
+                    # Clear session from orchestrator cache
+                    orchestrator.clear_session(session_id)
+                    # Trigger session closure in API layer
+                    yield {
+                        "status": "end_chat", 
+                        "chunk": "Our sales team will reach out within 1 business day, Thank you for your interest in Ditstek innovations."
+                    }
+                
                 # UC1 handled - return early
                 return
             except Exception as uc1_error:
@@ -514,6 +529,12 @@ class OptimizedChatbot:
                 yield {"status": "chunk", "chunk": "I encountered an issue. Let me try again."}
                 yield {"status": "done"}
                 return
+            finally:
+                logger.info("="*80)
+                logger.info(f"END MESSAGE: session_id={session_id}")
+                logger.info("="*80)
+                # No reset(token) here because we are in an async generator
+                # The context is managed by the event loop/task as long as we yield
         
         # ============================================================
         # STANDARD DYNAMIC FLOW (for non-UC1 sessions ONLY)
@@ -1090,7 +1111,7 @@ class OptimizedChatbot:
                             "status": "end_chat",
                             "chunk": "Our sales team will reach out within 1 business day, Thank you for your interest in Ditstek innovations.",
                         }
-
+                
             # Step 7: Emit meta update if present, but skip if form_trigger is about to be yielded
             # Use cached user_details_known
             # Include sources for traceability and prospect_profile for session context
@@ -1120,6 +1141,11 @@ class OptimizedChatbot:
                 "I couldn't generate a response right now."
             ):
                 yield fallback
+        finally:
+            logger.info("="*80)
+            logger.info(f"END MESSAGE: session_id={session_id}")
+            logger.info("="*80)
+            session_id_context.reset(token)
 
     async def _fallback_response_stream(self, query: str):
         """Fallback response when enhanced flow fails"""
