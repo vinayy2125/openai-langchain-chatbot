@@ -36,6 +36,8 @@ logger = get_logger("slot_manager")
 ALLOWED_SLOT_WRITERS = frozenset({
     "orchestrator",      # Primary authority
     "explorer_agent",    # Validated writes only
+    "db_sync",           # DB sync operations
+    "close_chat_sync",   # Close chat sync operations
 })
 
 DEFAULT_CALLER = "unknown"
@@ -130,6 +132,8 @@ class UC1Slots:
     frozen: bool = False                    # Hard freeze after bailout - no mutations
     free_exploration_unclear_count: int = 0 # Stabilizer trigger in FREE_EXPLORATION
     name_declined: bool = False             # User declined to give name (offer again at CTA)
+    close_chat_pending: bool = False        # Flag to track pending close chat flow
+    user_details_known: bool = False        # Synced from DB - single source of truth for user details
     
     # Shared content tracking (prevents repetitive responses)
     shared_urls: Optional[List[str]] = None    # URLs already shared in this session
@@ -180,6 +184,8 @@ class UC1Slots:
             "frozen": self.frozen,
             "free_exploration_unclear_count": self.free_exploration_unclear_count,
             "name_declined": self.name_declined,
+            "close_chat_pending": self.close_chat_pending,
+            "user_details_known": self.user_details_known,
             # ACC Phase 3
             "question_counts": self.question_counts or {},
             # Shared content tracking
@@ -217,6 +223,8 @@ class UC1Slots:
             frozen=data.get("frozen", False),
             free_exploration_unclear_count=data.get("free_exploration_unclear_count", 0),
             name_declined=data.get("name_declined", False),
+            close_chat_pending=data.get("close_chat_pending", False),
+            user_details_known=data.get("user_details_known", False),
             # ACC Phase 3
             question_counts=data.get("question_counts"),
             # Shared content tracking
@@ -704,6 +712,24 @@ class SlotManager:
             return
         self.slots.name_declined = True
         logger.info("[SlotManager] Name declined by user (will re-offer at CTA)")
+        self._safe_persist()
+    
+    def set_close_chat_pending(self, pending: bool, caller: str = DEFAULT_CALLER) -> None:
+        """Set the close chat pending flag. Caller must be authorized."""
+        _verify_caller(caller, "set_close_chat_pending")
+        if self.slots.frozen:
+            return
+        self.slots.close_chat_pending = pending
+        logger.info(f"[SlotManager] Set close_chat_pending: {pending} (caller: {caller})")
+        self._safe_persist()
+    
+    def set_user_details_known(self, known: bool, caller: str = DEFAULT_CALLER) -> None:
+        """Set user_details_known flag (synced from DB). Caller must be authorized."""
+        _verify_caller(caller, "set_user_details_known")
+        if self.slots.frozen:
+            return
+        self.slots.user_details_known = known
+        logger.info(f"[SlotManager] Set user_details_known: {known} (caller: {caller})")
         self._safe_persist()
     
     def increment_retry(self) -> int:

@@ -207,7 +207,7 @@ When user says "Talk to expert", "Schedule a call", etc.:
 1. Acknowledge intent warmly
 2. Ask for email if missing
 3. Confirm if details present
-4. ALWAYS include contact link: https://www.ditstek.com/contact-us
+4. Do NOT add contact links - the system adds them automatically
 
 ENGAGEMENT RULES:
 - Suggest 1-2 specific follow-up actions
@@ -709,8 +709,12 @@ class ConstrainedLLMAdapter:
         # When exit-ready, ButtonManager surfaces CTAs directly
         
         # Pattern 2: If response has a question mark, suggest "Tell me more" variant
+        # BUT ONLY IF:
+        # 1. The response is substantial (length > 150 chars) - implies there is "more" to tell
+        # 2. We don't already have enough specific options
         if "?" in bot_response and len(options) < 3:
-            options.append("Tell me more")
+            if len(bot_response) > 150:
+                options.append("Tell me more")
         
         # Filter out options that are too similar to what the user just said (Stop the loop)
         final_options = []
@@ -724,12 +728,18 @@ class ConstrainedLLMAdapter:
         unique_options = list(dict.fromkeys(final_options))[:3]
         
         # Fallback: If we couldn't extract anything, use generic contextual options
+        # ONLY IF: User input has adequate context (>= 3 words)
         if not unique_options:
-            unique_options = ["Learn more", "See examples", "Talk to expert"]
-            # Ensure we don't return the exact user input as a fallback
-            unique_options = [opt for opt in unique_options if not is_redundant(opt)]
-            if not unique_options:
-                 unique_options = ["Contact us", "Schedule a call"] # Ultimate fallback
+            input_word_count = len(user_input.split())
+            if input_word_count >= 3:
+                unique_options = ["Learn more", "See examples", "Talk to expert"]
+                # Ensure we don't return the exact user input as a fallback
+                unique_options = [opt for opt in unique_options if not is_redundant(opt)]
+                if not unique_options:
+                     unique_options = ["Contact us", "Schedule a call"] # Ultimate fallback
+            else:
+                # Low context (e.g. "Vinay", "Hi") -> No meaningful options -> Let ButtonManager decide (likely no buttons)
+                unique_options = []
         
         logger.info(f"[LLMAdapter] Generated fallback options: {unique_options}")
         return unique_options

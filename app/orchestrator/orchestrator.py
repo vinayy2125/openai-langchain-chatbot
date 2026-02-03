@@ -280,38 +280,51 @@ class ConversationOrchestrator:
             if input_lower == "restart conversation":
                 return self._handle_restart()
             if input_lower == "close chat":
-                # Return signal for session closure
-                return OrchestratorResponse(
-                    state=UC1State.EXIT,
-                    call_spec=AdapterCallSpec(
-                        state=UC1State.EXIT,
-                        response_intent=ResponseIntent.EXIT,
-                        slots=self.slots,
-                    ),
-                    input_type="none",  # Block input after close
-                    terminal=True,
-                    message="Safe landing...",  # Internal signal to skip LLM
-                    metadata={"close_chat": True}
-                )
+                # ============================================================
+                # CLOSE CHAT FLOW: Use user_details_known as single source of truth
+                # ============================================================
+                # Note: DB sync happens at top of process_input, so slots are already updated
+                
+                if self.slots.user_details_known:
+                    # User details known in DB - proceed directly
+                    logger.info(f"[Orchestrator] Close Chat: user_details_known=True, proceeding")
+                    return self._handle_close_chat_with_summary()
+                elif self.slots.user_name and self.slots.user_email:
+                    # Fallback: Check slots directly (legacy support)
+                    logger.info(f"[Orchestrator] Close Chat: Slots have details, proceeding")
+                    return self._handle_close_chat_with_summary()
+                else:
+                    # Details NOT known - capture them first
+                    logger.info(f"[Orchestrator] Close Chat: Missing details, capturing first")
+                    self.slot_manager.set_close_chat_pending(True, caller="orchestrator")
+                    
+                    if not self.slots.user_name:
+                        return self._handle_close_chat_name_capture()
+                    else:
+                        return self._handle_close_chat_email_capture()
         
         # ============================================================
-        # DB SYNC - Load user details already extracted by LLM
+        # DB SYNC - Load user details and user_details_known flag
         # ============================================================
-        # LLM extracts user_info → saves to DB via update_user_by_session
-        # Sync from DB into UC1 slots to prevent repetitive name/email asks
-        if not self.slots.user_name or not self.slots.user_email:
-            try:
-                from app.api.helpers import get_user_details_from_db
-                db_details = get_user_details_from_db(self.session_id)
-                if db_details:
-                    if db_details.get("username") and not self.slots.user_name:
-                        self.slot_manager.set_user_name(db_details["username"], caller="db_sync")
-                        logger.info(f"[Orchestrator] Synced user_name from DB: {db_details['username']}")
-                    if db_details.get("email") and not self.slots.user_email:
-                        self.slot_manager.set_user_email(db_details["email"], caller="db_sync")
-                        logger.info(f"[Orchestrator] Synced user_email from DB: {db_details['email']}")
-            except Exception as e:
-                logger.warning(f"[Orchestrator] DB sync failed (non-critical): {e}")
+        # Single source of truth: If user_details_known=True in DB, skip capture
+        # This also syncs name/email for personalization
+        try:
+            from app.api.helpers import get_user_session_info
+            db_details, db_user_details_known = get_user_session_info(self.session_id)
+            
+            # Sync user_details_known flag (authoritative from DB)
+            if db_user_details_known and not self.slots.user_details_known:
+                self.slot_manager.set_user_details_known(True, caller="db_sync")
+                logger.info(f"[Orchestrator] Synced user_details_known=True from DB")
+            
+            # Sync name/email for personalization
+            if db_details:
+                if db_details.get("username") and not self.slots.user_name:
+                    self.slot_manager.set_user_name(db_details["username"], caller="db_sync")
+                if db_details.get("email") and not self.slots.user_email:
+                    self.slot_manager.set_user_email(db_details["email"], caller="db_sync")
+        except Exception as e:
+            logger.warning(f"[Orchestrator] DB sync failed (non-critical): {e}")
         
         # Track exchange count for policy decisions
         if user_input:
@@ -552,17 +565,23 @@ class ConversationOrchestrator:
                 # Store the CTA outcome
                 self.slot_manager.set_selected_cta_outcome(selected_cta.outcome, caller="orchestrator")
                 
-                # High-intent CTAs (UC2, calendar) -> EMAIL_CAPTURE first
+                # High-intent CTAs (UC2, calendar) -> Check user_details_known first
                 if selected_cta.outcome in ("UC2", "calendar"):
-                    if not self.slots.user_email:
-                        logger.info(f"[Orchestrator] High-intent CTA without email -> EMAIL_CAPTURE")
-                        self._current_state = UC1State.EMAIL_CAPTURE
-                        return self._handle_email_capture("")
-                    else:
-                        # Email already captured -> EXIT
-                        logger.info(f"[Orchestrator] High-intent CTA with email -> EXIT")
+                    # Use user_details_known as single source of truth
+                    if self.slots.user_details_known:
+                        logger.info(f"[Orchestrator] High-intent CTA: user_details_known=True, skip capture")
                         self._current_state = UC1State.EXIT
                         return self._handle_exit()
+                    elif self.slots.user_email:
+                        # Fallback: Check slots directly (legacy)
+                        logger.info(f"[Orchestrator] High-intent CTA: email in slots, skip capture")
+                        self._current_state = UC1State.EXIT
+                        return self._handle_exit()
+                    else:
+                        # No email - capture
+                        logger.info(f"[Orchestrator] High-intent CTA: no email -> EMAIL_CAPTURE")
+                        self._current_state = UC1State.EMAIL_CAPTURE
+                        return self._handle_email_capture("")
                 elif selected_cta.outcome == "loop":
                     # Continue exploring -> back to CAPABILITY_SELECTION
                     self._current_state = UC1State.CAPABILITY_SELECTION
@@ -916,6 +935,15 @@ class ConversationOrchestrator:
         self.slot_manager.increment_engagement(EngagementEvent.TEXT_PROVIDED)
         self.slot_manager.reset_retry_count()  # Successful capture
         
+        # Check if we're in close chat flow
+        if self.slots.close_chat_pending:
+            # Name captured during close chat - now get email
+            if not self.slots.user_email:
+                return self._handle_close_chat_email_capture()
+            else:
+                # Both name and email now captured - proceed with close
+                return self._handle_close_chat_with_summary()
+        
         # Transition to AI_SYNTHESIS (S4) - synthesis comes BEFORE exploration per spec
         self._current_state = UC1State.AI_SYNTHESIS
         
@@ -1245,9 +1273,15 @@ class ConversationOrchestrator:
         """
         bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
         
-        # 1. Skip if already captured (write-once)
+        # 1. Skip if user_details_known (single source of truth)
+        if self.slots.user_details_known:
+            logger.info(f"[Orchestrator] user_details_known=True, skipping email capture")
+            self._current_state = UC1State.EXIT
+            return self._handle_exit()
+        
+        # 2. Skip if email already in slots (fallback)
         if self.slots.user_email:
-            logger.info(f"[Orchestrator] Email already captured ({self.slots.user_email}), skipping capture")
+            logger.info(f"[Orchestrator] Email in slots ({self.slots.user_email}), skipping")
             self._current_state = UC1State.EXIT
             return self._handle_exit()
 
@@ -1294,6 +1328,11 @@ class ConversationOrchestrator:
             self.slot_manager.set_user_name(inferred, caller="orchestrator")
         
         logger.info(f"[Orchestrator] Email captured: {user_input}")
+        
+        # Check if we're in close chat flow
+        if self.slots.close_chat_pending:
+            # Email captured during close chat - proceed with close
+            return self._handle_close_chat_with_summary()
         
         self._current_state = UC1State.EXIT
         return self._handle_exit()
@@ -1532,6 +1571,92 @@ class ConversationOrchestrator:
         self.slot_manager = SlotManager(self.session_id)
         
         return self._handle_entry()
+    
+    # ============================================================
+    # CLOSE CHAT FLOW HANDLERS
+    # ============================================================
+    
+    def _handle_close_chat_with_summary(self) -> OrchestratorResponse:
+        """
+        Handle close chat when user details are known.
+        
+        Returns a response that triggers session end with summary.
+        """
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
+        # Build personalized summary
+        user_name = self.slots.user_name or "there"
+        
+        if bucket:
+            summary = f"Thanks for chatting, {user_name}! We discussed {bucket.trigger}. Our team will reach out at {self.slots.user_email} within 1 business day."
+        else:
+            summary = f"Thanks for chatting, {user_name}! Our team will reach out at {self.slots.user_email} within 1 business day."
+        
+        logger.info(f"[Orchestrator] Close Chat with summary for: {self.slots.user_email}")
+        
+        # Clear the close_chat_pending flag
+        self.slot_manager.set_close_chat_pending(False, caller="orchestrator")
+        
+        return OrchestratorResponse(
+            state=UC1State.EXIT,
+            call_spec=AdapterCallSpec(
+                state=UC1State.EXIT,
+                response_intent=ResponseIntent.EXIT,
+                slots=self.slots,
+                bucket=bucket,
+            ),
+            input_type="none",  # Block input after close
+            terminal=True,
+            message=summary,
+            metadata={"close_chat": True, "trigger_end_session": True}
+        )
+    
+    def _handle_close_chat_name_capture(self) -> OrchestratorResponse:
+        """
+        Handle name capture during close chat flow.
+        
+        Prompts user for their name before ending the session.
+        """
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
+        prompt = "Before we wrap up, may I have your name so our team can follow up?"
+        
+        return OrchestratorResponse(
+            state=UC1State.NAME_CAPTURE,
+            call_spec=AdapterCallSpec(
+                state=UC1State.NAME_CAPTURE,
+                response_intent=ResponseIntent.PROMPT,
+                slots=self.slots,
+                bucket=bucket,
+            ),
+            input_type="text",
+            message=prompt,
+            metadata={"close_chat_flow": True}
+        )
+    
+    def _handle_close_chat_email_capture(self) -> OrchestratorResponse:
+        """
+        Handle email capture during close chat flow.
+        
+        Prompts user for their email before ending the session.
+        """
+        bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+        
+        user_name = self.slots.user_name or "there"
+        prompt = f"Thanks, {user_name}! What's the best email to reach you at?"
+        
+        return OrchestratorResponse(
+            state=UC1State.EMAIL_CAPTURE,
+            call_spec=AdapterCallSpec(
+                state=UC1State.EMAIL_CAPTURE,
+                response_intent=ResponseIntent.PROMPT,
+                slots=self.slots,
+                bucket=bucket,
+            ),
+            input_type="text",
+            message=prompt,
+            metadata={"close_chat_flow": True}
+        )
     
     def _stabilize_free_exploration(self) -> OrchestratorResponse:
         """

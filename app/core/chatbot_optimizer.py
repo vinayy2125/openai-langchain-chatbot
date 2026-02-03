@@ -489,7 +489,9 @@ class OptimizedChatbot:
                 
                 # Yield SSE chunks - MANUALLY ORDERED for Streaming UX
                 # 1. Yield Text Chunk FIRST (so it renders before buttons)
-                if response.message and response.message != "Safe landing...":
+                # SKIP message yield if close_chat - it will be yielded via end_chat event
+                is_close_chat = response.metadata and response.metadata.get("close_chat")
+                if response.message and response.message != "Safe landing..." and not is_close_chat:
                     yield {"status": "chunk", "chunk": response.message}
                 
                 # 2. Yield Meta Chunk SECOND (so buttons pop in after text starts)
@@ -512,12 +514,29 @@ class OptimizedChatbot:
                 # Close Chat handler - Trigger session closure flow
                 if response.metadata and response.metadata.get("close_chat"):
                     logger.info(f"[Chatbot] Close Chat signal received for session: {session_id}")
+                    
+                    # Use the summary message from orchestrator, or fallback
+                    close_message = response.message or "Our sales team will reach out within 1 business day. Thank you for your interest in Ditstek Innovations!"
+                    
+                    # Call end_session API to properly end session and trigger email
+                    if response.metadata.get("trigger_end_session"):
+                        try:
+                            from app.api.helpers import end_session_helper
+                            import asyncio
+                            # Run the async helper
+                            loop = asyncio.get_event_loop()
+                            loop.create_task(end_session_helper(session_id))
+                            logger.info(f"[Chatbot] Triggered end_session_helper for session: {session_id}")
+                        except Exception as e:
+                            logger.error(f"[Chatbot] Failed to call end_session_helper: {e}")
+                    
                     # Clear session from orchestrator cache
                     orchestrator.clear_session(session_id)
-                    # Trigger session closure in API layer
+                    
+                    # Trigger session closure in frontend
                     yield {
                         "status": "end_chat", 
-                        "chunk": "Our sales team will reach out within 1 business day, Thank you for your interest in Ditstek innovations."
+                        "chunk": close_message
                     }
                 
                 # UC1 handled - return early
