@@ -732,21 +732,22 @@ class ConstrainedLLMAdapter:
         # Limit to 3 unique options
         unique_options = list(dict.fromkeys(final_options))[:3]
         
-        # Fallback: If we couldn't extract anything, use generic contextual options
-        # ONLY IF: User input has adequate context (>= 3 words)
-        if not unique_options:
-            input_word_count = len(user_input.split())
-            if input_word_count >= 3:
-                unique_options = ["Learn more", "See examples", "Talk to expert"]
-                # Ensure we don't return the exact user input as a fallback
-                unique_options = [opt for opt in unique_options if not is_redundant(opt)]
-                if not unique_options:
-                     unique_options = ["Contact us", "Schedule a call"] # Ultimate fallback
-            else:
-                # Low context (e.g. "Vinay", "Hi") -> No meaningful options -> Let ButtonManager decide (likely no buttons)
-                unique_options = []
+        # =========================================================================
+        # DISABLED (2026-02-04): Hardcoded fallback options removed
+        # =========================================================================
+        # Previously, when LLM didn't provide options, we'd use hardcoded generic
+        # options like ['Learn more', 'See examples', 'Talk to expert'].
+        # This caused irrelevant options that didn't match conversation context.
+        # 
+        # NEW BEHAVIOR: Return empty list if no context-based options found.
+        # ButtonManager will then use state-appropriate buttons (CTAs, bucket-specific)
+        # =========================================================================
         
-        logger.info(f"[LLMAdapter] Generated fallback options: {unique_options}")
+        if unique_options:
+            logger.info(f"[LLMAdapter] Generated context-based options: {unique_options}")
+        else:
+            logger.info(f"[LLMAdapter] No context-based options - deferring to ButtonManager")
+        
         return unique_options
     
     # =========================================================================

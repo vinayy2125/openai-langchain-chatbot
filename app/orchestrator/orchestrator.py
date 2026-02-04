@@ -993,6 +993,78 @@ class ConversationOrchestrator:
         Otherwise uses the traditional fixed-turn exploration.
         """
         import os
+        
+        # =========================================================================
+        # CTA INTERCEPTION (Global Fix for Exploration Layer)
+        # =========================================================================
+        # Ensure High-Intent phrases trigger Exit/Email Capture regardless of
+        # whether we use Agent or Traditional logic.
+        if user_input:
+            input_lower = user_input.strip().lower()
+            
+            # 1. Check strict button clicks first (if bucket available)
+            bucket = get_bucket_by_id(self.config, self.slots.capability_bucket)
+            selected_cta = None
+            
+            # Check for phrase-based CTA intent (typed requests)
+            # Same list as _handle_free_exploration and _handle_recommendation
+            HIGH_INTENT_PHRASES = [
+                ("talk to expert", "calendar"),
+                ("talk to an expert", "calendar"),
+                ("speak to someone", "calendar"),
+                ("schedule a call", "calendar"),
+                ("schedule call", "calendar"),
+                ("book a call", "calendar"),
+                ("meet the team", "calendar"),
+                ("discuss my requirement", "UC2"),
+                ("discuss requirement", "UC2"),
+                ("get a consultation", "UC2"),
+                ("talk to consultant", "calendar"),
+                ("talk to architect", "calendar"),
+                ("talk to devops team", "calendar"),
+                ("talk to dits team", "calendar"),
+            ]
+            
+            for phrase, outcome in HIGH_INTENT_PHRASES:
+                if phrase in input_lower:
+                    logger.info(f"[Orchestrator] EXPLORATION_LAYER: CTA phrase detected: '{phrase}' -> {outcome}")
+                    # Map to config CTA
+                    for cta in self.config.exit_ctas:
+                        if cta.outcome == outcome:
+                            selected_cta = cta
+                            break
+                    break
+            
+            if selected_cta:
+                # Store the CTA outcome
+                self.slot_manager.set_selected_cta_outcome(selected_cta.outcome, caller="orchestrator")
+                
+                # High-intent CTAs (UC2, calendar) -> Check user_details_known first
+                if selected_cta.outcome in ("UC2", "calendar"):
+                    if self.slots.user_details_known and self.slots.user_email:
+                        logger.info(f"[Orchestrator] High-intent CTA: details known -> EXIT")
+                        self._current_state = UC1State.EXIT
+                        return self._handle_exit()
+                    elif self.slots.user_email:
+                        logger.info(f"[Orchestrator] High-intent CTA: email in slots -> EXIT")
+                        self._current_state = UC1State.EXIT
+                        return self._handle_exit()
+                    else:
+                        logger.info(f"[Orchestrator] High-intent CTA: no email -> EMAIL_CAPTURE")
+                        self._current_state = UC1State.EMAIL_CAPTURE
+                        return self._handle_email_capture("")
+                elif selected_cta.outcome == "loop":
+                    # Continue exploring -> back to CAPABILITY_SELECTION
+                    self._current_state = UC1State.CAPABILITY_SELECTION
+                    return self._handle_capability_selection("")
+                else:
+                    # Exit outcome -> EXIT
+                    self._current_state = UC1State.EXIT
+                    return self._handle_exit()
+
+        # =========================================================================
+        # Delegate to specific handler
+        # =========================================================================
         use_agent = os.getenv("USE_AGENT_EXPLORATION", "false").lower() == "true"
         
         if use_agent:
@@ -1133,6 +1205,60 @@ class ConversationOrchestrator:
                 options=None,  # Let ButtonManager decide with dynamic options priority
             )
         
+        # =========================================================
+        # HIGH_INTENT_PHRASES: Detect CTA phrases early (before treating as alternative)
+        # =========================================================
+        # FIX (2026-02-04): Previously, phrases like "talk to expert" typed in this
+        # state were stored as alternatives, then RECOMMENDATION retry loop wouldn't
+        # recognize them. Now we detect and route directly to EMAIL_CAPTURE -> EXIT.
+        # =========================================================
+        if user_input and user_input.strip():
+            input_lower = user_input.strip().lower()
+            HIGH_INTENT_PHRASES = [
+                ("talk to expert", "calendar"),
+                ("talk to an expert", "calendar"),
+                ("speak to someone", "calendar"),
+                ("schedule a call", "calendar"),
+                ("schedule call", "calendar"),
+                ("book a call", "calendar"),
+                ("meet the team", "calendar"),
+                ("discuss my requirement", "UC2"),
+                ("discuss requirement", "UC2"),
+                ("get a consultation", "UC2"),
+                ("talk to consultant", "calendar"),
+                ("schedule a quick call", "calendar"),
+            ]
+            
+            selected_cta = None
+            for phrase, outcome in HIGH_INTENT_PHRASES:
+                if phrase in input_lower:
+                    logger.info(f"[Orchestrator] CONSULTATIVE_ALTERNATIVES: CTA phrase detected: '{phrase}' -> {outcome}")
+                    for cta in self.config.exit_ctas:
+                        if cta.outcome == outcome:
+                            selected_cta = cta
+                            break
+                    break
+            
+            if selected_cta:
+                # Route directly to email capture -> exit flow
+                self.slot_manager.set_selected_cta_outcome(selected_cta.outcome, caller="orchestrator")
+                if selected_cta.outcome in ("UC2", "calendar"):
+                    if self.slots.user_details_known and self.slots.user_email:
+                        logger.info(f"[Orchestrator] CTA detected: details known -> EXIT")
+                        self._current_state = UC1State.EXIT
+                        return self._handle_exit()
+                    elif self.slots.user_email:
+                        logger.info(f"[Orchestrator] CTA detected: email in slots -> EXIT")
+                        self._current_state = UC1State.EXIT
+                        return self._handle_exit()
+                    else:
+                        logger.info(f"[Orchestrator] CTA detected: no email -> EMAIL_CAPTURE")
+                        self._current_state = UC1State.EMAIL_CAPTURE
+                        return self._handle_email_capture("")
+                else:
+                    self._current_state = UC1State.EXIT
+                    return self._handle_exit()
+        
         # Track user selection and mark alternatives consumed
         if bucket:
             alternatives_lower = [a.lower() for a in bucket.alternatives]
@@ -1169,12 +1295,47 @@ class ConversationOrchestrator:
     
     def _handle_recommendation(self, user_input: str) -> OrchestratorResponse:
         """Handle RECOMMENDATION state - user selects a CTA."""
-        # Find matching CTA
+        # Find matching CTA by exact button text
         selected_cta = None
         for cta in self.config.exit_ctas:
             if cta.choice.lower() == user_input.strip().lower():
                 selected_cta = cta
                 break
+        
+        # =========================================================
+        # HIGH_INTENT_PHRASES: Recognize typed phrases (not just button clicks)
+        # =========================================================
+        # FIX (2026-02-04): Previously only exact CTA clicks were recognized.
+        # This caused UC1-B through UC1-F users who typed "talk to expert" etc.
+        # in RECOMMENDATION state to get stuck in retry loop, never reaching
+        # EMAIL_CAPTURE -> EXIT with proper Post-CTA buttons.
+        # =========================================================
+        if not selected_cta:
+            input_lower = user_input.strip().lower()
+            HIGH_INTENT_PHRASES = [
+                ("talk to expert", "calendar"),
+                ("talk to an expert", "calendar"),
+                ("speak to someone", "calendar"),
+                ("schedule a call", "calendar"),
+                ("schedule call", "calendar"),
+                ("book a call", "calendar"),
+                ("meet the team", "calendar"),
+                ("discuss my requirement", "UC2"),
+                ("discuss requirement", "UC2"),
+                ("get a consultation", "UC2"),
+                ("talk to consultant", "calendar"),
+                ("schedule a quick call", "calendar"),
+            ]
+            
+            for phrase, outcome in HIGH_INTENT_PHRASES:
+                if phrase in input_lower:
+                    logger.info(f"[Orchestrator] RECOMMENDATION: CTA phrase detected: '{phrase}' -> {outcome}")
+                    # Find matching CTA by outcome
+                    for cta in self.config.exit_ctas:
+                        if cta.outcome == outcome:
+                            selected_cta = cta
+                            break
+                    break
         
         if not selected_cta:
             # Invalid CTA - retry

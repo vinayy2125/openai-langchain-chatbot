@@ -65,6 +65,15 @@ class ButtonManager:
             List[str]: Buttons to display, may be empty
         """
         # ==========================================================
+        # STATE-BASED BUTTON SELECTION (EXIT PRIORITY)
+        # ==========================================================
+        
+        if state == UC1State.EXIT:
+            # EXIT state: Always show Post-CTA options (Restart/Close)
+            # This overrides any slot-based logic (like selected_alternative)
+            return ["Restart Conversation", "Close Chat"]
+
+        # ==========================================================
         # OPTION COMMITMENT CHECK - Prevents infinite button loops
         # ==========================================================
         if slots.selected_alternative:
@@ -76,7 +85,7 @@ class ButtonManager:
             return self._get_cta_buttons()
         
         # ==========================================================
-        # STATE-BASED BUTTON SELECTION
+        # STATE-BASED BUTTON SELECTION (STANDARD)
         # ==========================================================
         
         if state == UC1State.ENTRY:
@@ -161,9 +170,7 @@ class ButtonManager:
                     return valid_opts
             return self._get_exploration_buttons(bucket, slots)
         
-        if state == UC1State.EXIT:
-            # Show post-CTA options
-            return ["Restart Conversation", "Close Chat"]
+
         
         # Fallback: No buttons
         logger.warning(f"[ButtonManager] Unknown state: {state}")

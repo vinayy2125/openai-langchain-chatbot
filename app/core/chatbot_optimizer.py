@@ -467,22 +467,32 @@ class OptimizedChatbot:
                         llm_intent = LLMIntent.UNCLEAR
                         response.llm_intent = llm_intent
                     else:
-                        # Only build options if service is healthy
-                        # Override options based on intent + state permission (via input_type)
-                        intent_gated_options = orchestrator.build_intent_gated_options(
-                            state=response.state,
-                            intent=llm_intent,
-                            bucket=bucket,
-                            input_type=response.input_type,  # Permission from state config
-                            dynamic_options=dynamic_options  # Pass LLM-generated options
-                        )
-                        
-                        # Apply intent-gated options - HYBRID UI (text + buttons)
-                        # Always keep text input available, show buttons alongside when appropriate
-                        if intent_gated_options:
-                            response.options = intent_gated_options
+                        # ============================================================
+                        # EXIT STATE: Preserve orchestrator's explicit options
+                        # ============================================================
+                        # For EXIT state, orchestrator sets ["Restart Conversation", "Close Chat"]
+                        # These should NOT be overridden by build_intent_gated_options()
+                        # This ensures consistent closure flow for ALL UC-1 sub-cases
+                        if is_exit:
+                            logger.info(f"[UC1] EXIT state: preserving options={response.options}")
+                            # Keep response.options as set by orchestrator
                         else:
-                            response.options = None
+                            # Only build options if service is healthy
+                            # Override options based on intent + state permission (via input_type)
+                            intent_gated_options = orchestrator.build_intent_gated_options(
+                                state=response.state,
+                                intent=llm_intent,
+                                bucket=bucket,
+                                input_type=response.input_type,  # Permission from state config
+                                dynamic_options=dynamic_options  # Pass LLM-generated options
+                            )
+                            
+                            # Apply intent-gated options - HYBRID UI (text + buttons)
+                            # Always keep text input available, show buttons alongside when appropriate
+                            if intent_gated_options:
+                                response.options = intent_gated_options
+                            else:
+                                response.options = None
                     
                     # ALWAYS allow text input (hybrid UI - user can type OR click)
                     response.input_type = "text"
