@@ -19,8 +19,7 @@ from app.core.email_sender import send_closure_email
 from fastapi import HTTPException
 from datetime import datetime
 from app.api.models import PromptType
-from app.db.base import get_db_conn
-from app.utils.redis_context import append_message_to_chat_history
+from app.db.base import get_db_conn, return_db_conn, DatabaseConnection
 
 
 logger = get_logger(__name__)
@@ -40,25 +39,22 @@ def get_user_details_known_from_db(session_id: str) -> bool:
         f"[get_user_details_known_from_db] Fetching user_details_known for session_id={session_id}"
     )
     try:
-        conn = get_db_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT u.user_details_known FROM users u
-            JOIN sessions s ON u.id = s.user_id
-            WHERE s.session_id = %s
-            """,
-            (str(session_id),),
-        )
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        logger.debug(f"[get_user_details_known_from_db] DB row: {row}")
-        if row and row[0]:
-            logger.info(
-                f"[get_user_details_known_from_db] user_details_known=True for session_id={session_id}"
+        with DatabaseConnection() as (conn, cursor):
+            cursor.execute(
+                """
+                SELECT u.user_details_known FROM users u
+                JOIN sessions s ON u.id = s.user_id
+                WHERE s.session_id = %s
+                """,
+                (str(session_id),),
             )
-            return bool(row[0])
+            row = cursor.fetchone()
+            logger.debug(f"[get_user_details_known_from_db] DB row: {row}")
+            if row and row[0]:
+                logger.info(
+                    f"[get_user_details_known_from_db] user_details_known=True for session_id={session_id}"
+                )
+                return bool(row[0])
     except Exception as e:
         logger.warning(
             f"[get_user_details_known_from_db] DB error for session {session_id}: {e}"
@@ -79,38 +75,35 @@ def get_user_details_from_db(session_id: str) -> Dict[str, Any]:
         f"[get_user_details_from_db] Fetching user details for session_id={session_id}"
     )
     try:
-        conn = get_db_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT u.username, u.email, u.mobile, u.user_details_known 
-            FROM users u
-            JOIN sessions s ON u.id = s.user_id
-            WHERE s.session_id = %s
-            """,
-            (str(session_id),),
-        )
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
+        with DatabaseConnection() as (conn, cursor):
+            cursor.execute(
+                """
+                SELECT u.username, u.email, u.mobile, u.user_details_known 
+                FROM users u
+                JOIN sessions s ON u.id = s.user_id
+                WHERE s.session_id = %s
+                """,
+                (str(session_id),),
+            )
+            row = cursor.fetchone()
 
-        if row:
-            username, email, mobile, user_details_known = row
-            user_details = {}
-            if username:
-                user_details["username"] = username
-            if email:
-                user_details["email"] = email
-            if mobile:
-                user_details["mobile"] = mobile
-            if user_details_known:
-                user_details["user_details_known"] = True
+            if row:
+                username, email, mobile, user_details_known = row
+                user_details = {}
+                if username:
+                    user_details["username"] = username
+                if email:
+                    user_details["email"] = email
+                if mobile:
+                    user_details["mobile"] = mobile
+                if user_details_known:
+                    user_details["user_details_known"] = True
 
-            if user_details:
-                logger.info(
-                    f"[get_user_details_from_db] Found user details for session_id={session_id}: {list(user_details.keys())}"
-                )
-                return user_details
+                if user_details:
+                    logger.info(
+                        f"[get_user_details_from_db] Found user details for session_id={session_id}: {list(user_details.keys())}"
+                    )
+                    return user_details
     except Exception as e:
         logger.warning(
             f"[get_user_details_from_db] DB error for session {session_id}: {e}"
@@ -120,6 +113,7 @@ def get_user_details_from_db(session_id: str) -> Dict[str, Any]:
         f"[get_user_details_from_db] No user details found for session_id={session_id}"
     )
     return {}
+
 
 
 def mark_form_shown(session_data: dict):
@@ -244,6 +238,7 @@ def _update_user_by_session_sync(session_id: str, user: UserCreate):
                 f"[update_user_by_session] User updated successfully for user_id={user_id}"
             )
 
+
         # Session state management removed - using optimized flow only
         logger.info(
             f"[update_user_by_session] User details updated successfully for session_id={session_id}"
@@ -259,7 +254,7 @@ def _update_user_by_session_sync(session_id: str, user: UserCreate):
         if cursor:
             cursor.close()
         if conn:
-            conn.close()
+            return_db_conn(conn)
         logger.info(f"[update_user_by_session] DB connection closed.")
 
 
@@ -320,7 +315,7 @@ def _initialize_session_with_prompt_sync(
 
     finally:
         cursor.close()
-        conn.close()
+        return_db_conn(conn)
 
 
 async def initialize_session_with_prompt(
@@ -335,6 +330,12 @@ async def initialize_session_with_prompt(
 
 def _save_message_sync(message_data: MessageCreate) -> Message:
     """Synchronous implementation of save_message."""
+    import traceback
+    # Debug: Log call stack to identify duplicate call sources
+    stack_summary = ''.join(traceback.format_stack()[-5:-1])
+    logger.info(f"[save_message] Called for session={message_data.session_id}, role={message_data.role}, content_len={len(message_data.content)}")
+    logger.debug(f"[save_message] Call stack:\n{stack_summary}")
+    
     conn = get_db_conn()
     cursor = conn.cursor()
     try:
@@ -352,6 +353,39 @@ def _save_message_sync(message_data: MessageCreate) -> Message:
 
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail="Session not found")
+
+        # Check for duplicate message (same session, role, content within 5 seconds)
+        # This prevents duplicate messages from being saved when API is called multiple times
+        cursor.execute(
+            """
+            SELECT id, session_id, content, role, reply_to, follow_up_to, 
+                   follow_up_depth, metadata, created_at, updated_at
+            FROM messages 
+            WHERE session_id = %s 
+              AND role = %s 
+              AND content = %s 
+              AND created_at > CURRENT_TIMESTAMP - INTERVAL '5 seconds'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (message_data.session_id, message_data.role, message_data.content),
+        )
+        existing = cursor.fetchone()
+        if existing:
+            # Return existing message instead of creating duplicate
+            logger.info(f"[save_message] Duplicate message detected, returning existing message id={existing[0]}")
+            return Message(
+                id=existing[0],
+                session_id=existing[1],
+                content=existing[2],
+                role=existing[3],
+                reply_to=existing[4] if existing[4] else None,
+                follow_up_to=existing[5] if existing[5] else None,
+                follow_up_depth=existing[6],
+                metadata=json.loads(existing[7]) if existing[7] else {},
+                created_at=existing[8],
+                updated_at=existing[9]
+            )
 
         # Insert the message
         cursor.execute(
@@ -394,7 +428,7 @@ def _save_message_sync(message_data: MessageCreate) -> Message:
         )
     finally:
         cursor.close()
-        conn.close()
+        return_db_conn(conn)
 
 
 async def save_message(message_data: MessageCreate) -> Message:
@@ -446,7 +480,7 @@ def _get_messages_for_session_sync(session_id: UUID) -> List[Message]:
         
     finally:
         cursor.close()
-        conn.close()
+        return_db_conn(conn)
 
 
 async def get_messages_for_session(session_id: UUID) -> List[Message]:
@@ -458,6 +492,7 @@ async def get_messages_for_session(session_id: UUID) -> List[Message]:
 
 
 def _fetch_root_prompts_sync():
+    
     conn = None
     cursor = None
     try:
@@ -537,11 +572,13 @@ def _fetch_root_prompts_sync():
                     desired_order_prompts_sorted.append(prompt)
                     break
 
-        return {
+        result = {
             "greeting_text": greeting["prompt_text"] if greeting else None,
             "root_prompts": desired_order_prompts_sorted,
             "bottom_hint_text": hint["prompt_text"] if hint else None
         }
+        
+        return result
     except Exception as e:
         logger.error(f"Error fetching root prompts: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching prompts: {str(e)}")
@@ -549,7 +586,7 @@ def _fetch_root_prompts_sync():
         if cursor:
             cursor.close()
         if conn:
-            conn.close()
+            return_db_conn(conn)
 
 
 async def fetch_root_prompts():
@@ -595,16 +632,17 @@ async def send_message_stream(req: SentMessage):
             )
 
         # Save user message asynchronously to improve response time
-        # Start user message saving in background
+        # Single flow: PostgreSQL (persistence) + LangChain memory (LLM context)
         if user_msg_to_save:
             asyncio.create_task(save_message(user_msg_to_save))
+            
+            # Update LangChain memory for efficient context building
             try:
-                # also persist to Redis chat_history asynchronously
-                asyncio.create_task(asyncio.to_thread(append_message_to_chat_history, session_id, {"role": "user", "content": req.query, "timestamp": None}))
-            except Exception:
-                # if asyncio.to_thread not available, fallback to run_in_executor
-                loop = asyncio.get_event_loop()
-                loop.run_in_executor(None, append_message_to_chat_history, session_id, {"role": "user", "content": req.query, "timestamp": None})
+                from app.utils.conversation_memory import get_session_memory_manager
+                memory_mgr = get_session_memory_manager()
+                memory_mgr.add_user_message(session_id, req.query)
+            except Exception as mem_err:
+                logger.debug(f"Memory update skipped (non-critical): {mem_err}")
 
         # Always use the optimized chatbot flow
         # logger.info("[send_message_stream] Using optimized chatbot flow.")
@@ -630,7 +668,33 @@ async def send_message_stream(req: SentMessage):
         full_assistant_response = ""
         session_ended = False
 
-        async for event in chatbot.get_detailed_response(query=query, chat_history=chat_history, session_id=session_id, stream=True):
+        # ============================================================
+        # UC1 TRIGGER DETECTION - Explicit CTA triggers UC1 mode
+        # ============================================================
+        # UC1 is triggered ONLY by explicit CTA selection, not inference
+        # Trigger CTA: "Explore DITS Services" from welcome screen
+        UC1_TRIGGER_CTAS = {
+            "explore dits services",
+            "explore services",
+            "explore dits",
+        }
+        
+        # Check if this session is in UC1 mode (stored per-session)
+        # Use a simple in-memory cache for now (can be moved to Redis/DB later)
+        from app.orchestrator.slot_manager import SlotManager
+        
+        is_uc1 = False
+        
+        # Check if query matches a UC1 trigger CTA
+        if query and query.strip().lower() in UC1_TRIGGER_CTAS:
+            is_uc1 = True
+            logger.info(f"[UC1] Trigger CTA detected: '{query}' → Activating UC1 mode")
+        # Check if session already has UC1 state (continuing UC1 flow)
+        elif session_id in SlotManager._session_slots:
+            is_uc1 = True
+            logger.info(f"[UC1] Session {session_id} already in UC1 mode")
+
+        async for event in chatbot.get_detailed_response(query=query, chat_history=chat_history, session_id=session_id, stream=True, is_uc1=is_uc1):
             # Track session ending
             if isinstance(event, dict) and event.get("status") == "end_chat":
                 session_ended = True
@@ -665,12 +729,16 @@ async def send_message_stream(req: SentMessage):
                     metadata={}
                 )
                 # Fire and forget save to close stream immediately
+                # Single flow: PostgreSQL (persistence) + LangChain memory (LLM context)
                 asyncio.create_task(save_message(assistant_msg))
+                
+                # Update LangChain memory for efficient context building
                 try:
-                    asyncio.create_task(asyncio.to_thread(append_message_to_chat_history, session_id, {"role": "assistant", "content": full_assistant_response, "timestamp": None}))
+                    from app.utils.conversation_memory import get_session_memory_manager
+                    memory_mgr = get_session_memory_manager()
+                    memory_mgr.add_ai_message(session_id, full_assistant_response)
                 except Exception:
-                    loop = asyncio.get_event_loop()
-                    loop.run_in_executor(None, append_message_to_chat_history, session_id, {"role": "assistant", "content": full_assistant_response, "timestamp": None})
+                    pass  # Non-critical, context still works from fallback
                 # logger.info(f"[OPTIMIZED_FLOW] Saved complete response: {len(full_assistant_response)} chars")
                         
             except Exception as e:
@@ -690,7 +758,8 @@ async def send_message_stream(req: SentMessage):
                     )
                     conn.commit()
                     cursor.close()
-                    conn.close()
+
+                    return_db_conn(conn)
                     logger.info(f"[OPTIMIZED_FLOW] Updated is_active to FALSE for ended session_id={session_id}")
                 except Exception as e:
                     logger.error(f"[OPTIMIZED_FLOW] Failed to update is_active for ended session_id={session_id}: {e}")
@@ -729,7 +798,7 @@ def _delete_last_user_message_sync(session_id: str):
         return None
     finally:
         cursor.close()
-        conn.close()
+        return_db_conn(conn)
 
 
 async def delete_last_user_message(session_id: str):
@@ -756,7 +825,7 @@ def _get_session_is_active_sync(session_id: UUID) -> bool:
         return False
     finally:
         cursor.close()
-        conn.close()
+        return_db_conn(conn)
 
 
 async def get_session_is_active(session_id: UUID) -> bool:

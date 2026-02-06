@@ -8,13 +8,9 @@ from app.api.router import router as api_router
 from fastapi.middleware.cors import CORSMiddleware
 
 # from app.core.llm_client import llm
-from app.api import redis_endpoint as redis_router
-
 # from app.core.nested_follow_up_manager import FollowUpManager
 from app.logger import get_logger
 from app.logger import attach_handlers_to_uvicorn
-from app.ingestion.scrape_to_redis import create_index_from_yaml
-from pathlib import Path
 
 load_dotenv()
 
@@ -41,7 +37,33 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Performance Monitoring Middleware
+    from fastapi import Request
+    import time
+    
+    @app.middleware("http")
+    async def add_process_time_header(request: Request, call_next):
+        start_time = time.perf_counter()
+        response = await call_next(request)
+        process_time = time.perf_counter() - start_time
+        response.headers["X-Process-Time"] = f"{process_time:.4f}"
+        
+        # Log slow requests (> 1 second)
+        if process_time > 1.0:
+             logger.warning(f"[Slow Request] {request.method} {request.url.path} took {process_time:.4f}s")
+             
+        return response
+
     logger.info("LLM client initialized successfully")
+
+    # Initialize database connection pool
+    try:
+        from app.db.pool import initialize_pool
+        initialize_pool()
+        logger.info("Database connection pool initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize database connection pool: {e}")
+        # Don't fail startup, pool will be initialized on first use
 
     # Attach FollowUpManager to app state - REMOVED for optimized flow only
     # app.state.follow_up_manager = FollowUpManager(llm)
@@ -50,9 +72,6 @@ def create_app() -> FastAPI:
     # Register main API router
     app.include_router(api_router)
     logger.info("API routes registered")
-    # Register Redis endpoints router
-    app.include_router(redis_router.router, prefix="/api")
-    logger.info("Redis endpoints registered")
 
     return app
 
@@ -78,13 +97,6 @@ def main():
         )
 
     # Run the Uvicorn server
-    # Ensure chat_history_index exists
-    try:
-        yaml_path = Path(__file__).parent / "db" / "chat_history_index.yaml"
-        create_index_from_yaml(str(yaml_path))
-    except Exception:
-        logger.exception("Failed to ensure chat_history_index on startup")
-
     uvicorn.run(
         "main:create_app",
         host=host,

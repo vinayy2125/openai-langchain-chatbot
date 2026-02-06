@@ -8,13 +8,75 @@ from app.utils.llm_utils import generate_llm_response
 from app.utils.redis_context import get_redis_context_chunks
 
 # format_response is now imported only when needed (async version with URL validation)
-from app.utils.prompts import final_response_prompt
+from app.utils.prompts import PROMPT_VERSION
+from app.utils.dynamic_prompts import build_dynamic_prompt
 from app.utils.response_formatter import format_response, _normalize_url
 import asyncio
 import functools
-from app.api.models import MessageCreate
+from app.api.models import MessageCreate, UserCreate
+from email_validator import validate_email, EmailNotValidError
 
 logger = get_logger("chatbot")
+
+
+def _validate_email(email: str) -> str | None:
+    """
+    Validate email format using email-validator library.
+    Returns the normalized email if valid, None if invalid.
+    """
+    if not email:
+        return None
+    try:
+        # Validate and normalize the email
+        valid = validate_email(email, check_deliverability=False)
+        return valid.normalized
+    except EmailNotValidError as e:
+        logger.warning(f"[LeadCapture] Invalid email format rejected: '{email}' - {e}")
+        return None
+
+
+def _get_source_label(url: str) -> str:
+    """
+    Extract a readable label from source URL for display.
+    
+    Parses URL fragment or path to create human-readable link text.
+    Example: 'https://ditstek.com/blog/ai-chatbot#section-name' -> 'Section Name'
+    
+    Args:
+        url: The source URL
+        
+    Returns:
+        str: Human-readable label (max 60 chars)
+    """
+    if not url:
+        return "Source"
+    try:
+        from urllib.parse import urlparse, unquote
+        parsed = urlparse(url)
+        
+        # Use fragment if present (e.g., #section-name)
+        if parsed.fragment:
+            label = unquote(parsed.fragment.replace("-", " ").replace("_", " "))
+            # Clean up and title case
+            label = " ".join(word.capitalize() for word in label.split())
+            return label[:60] if label else parsed.netloc
+        
+        # Otherwise use last meaningful path segment
+        path = parsed.path.rstrip("/")
+        if path:
+            segment = path.split("/")[-1]
+            # Skip common file extensions
+            if segment and not segment.endswith((".html", ".php", ".aspx", ".htm")):
+                label = unquote(segment.replace("-", " ").replace("_", " "))
+                label = " ".join(word.capitalize() for word in label.split())
+                if label:
+                    return label[:60]
+        
+        # Fallback to domain name
+        return parsed.netloc or "Source"
+    except Exception:
+        # Ultimate fallback
+        return url[:60] if len(url) > 60 else url
 
 
 def _calculate_dynamic_top_n(query: str, conversation_history: list) -> int:
@@ -103,8 +165,9 @@ def _calculate_dynamic_top_n(query: str, conversation_history: list) -> int:
     if "?" in query:
         top_n += 2
 
-    # Cap the maximum (to avoid excessive token usage) but allow for comprehensive searches
-    top_n = min(max(top_n, 4), 30)  # Range: 4-30
+    # Cap the maximum - balance between accuracy and token limits
+    # Increased from 10 to 12 to improve result coverage for all queries
+    top_n = min(max(top_n, 4), 12)
 
     logger.info(
         f"[DynamicTopN] Calculated top_n={top_n} for query length={query_length}, words={query_words}"
@@ -121,9 +184,13 @@ class ContextOptimizer:
 
     def __init__(self, model: str = "gpt-4o"):
         self.model = model
-        self.encoding = tiktoken.encoding_for_model(model)
-        self.model_limits = {"gpt-4o": 128000}
-        self.context_limit = self.model_limits.get(model, 4096)
+        # Use cl100k_base encoding as fallback for non-OpenAI models
+        try:
+            self.encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            self.encoding = tiktoken.get_encoding("cl100k_base")
+        self.model_limits = {"gpt-4o": 128000, "gpt-4o": 128000, "gpt-4-turbo": 128000, "gpt-3.5-turbo": 16385}
+        self.context_limit = self.model_limits.get(model, 128000)
 
     @lru_cache(maxsize=1000)
     def count_tokens_cached(self, text: str) -> int:
@@ -131,6 +198,31 @@ class ContextOptimizer:
 
 
 class OptimizedChatbot:
+    async def _is_phatic(self, query: str) -> bool:
+        """Check if query is a simple phatic expression (greeting, thanks, etc.)"""
+        if not query:
+            return True
+        
+        q = query.strip().lower()
+        phatic_patterns = {
+            "hi", "hello", "hey", "greetings",
+            "thanks", "thank you", "thx",
+            "good morning", "good afternoon", "good evening",
+            "bye", "goodbye", "see you",
+            "ok", "okay", "sure", "cool",
+            "no", "yes", "nope", "yep"
+        }
+        
+        # Exact match
+        if q in phatic_patterns:
+            return True
+            
+        # Starts with (for "hi there", "hello bot")
+        if len(q.split()) <= 3 and any(q.startswith(p + " ") for p in phatic_patterns):
+            return True
+            
+        return False
+
     def _is_too_similar(
         self, last_response: str, new_response: str, threshold: float = 0.9
     ) -> bool:
@@ -163,7 +255,8 @@ class OptimizedChatbot:
         self.query_llm = llm if llm is not None else ChatOpenAI(model=model)
 
     async def get_detailed_response(
-        self, query: str, chat_history, session_id: str, stream: bool = True
+        self, query: str, chat_history, session_id: str, stream: bool = True,
+        is_uc1: bool = False  # EXPLICIT UC1 flag - set by caller, not inferred
     ):
         from app.api.helpers import (
             get_user_details_known_from_db,
@@ -173,7 +266,53 @@ class OptimizedChatbot:
         Generate a detailed response for a query and stream structured events.
         Yields dict events used by the API layer: 
         {status: 'chunk'|'form_trigger'|'meta', 'chunk': ...}
+        
+        UC1 ROUTING (EXPLICIT):
+        If is_uc1=True, delegates to ConversationOrchestrator.
+        UC1 activation is NEVER inferred - it must be explicitly set by:
+        1. Session explicitly marked as UC1 at creation
+        2. Explicit UC1 trigger CTA from welcome screen
         """
+        
+        # ============================================================
+        # UC1 EXPLICIT ROUTING - Check FIRST, before any other logic
+        # ============================================================
+        if is_uc1:
+            logger.info(f"[Chatbot] UC1 mode active for session: {session_id}")
+            try:
+                from app.orchestrator import ConversationOrchestrator
+                
+                orchestrator = ConversationOrchestrator.get_or_create(session_id)
+                
+                # Process input through orchestrator (returns text-blind response)
+                response = orchestrator.process_input(query)
+                
+                # Generate message from call_spec using LLM adapter (sole language authority)
+                if hasattr(response, 'call_spec') and response.call_spec:
+                    spec = response.call_spec
+                    response.message = orchestrator.llm_adapter.generate_state_response(
+                        state=spec.state,
+                        response_intent=spec.response_intent,
+                        user_input=spec.user_input,
+                        slots=spec.slots,
+                        bucket=spec.bucket,
+                        exploration_turn=spec.exploration_turn,
+                    )
+                
+                # Yield SSE chunks (message now populated)
+                for chunk in response.to_sse_chunks():
+                    yield chunk
+                
+                # UC1 handled - return early
+                return
+            except Exception as uc1_error:
+                logger.exception(f"[Chatbot] UC1 orchestrator error, falling back to standard flow: {uc1_error}")
+                # Fall through to standard flow if UC1 fails
+        
+        # ============================================================
+        # STANDARD FLOW (for non-UC1 sessions)
+        # ============================================================
+        
         # Track last assistant response for anti-repetition
         last_assistant_response = None
         for msg in reversed(chat_history or []):
@@ -188,104 +327,103 @@ class OptimizedChatbot:
                 last_assistant_response = msg[1]
                 break
         try:
-            # Step 1: Retrieve Redis context
+            # Step 1: Parallel retrieval of Context and User Details
             try:
-                # Convert chat_history to proper format for Redis context retrieval
-                conversation_history_for_redis = []
-                for msg in chat_history or []:
-                    if isinstance(msg, dict):
-                        conversation_history_for_redis.append(msg)
-                    elif isinstance(msg, (list, tuple)) and len(msg) >= 2:
-                        conversation_history_for_redis.append(
-                            {"role": msg[0], "content": msg[1]}
-                        )
-                # Dynamic top_n calculation based on query characteristics
-                top_n_value = _calculate_dynamic_top_n(
-                    query, conversation_history_for_redis
-                )
-                
-                # Offload blocking Redis/Embedding call to executor
                 import asyncio
                 import functools
+                from app.api.helpers import get_user_details_from_db, get_user_details_known_from_db, update_user_by_session
+                
                 loop = asyncio.get_event_loop()
-                context_chunks = await loop.run_in_executor(
-                    None,
-                    functools.partial(
-                        get_redis_context_chunks,
-                        session_id,
-                        query,
-                        top_n=top_n_value,
-                    ),
-                )
+                
+                # Check if we should skip context retrieval (phatic queries)
+                is_phatic = await self._is_phatic(query)
+                if is_phatic:
+                    logger.info("[Chatbot] Optimization: Skipping context retrieval for phatic query")
+                
+                # Define tasks
+                tasks = []
+                
+                # Task 1: Redis Context Retrieval
+                if is_phatic:
+                    # Return empty context immediately
+                    tasks.append(asyncio.sleep(0, result=[]))
+                else:
+                    # Convert chat_history...
+                    conversation_history_for_redis = []
+                    for msg in chat_history or []:
+                        if isinstance(msg, dict):
+                            conversation_history_for_redis.append(msg)
+                        elif isinstance(msg, (list, tuple)) and len(msg) >= 2:
+                            conversation_history_for_redis.append(
+                                {"role": msg[0], "content": msg[1]}
+                            )
+                            
+                    top_n_value = _calculate_dynamic_top_n(
+                        query, conversation_history_for_redis
+                    )
+                    
+                    tasks.append(loop.run_in_executor(
+                        None,
+                        functools.partial(
+                            get_redis_context_chunks,
+                            session_id,
+                            query,
+                            top_n=top_n_value,
+                        ),
+                    ))
+                
+                # Task 2: User Details (run in executor as it might be blocking DB call if not cached)
+                # Note: get_user_details_from_db now checks cache first, so it's fast
+                # We wrap it in a lambda to make it awaitable if it's not async
+                def fetch_user_details():
+                    details = get_user_details_from_db(session_id)
+                    known = details.get("user_details_known", False)
+                    if not details:
+                         # Fallback
+                         known = get_user_details_known_from_db(session_id)
+                    return details, known
+                
+                tasks.append(loop.run_in_executor(None, fetch_user_details))
+                
+                # Execute in parallel
+                results = await asyncio.gather(*tasks)
+                
+                context_chunks = results[0]
+                user_details, user_details_known = results[1]
+                
             except Exception as e:
                 logger.warning(
-                    "Redis context retrieval failed, using empty context: %s", e
+                    "Parallel retrieval failed, using fallback sequential: %s", e
                 )
                 context_chunks = []
+                user_details = {}
+                user_details_known = False
 
             context = "\n\n---\n\n".join(map(str, context_chunks or []))
-            # Build a concise LLM-ready context from history (summary + latest user message)
+            # Build conversation context using LangChain memory (efficient: summary + recent buffer)
             try:
-                from app.utils.chat_state import build_llm_context_from_history
-
-                history = build_llm_context_from_history(session_id, query) or self._format_history(chat_history)
-            except Exception:
+                from app.utils.conversation_memory import get_session_memory_manager
+                
+                memory_mgr = get_session_memory_manager()
+                history = memory_mgr.get_context(session_id)
+                
+                # If memory is empty, try to initialize from chat_history passed in
+                if not history and chat_history:
+                    memory_mgr.initialize_from_history(session_id, [
+                        {"role": msg[0], "content": msg[1]} if isinstance(msg, (list, tuple)) else msg
+                        for msg in chat_history
+                    ])
+                    history = memory_mgr.get_context(session_id)
+                
+                if not history:
+                    history = self._format_history(chat_history)
+                    
+                logger.debug(f"[Chatbot] Using LangChain memory context ({len(history)} chars)")
+            except Exception as e:
+                logger.warning(f"[Chatbot] LangChain memory failed, using fallback: {e}")
                 history = self._format_history(chat_history)
+            
             count = len(chat_history)
-            logger.info(
-                f"[Chatbot] Enhanced Conversation Summary generated ({len(history)} chars) for {count} messages"
-            )
-            logger.info(f"[COMPLETE_CONVERSATION_HISTORY] Session: {session_id}")
-            logger.info(
-                f"[COMPLETE_CONVERSATION_HISTORY] Raw chat_history being passed to LLM: {chat_history}"
-            )
-            logger.info(
-                f"[COMPLETE_CONVERSATION_HISTORY] Formatted conversation summary for LLM:\n{history}"
-            )
-            logger.info(
-                f"[MESSAGE_COUNT_DEBUG] Final message count for form trigger logic: {count}"
-            )
-            logger.info(
-                f"[Chatbot] Redis Context Retrieved: {len(context)} chars, {len(context_chunks)} chunks"
-            )
-            logger.info(f"[Chatbot] Chat History: {count} messages")
-
-            # Additional debug info for message count validation
-            user_messages = [
-                msg
-                for msg in conversation_history_for_redis
-                if msg.get("role") == "user"
-            ]
-            assistant_messages = [
-                msg
-                for msg in conversation_history_for_redis
-                if msg.get("role") == "assistant"
-            ]
-            logger.info(
-                f"[MESSAGE_COUNT_BREAKDOWN] Total: {count}, User: {len(user_messages)}, Assistant: {len(assistant_messages)}"
-            )
-
-            # 1. Yield processing chunk (handled by outer function, do not yield here)
-            # yield {"status": "processing", "message": "Preparing response..."}
-
-            # 2. Get user details once (Cache for this request)
-            from app.api.helpers import get_user_details_from_db, get_user_details_known_from_db
-            
-            # Fetch both in parallel if possible, or just sequentially but ONCE
-            user_details = get_user_details_from_db(session_id)
-            user_details_known = user_details.get("user_details_known", False)
-            
-            # If get_user_details_from_db doesn't return the flag (it seems it does based on previous code), 
-            # we might need to check how it was implemented. 
-            # Looking at helpers.py, get_user_details_from_db returns a dict, and it includes "user_details_known" if true.
-            # However, get_user_details_known_from_db is a separate call that returns a boolean.
-            # Let's stick to the safe bet: use the specific function if the dict doesn't have it, 
-            # OR just trust the specific function. 
-            # Actually, let's just call both ONCE.
-            
-            if not user_details:
-                 # Fallback if user_details is empty but we need the flag
-                 user_details_known = get_user_details_known_from_db(session_id)
             
             logger.info(f"[Chatbot] Context: user_details_known={user_details_known}, details_found={bool(user_details)}")
 
@@ -323,7 +461,12 @@ class OptimizedChatbot:
                     logger.error(f"Failed to save clarification response: {e}")
                 return
 
-            prompt = final_response_prompt(
+            # ============================================================
+            # PROMPT SOURCE: Using build_dynamic_prompt (Redis-backed, fallback to prompts.py)
+            logger.info(
+                "[PROMPT_SOURCE] Using build_dynamic_prompt: will use Redis prompt sections if available, else fallback to prompts.py"
+            )
+            prompt = build_dynamic_prompt(
                 prompt_context=context,
                 conversation_summary=history or "",
                 query=query,
@@ -370,6 +513,9 @@ class OptimizedChatbot:
             # Step 4: Parse LLM JSON output (if present)
             funnel_stage = ""
             response_text = ""
+            # Initialize early to ensure always defined (robustness)
+            prospect_profile = None
+            sources = []
 
             def extract_json_from_markdown(txt: str) -> str:
                 # First look for a fenced JSON block
@@ -400,6 +546,78 @@ class OptimizedChatbot:
                 llm_json = json.loads(cleaned_json)
                 response_text = llm_json.get("response", "") or ""
                 funnel_stage = (llm_json.get("funnel_stage", "") or "").lower()
+                # EXTRACT AND SAVE USER DETAILS
+                # Only check for extraction if we don't already know the user details
+                email_was_invalid = False  # Track for response post-processing
+                if not user_details_known:
+                    extracted_info = llm_json.get("user_info")
+                    if extracted_info and isinstance(extracted_info, dict):
+                        # Validate email if present
+                        raw_email = extracted_info.get("email")
+                        validated_email = _validate_email(raw_email) if raw_email else None
+                        
+                        # Track if email was provided but invalid (for response correction)
+                        if raw_email and not validated_email:
+                            email_was_invalid = True
+                            # Fix the response_text to not show the invalid email
+                            if raw_email in response_text:
+                                # First, remove the invalid email entirely from response
+                                # Handle various patterns: "email vinay.com", "email (vinay.com)", "email you provided (vinay.com)"
+                                response_text = re.sub(
+                                    rf'\s*\(?\s*{re.escape(raw_email)}\s*\)?\s*',
+                                    ' ',
+                                    response_text
+                                )
+                                # Clean up any "email you provided ()" or "email ()" remnants
+                                response_text = re.sub(
+                                    r'email\s+you\s+provided\s*\(\s*\)',
+                                    'email',
+                                    response_text,
+                                    flags=re.IGNORECASE
+                                )
+                                response_text = re.sub(
+                                    r'email\s*\(\s*\)',
+                                    'email',
+                                    response_text,
+                                    flags=re.IGNORECASE
+                                )
+                                # Clean up double spaces
+                                response_text = re.sub(r'\s{2,}', ' ', response_text)
+                                
+                            # Always add a request for valid email when invalid
+                            if "valid email" not in response_text.lower():
+                                response_text += "\n\n⚠️ **The email format provided doesn't appear to be valid.** Could you please share a valid email address (e.g., name@company.com) so we can send you the proposal?"
+                            logger.info(f"[LeadCapture] Fixed response to remove invalid email mention: '{raw_email}'")
+                        
+                        # Check if we have at least a name or a VALID email
+                        if extracted_info.get("name") or validated_email:
+                            logger.info(f"[LeadCapture] Extracted details from LLM: name={extracted_info.get('name')}, email={validated_email or '(invalid/none)'}")
+                            try:
+                                # Save to DB - only use validated email
+                                user_update = UserCreate(
+                                    username=extracted_info.get("name"),
+                                    email=validated_email,  # Only save if validated
+                                    user_details_known=True if validated_email else False  # Only mark known if we have valid email
+                                )
+                                # update_user_by_session is async
+                                await update_user_by_session(session_id, user_update)
+                                user_details_known = True if validated_email else user_details_known
+                                logger.info(f"[LeadCapture] Successfully saved extracted user details.")
+                            except Exception as e:
+                                logger.error(f"[LeadCapture] Failed to save extracted user details: {e}")
+
+                # Extract prospect profile for in-session tracking (not persisted to DB)
+                prospect_profile = llm_json.get("prospect_profile")
+                if prospect_profile and isinstance(prospect_profile, dict):
+                    logger.info(f"[ProspectProfile] Extracted: user_type={prospect_profile.get('user_type')}, stage={prospect_profile.get('stage')}, budget={prospect_profile.get('budget_sensitivity')}")
+                
+                # Extract sources for response traceability (metadata footnotes)
+                sources = llm_json.get("sources", [])
+                if sources and isinstance(sources, list):
+                    sources = [s for s in sources if s and isinstance(s, str) and s.startswith("http")]
+                    if sources:
+                        logger.info(f"[SourceTracing] Response sources: {sources}")
+
                 # Ignore LLM's user_details_known, always use DB value for meta chunk
                 user_network_id = llm_json.get("user_network_id") or None
                 logger.info(f"[Chatbot] Parsed JSON: {llm_json}")
@@ -420,14 +638,12 @@ class OptimizedChatbot:
                 else:
                     response_text = safe_final_text
                 user_network_id = None
+                sources = []
+                prospect_profile = None
 
             logger.info(
                 f"[Chatbot] Final output len={len(safe_final_text)}, funnel_stage='{funnel_stage}'"
             )
-            if "llm_json" in locals():
-                logger.info(
-                    f"[LLM_DEBUG] Raw LLM JSON response: {llm_json}"
-                )  # Debug what LLM actually returns
 
             # Step 5: Continue with regular response flow
 
@@ -456,43 +672,36 @@ class OptimizedChatbot:
                 
                 if funnel_stage == "action":
                     # LLM detected Action stage - user wants to connect or shows strong buying intent
+                    # MODIFIED: Instead of triggering form, we let the LLM Ask for details (as per prompt instructions)
                     if count >= 2:
-                        # Safety: minimum 2 user messages before any form
-                        trigger_form = True
-                        trigger_reason = "action_stage_llm_detected"
                         logger.info(
-                            f"[FORM_DEBUG] Action stage detected by LLM: funnel_stage='{funnel_stage}', count={count}"
+                            f"[LeadCapture] Action stage detected. Delegating data collection to LLM conversation. (count={count})"
                         )
                     else:
-                        # Too early - need at least 2 user messages
                         logger.info(
-                            f"[FORM_DEBUG] Action stage detected but count={count} < 2 - waiting for minimum messages"
+                            f"[LeadCapture] Action stage detected but count={count} < 2 - waiting for minimum messages"
                         )
                 elif funnel_stage == "intent":
                     # LLM detected Intent stage - user shows buying signals
+                    # MODIFIED: Instead of triggering form, we let the LLM Ask for details
                     if count >= 2:
-                        # Trigger form if LLM detected intent and we have minimum messages
-                        trigger_form = True
-                        trigger_reason = "intent_stage_llm_detected"
                         logger.info(
-                            f"[FORM_DEBUG] Intent stage detected by LLM: funnel_stage='{funnel_stage}', count={count}"
+                            f"[LeadCapture] Intent stage detected. Delegating data collection to LLM conversation. (count={count})"
                         )
                     else:
                         logger.info(
-                            f"[FORM_DEBUG] Intent stage detected but count={count} < 2 - waiting for minimum messages"
+                            f"[LeadCapture] Intent stage detected but count={count} < 2 - waiting for minimum messages"
                         )
                 elif funnel_stage == "interest":
                     # LLM detected Interest stage - user is engaged
+                    # MODIFIED: Instead of triggering form, we let the LLM Ask for details
                     if count >= 3:
-                        # For interest stage, wait for at least 3 messages to ensure engagement
-                        trigger_form = True
-                        trigger_reason = "interest_stage_llm_detected"
                         logger.info(
-                            f"[FORM_DEBUG] Interest stage detected by LLM with sufficient engagement: funnel_stage='{funnel_stage}', count={count}"
+                            f"[LeadCapture] Interest stage detected. Delegating data collection to LLM conversation. (count={count})"
                         )
                     else:
                         logger.info(
-                            f"[FORM_DEBUG] Interest stage detected but count={count} < 3 - continue building rapport"
+                            f"[LeadCapture] Interest stage detected but count={count} < 3 - continue building rapport"
                         )
                 elif count >= 10:
                     # Fallback: If conversation is extended without form trigger, trigger anyway
@@ -512,7 +721,9 @@ class OptimizedChatbot:
                 # from app.utils.response_formatter import format_response
 
                 # Format response immediately (no blocking URL validation)
-                formatted = format_response(cleaned, query, None)
+                # formatted = format_response(cleaned, query, None)
+                # Skip formatting to debug newline issue
+                formatted = cleaned
                 # Note: format_response already handles \\n replacement internally
 
                 # Quick URL normalization (no network calls) - fix spaces in URLs
@@ -521,39 +732,18 @@ class OptimizedChatbot:
 
                 formatted = self._normalize_urls_in_text(formatted)
 
-                # Remove bold follow-up questions if user_details_known=True
-                if user_details_known:
-                    # Log the response before modification for debugging
-                    logger.info(f"[MARKDOWN_DEBUG] Response before bold removal: {formatted[-200:]}")
-                    
-                    # More precise patterns to only target follow-up questions at the very end
-                    # Pattern 1: Bold question starting a new paragraph at the end
-                    formatted = re.sub(
-                        r"\n\n\*\*[^*]*\?[^*]*\*\*\s*$",  # Bold question with ? in new paragraph at end
-                        "",
-                        formatted,
-                        flags=re.MULTILINE | re.DOTALL,
-                    )
-                    # Pattern 2: Bold question on its own line at the end (no preceding paragraph)
-                    formatted = re.sub(
-                        r"\n\*\*[^*]*\?[^*]*\*\*\s*$",  # Bold question with ? on new line at end
-                        "",
-                        formatted,
-                        flags=re.MULTILINE | re.DOTALL,
-                    )
-                    # Pattern 3: Very specific - only remove if it looks like a follow-up question
-                    # (contains question words like "What", "How", "Would", etc.)
-                    formatted = re.sub(
-                        r"\n\n?\*\*(What|How|Would|Could|Can|Do|Are|Is|Will)[^*]*\?[^*]*\*\*\s*$",  # Question word patterns
-                        "",
-                        formatted,
-                        flags=re.MULTILINE | re.DOTALL | re.IGNORECASE,
-                    )
-                    
-                    logger.info(f"[MARKDOWN_DEBUG] Response after bold removal: {formatted[-200:]}")
-                    logger.info(
-                        "[Chatbot] Removed bold follow-up question for user_details_known=True"
-                    )
+                # Sanitize horizontal rules that cause Setext H2 rendering
+                # Remove lines containing only dashes, asterisks, or underscores (3+)
+                # These create horizontal rules in markdown and can cause text above to render as headers
+                formatted = re.sub(
+                    r'^\s*[-*_]{3,}\s*$',  # Match lines with 3+ dashes, asterisks, or underscores
+                    '',
+                    formatted,
+                    flags=re.MULTILINE
+                )
+                # Clean up any resulting multiple blank lines
+                formatted = re.sub(r'\n{3,}', '\n\n', formatted)
+
 
                 # Anti-repetition: compare with last assistant response
                 if last_assistant_response and isinstance(last_assistant_response, str):
@@ -592,6 +782,16 @@ class OptimizedChatbot:
                                 f"[MARKDOWN_WARNING] Bold markdown spacing issue detected: '** ' or ' **' found in response"
                             )
 
+                # Append sources section for transparency (show where info came from)
+                if sources and isinstance(sources, list) and len(sources) > 0:
+                    sources_section = "\n\n---\n**📚 Sources:**"
+                    for src in sources[:5]:  # Limit to 5 sources for readability
+                        if src and isinstance(src, str) and src.startswith("http"):
+                            label = _get_source_label(src)
+                            sources_section += f"\n- [{label}]({src})"
+                    formatted += sources_section
+                    logger.info(f"[SourceTransparency] Appended {min(len(sources), 5)} source(s) to response")
+
                 # Only yield a chunk if it is non-empty and not just whitespace
                 if formatted and formatted.strip():
                     yield {"status": "chunk", "chunk": formatted}
@@ -609,9 +809,12 @@ class OptimizedChatbot:
 
             # Step 7: Emit meta update if present, but skip if form_trigger is about to be yielded
             # Use cached user_details_known
+            # Include sources for traceability and prospect_profile for session context
             meta_chunk = {
                 "user_details_known": user_details_known,
                 **({"user_network_id": user_network_id} if user_network_id else {}),
+                **({"sources": sources} if sources else {}),
+                **({"prospect_profile": prospect_profile} if prospect_profile else {}),
             }
             if not trigger_form and meta_chunk:
                 yield {"status": "meta", "chunk": meta_chunk}

@@ -16,9 +16,14 @@ redis==6.4.0
 requests==2.32.5
 httpx==0.27.0
 sentence-transformers==5.1.1
-langchain-openai==0.3.35
+langchain-openai>=0.2.0
 uvicorn==0.37.0
 tiktoken==0.12.0
-langchain-openai==0.3.35
 hf_xet
 rich==14.2.0
+streamlit
+playwright>=1.40.0
+chromadb>=0.4.22
+APScheduler>=3.10.4
+lxml>=5.0.0
+rank-bm25>=0.2.2
