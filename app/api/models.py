@@ -35,7 +35,7 @@ class UserCreate(BaseModel):
     mobile: Optional[str] = None
     browser: Optional[str] = None
     ip: Optional[str] = None
-    user_details_known: bool = Field(default=False)
+    user_details_known: Optional[bool] = Field(default=None)
     
 
 class MessageBase(BaseModel):

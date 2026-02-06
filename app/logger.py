@@ -4,6 +4,10 @@ from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 from queue import Queue
 import os
 import atexit
+import contextvars
+
+# Context variable to hold session_id for logging
+session_id_context = contextvars.ContextVar("session_id", default="GLOBAL")
 
 PROJECT_ROOT = os.getcwd()
 LOG_FILE = os.path.join(PROJECT_ROOT, "app.log")
@@ -18,8 +22,15 @@ _listener: QueueListener | None = None
 
 def _get_formatter() -> logging.Formatter:
     return logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(filename)s - %(funcName)s - %(message)s"
+        "%(asctime)s [%(levelname)s] (%(session_id)s) %(filename)s - %(funcName)s - %(message)s"
     )
+
+
+class SessionIdFilter(logging.Filter):
+    """Filter that injects session_id into every log record."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.session_id = session_id_context.get()
+        return True
 
 
 class AsciiOnlyFilter(logging.Filter):
@@ -40,6 +51,7 @@ def _ensure_logging_system():
     if _console_handler is None:
         _console_handler = logging.StreamHandler(sys.stdout)
         _console_handler.setFormatter(_get_formatter())
+        _console_handler.addFilter(SessionIdFilter())
         _console_handler.addFilter(AsciiOnlyFilter())
 
     if _file_handler is None:
@@ -47,6 +59,7 @@ def _ensure_logging_system():
             LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
         )
         _file_handler.setFormatter(_get_formatter())
+        _file_handler.addFilter(SessionIdFilter())
 
     # 2. Create the queue and queue handler
     log_queue = Queue(-1)

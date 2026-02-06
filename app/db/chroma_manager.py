@@ -15,8 +15,17 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 import hashlib
 
-import chromadb
-from chromadb.config import Settings
+# Conditional import for chromadb (handle missing module gracefully)
+try:
+    import chromadb
+    from chromadb.config import Settings
+    CHROMADB_AVAILABLE = True
+except ImportError:
+    CHROMADB_AVAILABLE = False
+    chromadb = None
+    Settings = None
+    logger = logging.getLogger(__name__)
+    logger.warning("chromadb module not available. ChromaDB features will be disabled.")
 
 from core_services.embedding_utils import get_embedding, get_embeddings_batch
 from app.scraper.config import get_scraper_config, ScraperConfig
@@ -97,7 +106,14 @@ class ChromaManager:
         self.client_mode = "persistent"
         logger.info(f"✅ ChromaDB initialized with PersistentClient at {self.persist_directory}")
     
-    def _create_http_client(self, server_url: str, max_retries: int = 3) -> chromadb.HttpClient:
+    def _create_http_client(self, server_url: str, max_retries: int = 3):
+        """Create HttpClient with retry logic."""
+        if not CHROMADB_AVAILABLE:
+            raise ImportError("chromadb module is not installed")
+        
+        return self._create_http_client_impl(server_url, max_retries)
+    
+    def _create_http_client_impl(self, server_url: str, max_retries: int = 3) -> chromadb.HttpClient:
         """
         Create HttpClient with retry logic for connection resilience.
         
@@ -157,7 +173,7 @@ class ChromaManager:
             cls._instance = cls(persist_directory)
         return cls._instance
     
-    def get_collection(self, name: Optional[str] = None) -> chromadb.Collection:
+    def get_collection(self, name: Optional[str] = None):
         """
         Get or create a collection.
         
@@ -178,7 +194,7 @@ class ChromaManager:
         return collection
     
     @property
-    def collection(self) -> chromadb.Collection:
+    def collection(self):
         """Get the default collection (lazy-loaded)."""
         if self._collection is None:
             self._collection = self.get_collection()
@@ -221,7 +237,7 @@ class ChromaManager:
         # Generate embeddings in batch (5-10x faster than sequential)
         logger.info(f"🧠 Generating embeddings for {len(texts)} documents (batch mode)...")
         try:
-            embeddings = get_embeddings_batch(texts, batch_size=32)
+            embeddings = get_embeddings_batch(texts, batch_size=32)  # Optimized for 8GB GPU
         except Exception as e:
             logger.error(f"❌ Batch embedding failed: {e}")
             # Fallback to sequential on batch failure

@@ -37,6 +37,3 @@ scraped_data/
 # Generated artifacts
 *.jsonl
 *.sqlite
-
-# Local backups
-large_files_backup/

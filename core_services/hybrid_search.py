@@ -99,15 +99,52 @@ class HybridSearchManager:
             return False
         
         try:
-            # Get all documents from ChromaDB
-            all_data = chroma.collection.get(include=["documents", "metadatas"])
-            
-            documents = all_data.get("documents", [])
-            metadatas = all_data.get("metadatas", [])
-            ids = all_data.get("ids", [])
-            
-            if not documents:
+            # Get total document count
+            total_count = chroma.collection.count()
+            if total_count == 0:
                 logger.warning("No documents found in ChromaDB")
+                return False
+            
+            logger.info(f"Building BM25 index from {total_count} documents...")
+            
+            # Paginated retrieval to avoid server disconnection on large datasets
+            BATCH_SIZE = 5000
+            all_documents = []
+            all_metadatas = []
+            all_ids = []
+            
+            offset = 0
+            while offset < total_count:
+                try:
+                    batch_data = chroma.collection.get(
+                        include=["documents", "metadatas"],
+                        limit=BATCH_SIZE,
+                        offset=offset
+                    )
+                    
+                    batch_docs = batch_data.get("documents", [])
+                    batch_metas = batch_data.get("metadatas", [])
+                    batch_ids = batch_data.get("ids", [])
+                    
+                    if not batch_docs:
+                        break
+                    
+                    all_documents.extend(batch_docs)
+                    all_metadatas.extend(batch_metas)
+                    all_ids.extend(batch_ids)
+                    
+                    offset += len(batch_docs)
+                    logger.debug(f"  BM25 build progress: {offset}/{total_count} documents")
+                    
+                except Exception as batch_error:
+                    logger.warning(f"Error fetching batch at offset {offset}: {batch_error}")
+                    # Try to continue with what we have
+                    if all_documents:
+                        break
+                    raise
+            
+            if not all_documents:
+                logger.warning("No documents retrieved from ChromaDB")
                 return False
             
             # Store documents with metadata for later retrieval
@@ -115,7 +152,7 @@ class HybridSearchManager:
             self._doc_texts = []
             tokenized_corpus = []
             
-            for i, (doc, meta, doc_id) in enumerate(zip(documents, metadatas, ids)):
+            for i, (doc, meta, doc_id) in enumerate(zip(all_documents, all_metadatas, all_ids)):
                 if not doc:
                     continue
                     
