@@ -24,3 +24,19 @@ Thumbs.db
 
 # Ignore model
 embeddings/
+
+# Embeddings / vector DBs
+chroma_db/
+*.parquet
+*.bin
+
+# Datasets
+fine_tuning_data/
+scraped_data/
+
+# Generated artifacts
+*.jsonl
+*.sqlite
+
+# Local backups
+large_files_backup/

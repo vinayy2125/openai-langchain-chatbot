@@ -8,13 +8,9 @@ from app.api.router import router as api_router
 from fastapi.middleware.cors import CORSMiddleware
 
 # from app.core.llm_client import llm
-from app.api import redis_endpoint as redis_router
-
 # from app.core.nested_follow_up_manager import FollowUpManager
 from app.logger import get_logger
 from app.logger import attach_handlers_to_uvicorn
-from app.ingestion.scrape_to_redis import create_index_from_yaml
-from pathlib import Path
 
 load_dotenv()
 
@@ -76,9 +72,6 @@ def create_app() -> FastAPI:
     # Register main API router
     app.include_router(api_router)
     logger.info("API routes registered")
-    # Register Redis endpoints router
-    app.include_router(redis_router.router, prefix="/api")
-    logger.info("Redis endpoints registered")
 
     return app
 
@@ -104,13 +97,6 @@ def main():
         )
 
     # Run the Uvicorn server
-    # Ensure chat_history_index exists
-    try:
-        yaml_path = Path(__file__).parent / "db" / "chat_history_index.yaml"
-        create_index_from_yaml(str(yaml_path))
-    except Exception:
-        logger.exception("Failed to ensure chat_history_index on startup")
-
     uvicorn.run(
         "main:create_app",
         host=host,

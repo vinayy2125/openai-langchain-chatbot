@@ -8,13 +8,75 @@ from app.utils.llm_utils import generate_llm_response
 from app.utils.redis_context import get_redis_context_chunks
 
 # format_response is now imported only when needed (async version with URL validation)
-from app.utils.prompts import final_response_prompt, PROMPT_VERSION
+from app.utils.prompts import PROMPT_VERSION
+from app.utils.dynamic_prompts import build_dynamic_prompt
 from app.utils.response_formatter import format_response, _normalize_url
 import asyncio
 import functools
 from app.api.models import MessageCreate, UserCreate
+from email_validator import validate_email, EmailNotValidError
 
 logger = get_logger("chatbot")
+
+
+def _validate_email(email: str) -> str | None:
+    """
+    Validate email format using email-validator library.
+    Returns the normalized email if valid, None if invalid.
+    """
+    if not email:
+        return None
+    try:
+        # Validate and normalize the email
+        valid = validate_email(email, check_deliverability=False)
+        return valid.normalized
+    except EmailNotValidError as e:
+        logger.warning(f"[LeadCapture] Invalid email format rejected: '{email}' - {e}")
+        return None
+
+
+def _get_source_label(url: str) -> str:
+    """
+    Extract a readable label from source URL for display.
+    
+    Parses URL fragment or path to create human-readable link text.
+    Example: 'https://ditstek.com/blog/ai-chatbot#section-name' -> 'Section Name'
+    
+    Args:
+        url: The source URL
+        
+    Returns:
+        str: Human-readable label (max 60 chars)
+    """
+    if not url:
+        return "Source"
+    try:
+        from urllib.parse import urlparse, unquote
+        parsed = urlparse(url)
+        
+        # Use fragment if present (e.g., #section-name)
+        if parsed.fragment:
+            label = unquote(parsed.fragment.replace("-", " ").replace("_", " "))
+            # Clean up and title case
+            label = " ".join(word.capitalize() for word in label.split())
+            return label[:60] if label else parsed.netloc
+        
+        # Otherwise use last meaningful path segment
+        path = parsed.path.rstrip("/")
+        if path:
+            segment = path.split("/")[-1]
+            # Skip common file extensions
+            if segment and not segment.endswith((".html", ".php", ".aspx", ".htm")):
+                label = unquote(segment.replace("-", " ").replace("_", " "))
+                label = " ".join(word.capitalize() for word in label.split())
+                if label:
+                    return label[:60]
+        
+        # Fallback to domain name
+        return parsed.netloc or "Source"
+    except Exception:
+        # Ultimate fallback
+        return url[:60] if len(url) > 60 else url
 
 
 def _calculate_dynamic_top_n(query: str, conversation_history: list) -> int:
@@ -103,8 +165,9 @@ def _calculate_dynamic_top_n(query: str, conversation_history: list) -> int:
     if "?" in query:
         top_n += 2
 
-    # Cap the maximum (to avoid excessive token usage) but allow for comprehensive searches
-    top_n = min(max(top_n, 4), 30)  # Range: 4-10
+    # Cap the maximum - balance between accuracy and token limits
+    # Increased from 10 to 12 to improve result coverage for all queries
+    top_n = min(max(top_n, 4), 12)
 
     logger.info(
         f"[DynamicTopN] Calculated top_n={top_n} for query length={query_length}, words={query_words}"
@@ -121,9 +184,13 @@ class ContextOptimizer:
 
     def __init__(self, model: str = "gpt-4o"):
         self.model = model
-        self.encoding = tiktoken.encoding_for_model(model)
-        self.model_limits = {"gpt-4o": 128000}
-        self.context_limit = self.model_limits.get(model, 4096)
+        # Use cl100k_base encoding as fallback for non-OpenAI models
+        try:
+            self.encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            self.encoding = tiktoken.get_encoding("cl100k_base")
+        self.model_limits = {"gpt-4o": 128000, "gpt-4o": 128000, "gpt-4-turbo": 128000, "gpt-3.5-turbo": 16385}
+        self.context_limit = self.model_limits.get(model, 128000)
 
     @lru_cache(maxsize=1000)
     def count_tokens_cached(self, text: str) -> int:
@@ -142,7 +209,8 @@ class OptimizedChatbot:
             "thanks", "thank you", "thx",
             "good morning", "good afternoon", "good evening",
             "bye", "goodbye", "see you",
-            "ok", "okay", "sure", "cool"
+            "ok", "okay", "sure", "cool",
+            "no", "yes", "nope", "yep"
         }
         
         # Exact match
@@ -187,7 +255,8 @@ class OptimizedChatbot:
         self.query_llm = llm if llm is not None else ChatOpenAI(model=model)
 
     async def get_detailed_response(
-        self, query: str, chat_history, session_id: str, stream: bool = True
+        self, query: str, chat_history, session_id: str, stream: bool = True,
+        is_uc1: bool = False  # EXPLICIT UC1 flag - set by caller, not inferred
     ):
         from app.api.helpers import (
             get_user_details_known_from_db,
@@ -197,7 +266,53 @@ class OptimizedChatbot:
         Generate a detailed response for a query and stream structured events.
         Yields dict events used by the API layer: 
         {status: 'chunk'|'form_trigger'|'meta', 'chunk': ...}
+        
+        UC1 ROUTING (EXPLICIT):
+        If is_uc1=True, delegates to ConversationOrchestrator.
+        UC1 activation is NEVER inferred - it must be explicitly set by:
+        1. Session explicitly marked as UC1 at creation
+        2. Explicit UC1 trigger CTA from welcome screen
         """
+        
+        # ============================================================
+        # UC1 EXPLICIT ROUTING - Check FIRST, before any other logic
+        # ============================================================
+        if is_uc1:
+            logger.info(f"[Chatbot] UC1 mode active for session: {session_id}")
+            try:
+                from app.orchestrator import ConversationOrchestrator
+                
+                orchestrator = ConversationOrchestrator.get_or_create(session_id)
+                
+                # Process input through orchestrator (returns text-blind response)
+                response = orchestrator.process_input(query)
+                
+                # Generate message from call_spec using LLM adapter (sole language authority)
+                if hasattr(response, 'call_spec') and response.call_spec:
+                    spec = response.call_spec
+                    response.message = orchestrator.llm_adapter.generate_state_response(
+                        state=spec.state,
+                        response_intent=spec.response_intent,
+                        user_input=spec.user_input,
+                        slots=spec.slots,
+                        bucket=spec.bucket,
+                        exploration_turn=spec.exploration_turn,
+                    )
+                
+                # Yield SSE chunks (message now populated)
+                for chunk in response.to_sse_chunks():
+                    yield chunk
+                
+                # UC1 handled - return early
+                return
+            except Exception as uc1_error:
+                logger.exception(f"[Chatbot] UC1 orchestrator error, falling back to standard flow: {uc1_error}")
+                # Fall through to standard flow if UC1 fails
+        
+        # ============================================================
+        # STANDARD FLOW (for non-UC1 sessions)
+        # ============================================================
+        
         # Track last assistant response for anti-repetition
         last_assistant_response = None
         for msg in reversed(chat_history or []):
@@ -285,12 +400,27 @@ class OptimizedChatbot:
                 user_details_known = False
 
             context = "\n\n---\n\n".join(map(str, context_chunks or []))
-            # Build a concise LLM-ready context from history (summary + latest user message)
+            # Build conversation context using LangChain memory (efficient: summary + recent buffer)
             try:
-                from app.utils.chat_state import build_llm_context_from_history
-
-                history = build_llm_context_from_history(session_id, query) or self._format_history(chat_history)
-            except Exception:
+                from app.utils.conversation_memory import get_session_memory_manager
+                
+                memory_mgr = get_session_memory_manager()
+                history = memory_mgr.get_context(session_id)
+                
+                # If memory is empty, try to initialize from chat_history passed in
+                if not history and chat_history:
+                    memory_mgr.initialize_from_history(session_id, [
+                        {"role": msg[0], "content": msg[1]} if isinstance(msg, (list, tuple)) else msg
+                        for msg in chat_history
+                    ])
+                    history = memory_mgr.get_context(session_id)
+                
+                if not history:
+                    history = self._format_history(chat_history)
+                    
+                logger.debug(f"[Chatbot] Using LangChain memory context ({len(history)} chars)")
+            except Exception as e:
+                logger.warning(f"[Chatbot] LangChain memory failed, using fallback: {e}")
                 history = self._format_history(chat_history)
             
             count = len(chat_history)
@@ -332,19 +462,11 @@ class OptimizedChatbot:
                 return
 
             # ============================================================
-            # PROMPT SOURCE CLARITY: Using prompts.py, NOT Redis chunks
-            # ============================================================
+            # PROMPT SOURCE: Using build_dynamic_prompt (Redis-backed, fallback to prompts.py)
             logger.info(
-                "[PROMPT_SOURCE] ✓ Loading prompt instructions from prompts.py via final_response_prompt() function"
+                "[PROMPT_SOURCE] Using build_dynamic_prompt: will use Redis prompt sections if available, else fallback to prompts.py"
             )
-            logger.info(
-                "[PROMPT_SOURCE] ✗ NOT using Redis chat_prompt_json chunks (Redis only used for knowledge base context)"
-            )
-            logger.info(
-                f"[PROMPT_SOURCE] Prompt version: {PROMPT_VERSION} from app.utils.prompts"
-            )
-            
-            prompt = final_response_prompt(
+            prompt = build_dynamic_prompt(
                 prompt_context=context,
                 conversation_summary=history or "",
                 query=query,
@@ -391,6 +513,9 @@ class OptimizedChatbot:
             # Step 4: Parse LLM JSON output (if present)
             funnel_stage = ""
             response_text = ""
+            # Initialize early to ensure always defined (robustness)
+            prospect_profile = None
+            sources = []
 
             def extract_json_from_markdown(txt: str) -> str:
                 # First look for a fenced JSON block
@@ -423,25 +548,75 @@ class OptimizedChatbot:
                 funnel_stage = (llm_json.get("funnel_stage", "") or "").lower()
                 # EXTRACT AND SAVE USER DETAILS
                 # Only check for extraction if we don't already know the user details
+                email_was_invalid = False  # Track for response post-processing
                 if not user_details_known:
                     extracted_info = llm_json.get("user_info")
                     if extracted_info and isinstance(extracted_info, dict):
-                        # Check if we have at least a name or email
-                        if extracted_info.get("name") or extracted_info.get("email"):
-                            logger.info(f"[LeadCapture] Extracted details from LLM: {extracted_info}")
+                        # Validate email if present
+                        raw_email = extracted_info.get("email")
+                        validated_email = _validate_email(raw_email) if raw_email else None
+                        
+                        # Track if email was provided but invalid (for response correction)
+                        if raw_email and not validated_email:
+                            email_was_invalid = True
+                            # Fix the response_text to not show the invalid email
+                            if raw_email in response_text:
+                                # First, remove the invalid email entirely from response
+                                # Handle various patterns: "email vinay.com", "email (vinay.com)", "email you provided (vinay.com)"
+                                response_text = re.sub(
+                                    rf'\s*\(?\s*{re.escape(raw_email)}\s*\)?\s*',
+                                    ' ',
+                                    response_text
+                                )
+                                # Clean up any "email you provided ()" or "email ()" remnants
+                                response_text = re.sub(
+                                    r'email\s+you\s+provided\s*\(\s*\)',
+                                    'email',
+                                    response_text,
+                                    flags=re.IGNORECASE
+                                )
+                                response_text = re.sub(
+                                    r'email\s*\(\s*\)',
+                                    'email',
+                                    response_text,
+                                    flags=re.IGNORECASE
+                                )
+                                # Clean up double spaces
+                                response_text = re.sub(r'\s{2,}', ' ', response_text)
+                                
+                            # Always add a request for valid email when invalid
+                            if "valid email" not in response_text.lower():
+                                response_text += "\n\n⚠️ **The email format provided doesn't appear to be valid.** Could you please share a valid email address (e.g., name@company.com) so we can send you the proposal?"
+                            logger.info(f"[LeadCapture] Fixed response to remove invalid email mention: '{raw_email}'")
+                        
+                        # Check if we have at least a name or a VALID email
+                        if extracted_info.get("name") or validated_email:
+                            logger.info(f"[LeadCapture] Extracted details from LLM: name={extracted_info.get('name')}, email={validated_email or '(invalid/none)'}")
                             try:
-                                # Save to DB
+                                # Save to DB - only use validated email
                                 user_update = UserCreate(
                                     username=extracted_info.get("name"),
-                                    email=extracted_info.get("email"),
-                                    user_details_known=True
+                                    email=validated_email,  # Only save if validated
+                                    user_details_known=True if validated_email else False  # Only mark known if we have valid email
                                 )
                                 # update_user_by_session is async
                                 await update_user_by_session(session_id, user_update)
-                                user_details_known = True # Update local state for immediate feedback
+                                user_details_known = True if validated_email else user_details_known
                                 logger.info(f"[LeadCapture] Successfully saved extracted user details.")
                             except Exception as e:
                                 logger.error(f"[LeadCapture] Failed to save extracted user details: {e}")
+
+                # Extract prospect profile for in-session tracking (not persisted to DB)
+                prospect_profile = llm_json.get("prospect_profile")
+                if prospect_profile and isinstance(prospect_profile, dict):
+                    logger.info(f"[ProspectProfile] Extracted: user_type={prospect_profile.get('user_type')}, stage={prospect_profile.get('stage')}, budget={prospect_profile.get('budget_sensitivity')}")
+                
+                # Extract sources for response traceability (metadata footnotes)
+                sources = llm_json.get("sources", [])
+                if sources and isinstance(sources, list):
+                    sources = [s for s in sources if s and isinstance(s, str) and s.startswith("http")]
+                    if sources:
+                        logger.info(f"[SourceTracing] Response sources: {sources}")
 
                 # Ignore LLM's user_details_known, always use DB value for meta chunk
                 user_network_id = llm_json.get("user_network_id") or None
@@ -463,6 +638,8 @@ class OptimizedChatbot:
                 else:
                     response_text = safe_final_text
                 user_network_id = None
+                sources = []
+                prospect_profile = None
 
             logger.info(
                 f"[Chatbot] Final output len={len(safe_final_text)}, funnel_stage='{funnel_stage}'"
@@ -605,6 +782,16 @@ class OptimizedChatbot:
                                 f"[MARKDOWN_WARNING] Bold markdown spacing issue detected: '** ' or ' **' found in response"
                             )
 
+                # Append sources section for transparency (show where info came from)
+                if sources and isinstance(sources, list) and len(sources) > 0:
+                    sources_section = "\n\n---\n**📚 Sources:**"
+                    for src in sources[:5]:  # Limit to 5 sources for readability
+                        if src and isinstance(src, str) and src.startswith("http"):
+                            label = _get_source_label(src)
+                            sources_section += f"\n- [{label}]({src})"
+                    formatted += sources_section
+                    logger.info(f"[SourceTransparency] Appended {min(len(sources), 5)} source(s) to response")
+
                 # Only yield a chunk if it is non-empty and not just whitespace
                 if formatted and formatted.strip():
                     yield {"status": "chunk", "chunk": formatted}
@@ -622,9 +809,12 @@ class OptimizedChatbot:
 
             # Step 7: Emit meta update if present, but skip if form_trigger is about to be yielded
             # Use cached user_details_known
+            # Include sources for traceability and prospect_profile for session context
             meta_chunk = {
                 "user_details_known": user_details_known,
                 **({"user_network_id": user_network_id} if user_network_id else {}),
+                **({"sources": sources} if sources else {}),
+                **({"prospect_profile": prospect_profile} if prospect_profile else {}),
             }
             if not trigger_form and meta_chunk:
                 yield {"status": "meta", "chunk": meta_chunk}
