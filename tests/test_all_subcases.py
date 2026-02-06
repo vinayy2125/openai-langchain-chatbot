@@ -40,11 +40,10 @@ class TestUC1AllBuckets:
             response_text = ""
             events = []
             payload = {
-                "message": msg,
-                "session_id": session_id,
-                "is_uc1": True
+                "query": msg,
+                "session_id": session_id
             }
-            with client.stream("POST", "/chat/send-stream", json=payload) as response_stream:
+            with client.stream("POST", "/api/chat/send-stream", json=payload) as response_stream:
                 for line in response_stream.iter_lines():
                     if line.startswith("data: "):
                         try:
