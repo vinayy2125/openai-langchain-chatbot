@@ -10,12 +10,18 @@
 # 3. CTA count validation in recommendation state
 
 import re
+import os
 from typing import Set, Optional
 from app.orchestrator.uc1_config import UC1Config
 from app.orchestrator.state_machine import UC1State
 from app.logger import get_logger
 
 logger = get_logger("output_sanitizer")
+
+# Environment mode: DEV or PROD
+# In DEV: sanitize() raises immediately on violation (use sanitize(), not safe_sanitize())
+# In PROD: safe_sanitize() provides fallbacks
+ENV_MODE = os.getenv("ENV_MODE", "PROD").upper()
 
 
 class ForbiddenTopicViolation(Exception):
@@ -113,7 +119,10 @@ class LLMOutputSanitizer:
         """
         for topic, pattern in self._forbidden_patterns:
             if pattern.search(output):
-                logger.error(f"[Sanitizer] Forbidden topic detected: '{topic}'")
+                if ENV_MODE == "DEV":
+                    logger.error(f"[FATAL DEV] Sanitizer violation: forbidden topic '{topic}'")
+                else:
+                    logger.error(f"[Sanitizer] Forbidden topic detected: '{topic}'")
                 raise ForbiddenTopicViolation(topic, output)
     
     def _check_no_questions(self, output: str, state: UC1State) -> None:

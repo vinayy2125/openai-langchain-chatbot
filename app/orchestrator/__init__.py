@@ -14,7 +14,7 @@ from app.orchestrator.state_machine import UC1State, UC1StateMachine, StateConfi
 from app.orchestrator.slot_manager import UC1Slots, SlotManager, EngagementEvent
 from app.orchestrator.orchestrator import ConversationOrchestrator, OrchestratorResponse
 from app.orchestrator.policy_validator import UC1PolicyValidator, UC1PolicyViolation
-from app.orchestrator.llm_adapter import ConstrainedLLMAdapter
+from app.orchestrator.llm_adapter import ConstrainedLLMAdapter, LLMIntent
 from app.orchestrator.output_sanitizer import LLMOutputSanitizer, ForbiddenTopicViolation
 
 __all__ = [
@@ -39,6 +39,7 @@ __all__ = [
     "UC1PolicyViolation",
     # LLM
     "ConstrainedLLMAdapter",
+    "LLMIntent",
     # Sanitizer
     "LLMOutputSanitizer",
     "ForbiddenTopicViolation",

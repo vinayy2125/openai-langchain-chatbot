@@ -14,12 +14,11 @@
 intent_id: "explore_services_capabilities"
 lock_version: "1.0.0"
 
-# Fixed entry message - shown when user enters UC1 flow
+# Fixed entry message - shown when user clicks "Explore services & capabilities"
+# Per spec: DITSTEK-REVAMP-extracted.txt lines 58-60
 entry_message: |
-  Welcome to DITSTEK.
-  Here, we focus on building products, engineering teams, and careers that last.
-  
-  How would you like to start?
+  Great — happy to guide you.
+  Pick the closest area and I'll narrow it down from there.
 
 # The 6 capability buckets (sub-use cases)
 capability_buckets:
@@ -79,10 +78,12 @@ capability_buckets:
 
 # The 4 exit CTAs (exactly 4, no more, no less)
 exit_ctas:
-  - choice: "Discuss my requirement now"
+  - choice: "Discuss my requirement"
     outcome: "UC2"
+    link: "https://www.ditstek.com/contact-us"
   - choice: "Schedule a quick call"
     outcome: "calendar"
+    link: "https://www.ditstek.com/contact-us"
   - choice: "Continue exploring"
     outcome: "loop"
   - choice: "I'll explore on my own"
@@ -119,3 +120,61 @@ synthesis_template: |
   Thanks, {user_name}. You're focused on {goal_description}, and {context_summary}.
   
   Here are a few ways we typically approach this:
+
+# =========================================================================
+# DYNAMIC EXPLORATION BUTTONS (NEW - 2026-01-15)
+# =========================================================================
+# Topic-specific buttons for FREE_EXPLORATION mode
+# These are shown based on capability_bucket context
+exploration_buttons:
+  default:
+    - "Get a demo"
+    - "See case studies"
+    - "Talk to an expert"
+  
+  # Bucket-specific overrides (use bucket ID as key)
+  UC1-A:  # Product development
+    - "See project examples"
+    - "Get a consultation"
+    - "Discuss my requirements"
+  
+  UC1-B:  # App modernization
+    - "View migration stories"
+    - "Get an assessment"
+    - "Talk to architect"
+  
+  UC1-C:  # Staff augmentation
+    - "See team profiles"
+    - "Discuss hiring needs"
+    - "Flexible engagement"
+  
+  UC1-D:  # AI/ML
+    - "See AI demos"
+    - "Discovery workshop"
+    - "Proof of concept"
+  
+  UC1-E:  # Cloud/DevOps
+    - "Architecture review"
+    - "See scalability cases"
+    - "Talk to DevOps team"
+  
+  UC1-F:  # Guidance
+    - "Explore options together"
+    - "Get expert guidance"
+    - "Talk to consultant"
+
+# =========================================================================
+# EMAIL CAPTURE (NEW - 2026-01-15)
+# =========================================================================
+# Email is requested after 4-6 turns OR when user shows high intent
+email_capture:
+  min_turns_before_ask: 4
+  max_turns_before_ask: 6
+  prompt: "Before we continue, what's the best email to reach you at?"
+  soft_prompt: "If you'd like, I can send you more details — what's your email?"
+  skip_phrases:
+    - "skip"
+    - "no email"
+    - "later"
+    - "no thanks"
+    - "not now"

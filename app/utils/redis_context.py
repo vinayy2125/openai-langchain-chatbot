@@ -8,16 +8,22 @@ import json
 from app.db import base
 from app.config import get_redis_client as config_get_redis_client, get_redis as config_redis_client
 from core_services.embedding_utils import get_embedding
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import threading
+import time
 
 # Single-threaded executor for background embedding tasks (small default)
 _EMBEDDING_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+
+# Executor for parallel search strategies (3 workers for 3 search methods)
+_SEARCH_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="search")
+
 from pathlib import Path
 import os
 
 logger = get_logger("chatbot")
 
+from app.utils.reranker import get_reranker
 # ChromaDB for knowledge base search (lazy-loaded)
 _chroma_manager = None
 
@@ -30,8 +36,8 @@ _parent_retriever = None
 # Environment flag to enable/disable hybrid search (default: enabled)
 ENABLE_HYBRID_SEARCH = os.getenv("ENABLE_HYBRID_SEARCH", "true").lower() == "true"
 
-# Environment flag to enable/disable ParentDocumentRetriever (default: disabled for gradual rollout)
-ENABLE_PARENT_RETRIEVER = os.getenv("ENABLE_PARENT_RETRIEVER", "false").lower() == "true"
+# Environment flag to enable/disable ParentDocumentRetriever (default: enabled for production RAG)
+ENABLE_PARENT_RETRIEVER = os.getenv("ENABLE_PARENT_RETRIEVER", "true").lower() == "true"
 
 
 def _get_chroma_manager():
@@ -75,47 +81,429 @@ def _get_parent_retriever():
 
 def _semantic_rerank(query: str, results: List[Dict], top_n: int) -> List[Dict]:
     """
-    Re-rank results based on semantic relevance to query.
-    Boosts results that contain query keywords for better accuracy.
-    
-    Args:
-        query: The user's search query
-        results: List of ChromaDB results with text and similarity
-        top_n: Number of results to return after re-ranking
-        
-    Returns:
-        Re-ranked list of results
+    Rerank results using Deep Semantic Model (Cross-Encoder).
+    Replaces legacy keyword boosting.
     """
     if not results:
         return results
     
-    query_lower = query.lower()
-    query_words = [w for w in query_lower.split() if len(w) > 3]  # Skip short words
+    # Use DeepReranker
+    reranker = get_reranker()
+    result = reranker.rerank(query, results, top_n=top_n, threshold=RELEVANCE_THRESHOLD)
     
-    scored_results = []
-    for result in results:
-        text = (result.get("text", "") or "").lower()
-        base_score = result.get("similarity", 0)
+    logger.debug(f"[DeepRerank] {result.decision_reason}")
+    return result.sorted_docs
+
+
+# =============================================================================
+# POOL-AND-RERANK SEARCH (Accuracy-First Architecture)
+# =============================================================================
+# Run all search strategies in parallel, wait for all, pool results, rerank.
+# 
+# ARCHITECTURE:
+# 1. Run all retrievers in parallel (Parent, Hybrid, Chroma)
+# 2. Wait for completed results (collect stragglers, don't block on slow ones)
+# 3. Pool results: collect top K from each = 12 candidates
+# 4. Normalize scores across retrievers (different scales)
+# 5. Rerank using keyword boosting + hybrid preference
+# 6. Filter by adaptive relevance threshold
+# 7. Check evidence sufficiency
+# 8. Return best top_n with confidence flag
+#
+# Hard relevance threshold for Deep Reranker (Cross-Encoder)
+# 0.0 is neutral. Positive is likely relevant. 1.0 is match.
+# MiniLM-L-6-v2 is trained on MS MARCO. 0.0 is a reasonable baseline filter.
+# Production Tuning: 0.25 for balanced precision/recall.
+RELEVANCE_THRESHOLD = 0.25
+
+# Minimum chunks needed for "sufficient evidence"
+MIN_EVIDENCE_CHUNKS = 2
+
+# Timeout settings
+POOL_TIMEOUT_SECONDS = 2.0  # Max wait for all retrievers
+STRAGGLER_GRACE_MS = 200    # Extra time to collect late arrivals
+
+
+def _get_adaptive_threshold(query: str) -> float:
+    """
+    Compute adaptive relevance threshold based on query characteristics.
+    
+    Rationale:
+    - Short queries (< 5 words) often have lower similarity scores
+    - Very specific queries (with numbers, codes) need exact matches
+    - Broad exploratory queries can accept looser thresholds
+    
+    Returns:
+        Adaptive threshold in [0.15, 0.35] range
+    """
+    if not query:
+        return BASE_RELEVANCE_THRESHOLD
+    
+    query_words = len(query.split())
+    query_length = len(query)
+    
+    threshold = BASE_RELEVANCE_THRESHOLD
+    
+    # Short queries: lower threshold (they inherently score lower)
+    if query_words <= 3:
+        threshold -= 0.08
+    elif query_words <= 5:
+        threshold -= 0.04
+    
+    # Very long queries: raise threshold (more context = better matches expected)
+    if query_words >= 15:
+        threshold += 0.05
+    
+    # Queries with special markers (codes, numbers) need precision
+    has_code_like = any(c.isdigit() for c in query) or any(c in query for c in ['_', '-', '.'])
+    if has_code_like:
+        threshold += 0.03
+    
+    # Clamp to safe range
+    return max(0.15, min(0.35, threshold))
+
+
+def _normalize_scores(results: List[Dict], source_name: str) -> List[Dict]:
+    """
+    Normalize similarity scores to 0-1 range for cross-retriever comparison.
+    
+    Different retrievers use different scoring scales:
+    - ChromaDB: cosine distance (lower = more similar)
+    - Hybrid: RRF scores (0-1 range typically)
+    - Parent: cosine similarity (higher = more similar)
+    """
+    if not results:
+        return results
+    
+    # Get all scores
+    scores = [r.get("similarity", 0) for r in results]
+    if not scores:
+        return results
+    
+    min_score = min(scores)
+    max_score = max(scores)
+    score_range = max_score - min_score
+    
+    normalized = []
+    for r in results:
+        r_copy = r.copy()
+        raw_score = r.get("similarity", 0)
         
-        # Boost for exact query term presence
-        keyword_matches = sum(1 for word in query_words if word in text)
-        keyword_boost = keyword_matches * 0.05
-        
-        # Boost for "services" related content when query is about services
-        service_keywords = ["services", "development", "consulting", "software", "ai", "cloud"]
-        if any(sk in query_lower for sk in ["service", "offer", "list", "explore", "capabilities"]):
-            service_boost = sum(0.02 for sk in service_keywords if sk in text)
+        # Normalize to 0-1 range
+        if score_range > 0:
+            norm_score = (raw_score - min_score) / score_range
         else:
-            service_boost = 0
+            norm_score = 1.0 if raw_score > 0 else 0.0
         
-        final_score = base_score + keyword_boost + service_boost
-        scored_results.append((final_score, result))
+        r_copy["normalized_score"] = norm_score
+        r_copy["raw_score"] = raw_score
+        r_copy["retriever_source"] = source_name
+        normalized.append(r_copy)
     
-    # Sort by adjusted score (highest first)
-    scored_results.sort(key=lambda x: x[0], reverse=True)
+    return normalized
+
+
+def _cross_retriever_rerank(
+    query: str, 
+    pooled_results: List[Dict], 
+    top_n: int
+) -> List[Dict]:
+    """
+    Rerank pooled results from multiple retrievers.
     
-    logger.debug(f"[ReRank] Re-ranked {len(results)} results, returning top {top_n}")
-    return [r for _, r in scored_results[:top_n]]
+    Scoring:
+    1. Normalized similarity score (from each retriever)
+    2. Keyword match boost (exact query terms in text)
+    3. Hybrid source bonus (most accurate retriever)
+    """
+    if not pooled_results:
+        return []
+    
+    query_lower = query.lower()
+    query_words = [w for w in query_lower.split() if len(w) > 2]
+    
+    scored = []
+    for r in pooled_results:
+        text = (r.get("text", "") or "").lower()
+        
+        # Base: normalized similarity (0-1)
+        base_score = r.get("normalized_score", r.get("similarity", 0))
+        
+        # Boost 1: Query keyword matches (up to +0.15)
+        keyword_matches = sum(1 for word in query_words if word in text)
+        keyword_boost = min(keyword_matches * 0.03, 0.15)
+        
+        # Boost 2: Hybrid results get slight preference (most accurate retriever)
+        source = r.get("retriever_source", r.get("source", ""))
+        hybrid_bonus = 0.05 if source == "hybrid" else 0
+        
+        # Final score
+        final_score = base_score + keyword_boost + hybrid_bonus
+        
+        r_copy = r.copy()
+        r_copy["rerank_score"] = final_score
+        scored.append(r_copy)
+    
+    # Sort by rerank score (highest first)
+    scored.sort(key=lambda x: x.get("rerank_score", 0), reverse=True)
+    
+    # Deduplicate by text content (keep highest scored version)
+    seen_texts = set()
+    deduped = []
+    for r in scored:
+        text_key = (r.get("text", "") or "")[:200]  # First 200 chars as key
+        if text_key and text_key not in seen_texts:
+            seen_texts.add(text_key)
+            deduped.append(r)
+    
+    return deduped[:top_n]
+
+
+def _parallel_kb_search(
+    search_query: str,
+    top_n: int,
+    enable_parent: bool,
+    enable_hybrid: bool,
+) -> List[Dict]:
+    """
+    Pool-and-rerank search across multiple retrievers.
+    
+    Architecture (Accuracy-First):
+    1. Run ALL retrievers in parallel
+    2. Wait for ALL to complete (2s timeout per retriever)
+    3. Pool results (collect top K from each)
+    4. Normalize scores across retrievers
+    5. Rerank by relevance
+    6. Filter by threshold
+    7. Return best top_n
+    
+    Args:
+        search_query: Derived search query
+        top_n: Final number of results to return (after reranking)
+        enable_parent: Whether ParentRetriever is enabled
+        enable_hybrid: Whether HybridSearch is enabled
+        
+    Returns:
+        List of reranked, filtered result dicts
+    """
+    start_time = time.perf_counter()
+    futures = {}
+    
+    # Collect more candidates from each retriever for pooling
+    candidates_per_retriever = max(top_n, 4)
+    
+    # Define search functions that return (results, source_name)
+    def parent_search():
+        method_start = time.perf_counter()
+        retriever = _get_parent_retriever()
+        if not retriever:
+            logger.debug(f"[PoolSearch] parent: no retriever ({time.perf_counter() - method_start:.3f}s)")
+            return [], "parent"
+        try:
+            results = retriever.retrieve(search_query, k=candidates_per_retriever)
+            formatted = [{
+                "text": r.get("content", ""),
+                "metadata": r.get("metadata", {}),
+                "similarity": r.get("similarity", 0),
+                "source": "parent",
+            } for r in results]
+            logger.info(f"[PoolSearch] parent: {len(formatted)} results ({time.perf_counter() - method_start:.3f}s)")
+            return formatted, "parent"
+        except Exception as e:
+            logger.debug(f"ParentRetriever search error: {e} ({time.perf_counter() - method_start:.3f}s)")
+            return [], "parent"
+    
+    def hybrid_search():
+        method_start = time.perf_counter()
+        manager = _get_hybrid_search_manager()
+        if not manager:
+            logger.debug(f"[PoolSearch] hybrid: no manager ({time.perf_counter() - method_start:.3f}s)")
+            return [], "hybrid"
+        try:
+            results = manager.hybrid_search(
+                search_query,
+                top_n=candidates_per_retriever,
+                alpha=0.5,
+                semantic_top_n=candidates_per_retriever * 2,
+                bm25_top_n=candidates_per_retriever * 2,
+            )
+            formatted = [{
+                "text": r.get("text", ""),
+                "metadata": r.get("metadata", {}),
+                "similarity": r.get("similarity", 0),
+                "source": "hybrid",
+            } for r in results]
+            logger.info(f"[PoolSearch] hybrid: {len(formatted)} results ({time.perf_counter() - method_start:.3f}s)")
+            return formatted, "hybrid"
+        except Exception as e:
+            logger.debug(f"HybridSearch error: {e} ({time.perf_counter() - method_start:.3f}s)")
+            return [], "hybrid"
+    
+    def chroma_search():
+        method_start = time.perf_counter()
+        chroma = _get_chroma_manager()
+        if not chroma:
+            logger.debug(f"[PoolSearch] chroma: no manager ({time.perf_counter() - method_start:.3f}s)")
+            return [], "chroma"
+        try:
+            results = chroma.similarity_search(search_query, n_results=candidates_per_retriever)
+            formatted = [{
+                "text": r.get("text", ""),
+                "metadata": r.get("metadata", {}),
+                "similarity": r.get("similarity", 0),
+                "source": "chroma",
+            } for r in results]
+            logger.info(f"[PoolSearch] chroma: {len(formatted)} results ({time.perf_counter() - method_start:.3f}s)")
+            return formatted, "chroma"
+        except Exception as e:
+            logger.debug(f"ChromaDB search error: {e} ({time.perf_counter() - method_start:.3f}s)")
+            return [], "chroma"
+    
+    # Submit ALL enabled search methods
+    if enable_parent:
+        futures[_SEARCH_EXECUTOR.submit(parent_search)] = "parent"
+    
+    if enable_hybrid:
+        futures[_SEARCH_EXECUTOR.submit(hybrid_search)] = "hybrid"
+    
+    # ChromaDB is always included
+    futures[_SEARCH_EXECUTOR.submit(chroma_search)] = "chroma"
+    
+    if not futures:
+        return []
+    
+    # ==========================================================================
+    # STRAGGLER-TOLERANT WAIT STRATEGY
+    # ==========================================================================
+    # Don't block on slow retrievers. Collect what's done, give stragglers
+    # a brief grace period, then proceed with available results.
+    # Accuracy requires sufficiency, not unanimity.
+    # ==========================================================================
+    pooled_results = []
+    source_counts = {}
+    
+    try:
+        # Phase 1: Wait for first results to complete
+        remaining = set(futures.keys())
+        deadline = time.perf_counter() + POOL_TIMEOUT_SECONDS
+        
+        while remaining and time.perf_counter() < deadline:
+            # Wait with short timeout to allow collecting as results complete
+            wait_time = min(0.5, deadline - time.perf_counter())
+            if wait_time <= 0:
+                break
+                
+            done, remaining = wait(remaining, timeout=wait_time, return_when=FIRST_COMPLETED)
+            
+            # Collect completed results immediately
+            for future in done:
+                try:
+                    results, source = future.result(timeout=0.1)
+                    if results:
+                        normalized = _normalize_scores(results, source)
+                        pooled_results.extend(normalized)
+                        source_counts[source] = len(results)
+                except Exception as e:
+                    logger.debug(f"Future result error: {e}")
+            
+            # If we have enough evidence, don't wait for stragglers
+            if len(source_counts) >= 2 and len(pooled_results) >= MIN_EVIDENCE_CHUNKS * 2:
+                # Give stragglers brief grace period
+                if remaining:
+                    grace_done, still_pending = wait(
+                        remaining, 
+                        timeout=STRAGGLER_GRACE_MS / 1000, 
+                        return_when=FIRST_COMPLETED
+                    )
+                    for future in grace_done:
+                        try:
+                            results, source = future.result(timeout=0.1)
+                            if results:
+                                normalized = _normalize_scores(results, source)
+                                pooled_results.extend(normalized)
+                                source_counts[source] = len(results)
+                        except Exception:
+                            pass
+                    # Cancel remaining stragglers
+                    for f in still_pending:
+                        f.cancel()
+                break
+        
+        # Cancel any still-pending futures
+        for f in remaining:
+            f.cancel()
+            
+        if remaining:
+            timed_out = [futures[f] for f in remaining if f in futures]
+            if timed_out:
+                logger.debug(f"[PoolSearch] Proceeding without stragglers: {timed_out}")
+    
+    except Exception as e:
+        logger.warning(f"[PoolSearch] Exception during wait: {e}")
+    
+    pool_time = time.perf_counter() - start_time
+    
+    if not pooled_results:
+        logger.warning(f"[PoolSearch] All retrievers returned empty in {pool_time:.3f}s")
+        return []
+    
+    # ==========================================================================
+    # DEEP RERANK + DUAL GATE (Score + Sufficiency)
+    # ==========================================================================
+    reranker = get_reranker()
+    # Pool size: top_n * 3 to give reranker enough candidates
+    rerank_result = reranker.rerank(
+        search_query, 
+        pooled_results, 
+        top_n=top_n, 
+        threshold=RELEVANCE_THRESHOLD
+    )
+    
+    # LOG TRACE (Observability)
+    logger.info(
+        f"[SearchTracer] {rerank_result.decision_reason}. "
+        f"Latency: {rerank_result.latency_ms:.1f}ms. "
+        f"DropStats: {rerank_result.drop_stats}"
+    )
+    
+    final_results = rerank_result.sorted_docs
+
+    # ==========================================================================
+    # DUAL GATE: HARD ABORT
+    # ==========================================================================
+    # Gate 1: Score (Handled by Reranker threshold)
+    # Gate 2: Sufficiency (Count >= MIN_EVIDENCE_CHUNKS)
+    
+    unique_docs = len(final_results)  # Count of ALL docs passing threshold
+    top_score = rerank_result.scores[0] if unique_docs > 0 else 0.0
+    # User Request: Accuracy must be 90%+. 60% is too lax for single-source truth.
+    HIGH_CONFIDENCE_THRESHOLD = 0.90
+    
+    passes_gate = False
+    gate_reason = ""
+    
+    if unique_docs >= MIN_EVIDENCE_CHUNKS:
+        passes_gate = True
+        gate_reason = f"Standard Pass ({unique_docs} >= {MIN_EVIDENCE_CHUNKS})"
+    elif unique_docs == 1 and top_score >= HIGH_CONFIDENCE_THRESHOLD:
+        passes_gate = True
+        gate_reason = f"High Confidence Exception (1 doc, score {top_score:.2f} >= {HIGH_CONFIDENCE_THRESHOLD})"
+    else:
+        passes_gate = False
+        gate_reason = f"Insufficient Evidence (Count {unique_docs} < {MIN_EVIDENCE_CHUNKS}, TopScore {top_score:.2f} < {HIGH_CONFIDENCE_THRESHOLD})"
+        
+    if not passes_gate:
+        logger.warning(
+            f"[DualGate] HARD ABORT. {gate_reason}. "
+            f"Returning EMPTY context to force refusal."
+        )
+        return []
+
+    # Tag results with confidence metadata
+    for r in final_results:
+        r["_threshold_used"] = RELEVANCE_THRESHOLD
+        
+    return final_results
 
 
 def _safe_json_set(client, key, path, value):
@@ -409,77 +797,22 @@ def get_redis_context_chunks(
     # Derive search query from chat history and user query
     search_query = derive_search_query(chat_history, query, domain_prefix, fallback_keywords)
 
-    # Perform knowledge base search
-    # Priority: ParentDocumentRetriever > Hybrid Search > ChromaDB-only
-    kb_results = []
+    # Perform knowledge base search using parallel execution
+    # All enabled strategies run concurrently; first non-empty result wins
+    kb_results = _parallel_kb_search(
+        search_query=search_query,
+        top_n=top_n,
+        enable_parent=ENABLE_PARENT_RETRIEVER,
+        enable_hybrid=ENABLE_HYBRID_SEARCH,
+    )
     
-    # Try ParentDocumentRetriever first (returns larger context chunks)
-    if ENABLE_PARENT_RETRIEVER:
-        parent_retriever = _get_parent_retriever()
-        if parent_retriever:
-            try:
-                parent_results = parent_retriever.retrieve(search_query, k=top_n)
-                for result in parent_results:
-                    kb_results.append({
-                        "text": result.get("content", ""),
-                        "metadata": result.get("metadata", {}),
-                        "similarity": result.get("similarity", 0),
-                        "source": result.get("source", "parent"),
-                    })
-                logger.info(f"[ParentRetriever] Returned {len(kb_results)} parent context results")
-            except Exception as e:
-                logger.warning(f"ParentDocumentRetriever failed, falling back: {e}")
-                kb_results = []
-    
-    # Fallback: Try hybrid search if ParentRetriever disabled or failed
-    if not kb_results and ENABLE_HYBRID_SEARCH:
-        # Try hybrid search first (combines semantic and BM25 keyword matching)
-        hybrid_manager = _get_hybrid_search_manager()
-        if hybrid_manager:
-            try:
-                # Use hybrid search with balanced alpha (0.5 = equal weight semantic + BM25)
-                # Retrieve more candidates for better fusion, then take top_n
-                hybrid_results = hybrid_manager.hybrid_search(
-                    search_query,
-                    top_n=top_n,
-                    alpha=0.5,
-                    semantic_top_n=top_n * 2,
-                    bm25_top_n=top_n * 2,
-                )
-                # Convert to common format
-                for result in hybrid_results:
-                    kb_results.append({
-                        "text": result.get("text", ""),
-                        "metadata": result.get("metadata", {}),
-                        "similarity": result.get("similarity", 0),
-                    })
-                logger.info(f"[HybridSearch] Returned {len(kb_results)} results for query")
-            except Exception as e:
-                logger.warning(f"Hybrid search failed, falling back to ChromaDB-only: {e}")
-                kb_results = []
-    
-    # Fallback to ChromaDB-only if hybrid search disabled or failed
-    if not kb_results:
-        chroma = _get_chroma_manager()
-        if chroma:
-            try:
-                # Use ChromaDB for knowledge base search
-                chroma_results = chroma.similarity_search(search_query, n_results=top_n)
-                # Convert ChromaDB results to common format
-                for result in chroma_results:
-                    kb_results.append({
-                        "text": result.get("text", ""),
-                        "metadata": result.get("metadata", {}),
-                        "similarity": result.get("similarity", 0),
-                    })
-                logger.debug(f"ChromaDB returned {len(kb_results)} results for query")
-                
-                # Apply semantic re-ranking for better accuracy
-                if kb_results:
-                    kb_results = _semantic_rerank(query, kb_results, top_n)
-                    logger.debug(f"After re-ranking: {len(kb_results)} results")
-            except Exception as e:
-                logger.warning(f"ChromaDB similarity search failed: {e}")
+    # Apply semantic re-ranking for better accuracy (if results came from ChromaDB-only)
+    # ParentRetriever and Hybrid already have their own ranking
+    if kb_results and len(kb_results) > 0:
+        source = kb_results[0].get("source", "unknown")
+        if source == "chroma":
+            kb_results = _semantic_rerank(query, kb_results, top_n)
+            logger.debug(f"After re-ranking ChromaDB results: {len(kb_results)} results")
 
     # Chat history context is now handled by LangChain ConversationBufferMemory
     # No need for separate Redis chat_history semantic search
@@ -523,6 +856,37 @@ def get_redis_context_chunks(
         seen.add(key)
 
     return merged[:top_n]
+
+
+def get_production_context(
+    session_id: str,
+    query: str,
+    top_n: int = 4,
+) -> List[Dict]:
+    """
+    Production-Grade Context Retrieval.
+    
+    Pipeline:
+    1. Derive specific search query from history.
+    2. Parallel Retrieve (Hybrid + Chroma + Parent).
+    3. Deep Rerank (Cross-Encoder).
+    4. Dual Gate (Score + Support).
+    5. Return structured results (for Validator/Wrapper).
+    """
+    chat_history = get_chat_history(session_id)
+    
+    # Derive search query
+    search_query = derive_search_query(chat_history, query, "", "capabilities")
+    
+    # Run the Production Pipeline (Parallel -> Rerank -> DualGate)
+    results = _parallel_kb_search(
+        search_query=search_query,
+        top_n=top_n,
+        enable_parent=ENABLE_PARENT_RETRIEVER,
+        enable_hybrid=ENABLE_HYBRID_SEARCH,
+    )
+    
+    return results
 
 
 def derive_search_query(chat_history, query, domain_prefix: str, fallback_keywords: str):
